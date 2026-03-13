@@ -648,7 +648,7 @@ def main():
     log.info("=== MLB ETL started ===")
     engine = get_engine()
     current_season     = date.today().year
-    historical_seasons = [2023, 2024, current_season]
+    historical_seasons = [2023, 2024, 2025, current_season]
 
     # Step 0: Clear all MLB tables in reverse dependency order before loading anything.
     # This prevents FK violations when truncating parent tables that child tables reference.
