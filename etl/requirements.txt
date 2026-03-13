@@ -3,6 +3,6 @@ nfl-data-py
 sqlalchemy
 pyodbc
 pandas
+pyarrow
 requests
 mlb-statsapi
-nba_api
