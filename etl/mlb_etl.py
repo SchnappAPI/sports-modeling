@@ -22,7 +22,7 @@ Credentials are injected as environment variables from GitHub Secrets.
 import os
 import time
 import logging
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import statsapi
@@ -140,6 +140,25 @@ def parse_innings_pitched(ip_str):
         return None
 
 
+def validate_dataframe(df, required_cols, context):
+    """
+    Return True if df is non-empty and contains all required columns.
+    Logs a descriptive warning and returns False otherwise.
+    Called before any dropna or load operation.
+    """
+    if df.empty:
+        log.warning("No data returned for %s, skipping load.", context)
+        return False
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        log.warning(
+            "Unexpected API response for %s: missing columns %s, skipping load.",
+            context, missing
+        )
+        return False
+    return True
+
+
 def upsert(engine, df, schema, table, key_cols):
     """
     Upsert rows from df into schema.table.
@@ -247,10 +266,15 @@ def load_teams(engine, season):
             "full_name":         t.get("name", ""),
             "venue_id":          t.get("venue", {}).get("id"),
         })
-    df = pd.DataFrame(rows).drop_duplicates(subset=["team_id"])
+
+    df = pd.DataFrame(rows)
+    if not validate_dataframe(df, ["team_id"], "teams"):
+        log.warning("Teams load skipped. ETL cannot continue without team reference data.")
+        raise RuntimeError("Teams API returned no usable data.")
+
+    df = df.drop_duplicates(subset=["team_id"])
     truncate_and_load(engine, df, "mlb", "teams")
 
-    # Return a lookup dict {team_id: abbreviation} used when building game_display
     return {row["team_id"]: row["team_abbreviation"] for row in rows}
 
 # ---------------------------------------------------------------------------
@@ -276,7 +300,12 @@ def load_players(engine, seasons):
                 "bat_side":    p.get("batSide", {}).get("code"),
                 "pitch_hand":  p.get("pitchHand", {}).get("code"),
             })
+
     df = pd.DataFrame(rows)
+    if not validate_dataframe(df, ["player_id"], "players"):
+        log.warning("Players load skipped. ETL cannot continue without player reference data.")
+        raise RuntimeError("Players API returned no usable data.")
+
     truncate_and_load(engine, df, "mlb", "players")
 
 # ---------------------------------------------------------------------------
@@ -440,7 +469,7 @@ def load_games_and_box_scores(engine, seasons, team_abbr):
     for season in seasons:
         games     = fetch_schedule_months(season)
         new_games = [g for g in games if g["game_id"] not in existing_game_pks]
-        
+
         # Deduplicate: API can return the same game_pk in multiple month chunks
         seen_ids  = set()
         deduped   = []
@@ -449,7 +478,7 @@ def load_games_and_box_scores(engine, seasons, team_abbr):
                 seen_ids.add(g["game_id"])
                 deduped.append(g)
         new_games = deduped
-        
+
         log.info(
             "New games to process for %d: %d of %d total",
             season, len(new_games), len(games)
@@ -495,6 +524,11 @@ def load_games_and_box_scores(engine, seasons, team_abbr):
 # ---------------------------------------------------------------------------
 
 def load_player_season_batting(engine, season):
+    current_year = datetime.utcnow().year
+    if season > current_year:
+        log.info("Season %d has not started yet, skipping player season batting snapshot.", season)
+        return
+
     log.info("Loading player season batting snapshot for %d", season)
     data = api_get("stats", {
         "stats":      "season",
@@ -553,7 +587,11 @@ def load_player_season_batting(engine, season):
             "catchers_interference":   safe_int(s.get("catchersInterference")),
         })
 
-    df = pd.DataFrame(rows).dropna(subset=["player_id"])
+    df = pd.DataFrame(rows)
+    if not validate_dataframe(df, ["player_id"], f"player_season_batting season={season}"):
+        return
+
+    df = df.dropna(subset=["player_id"])
     truncate_and_load(engine, df, "mlb", "player_season_batting")
 
 # ---------------------------------------------------------------------------
@@ -561,6 +599,11 @@ def load_player_season_batting(engine, season):
 # ---------------------------------------------------------------------------
 
 def load_pitcher_season_stats(engine, season):
+    current_year = datetime.utcnow().year
+    if season > current_year:
+        log.info("Season %d has not started yet, skipping pitcher season stats snapshot.", season)
+        return
+
     log.info("Loading pitcher season stats snapshot for %d", season)
     data = api_get("stats", {
         "stats":      "season",
@@ -647,7 +690,11 @@ def load_pitcher_season_stats(engine, season):
             "sac_flies":                  safe_int(s.get("sacFlies")),
         })
 
-    df = pd.DataFrame(rows).dropna(subset=["player_id"])
+    df = pd.DataFrame(rows)
+    if not validate_dataframe(df, ["player_id"], f"pitcher_season_stats season={season}"):
+        return
+
+    df = df.dropna(subset=["player_id"])
     truncate_and_load(engine, df, "mlb", "pitcher_season_stats")
 
 # ---------------------------------------------------------------------------
@@ -671,7 +718,7 @@ def main():
     # Steps 3, 4, 5: games and box scores in one pass
     load_games_and_box_scores(engine, historical_seasons, team_abbr)
 
-    # Steps 6 and 7: season snapshots for current season
+    # Steps 6 and 7: season snapshots for current season only
     load_player_season_batting(engine, season=current_season)
     load_pitcher_season_stats(engine, season=current_season)
 
