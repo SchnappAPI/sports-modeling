@@ -440,6 +440,16 @@ def load_games_and_box_scores(engine, seasons, team_abbr):
     for season in seasons:
         games     = fetch_schedule_months(season)
         new_games = [g for g in games if g["game_id"] not in existing_game_pks]
+        
+        # Deduplicate: API can return the same game_pk in multiple month chunks
+        seen_ids  = set()
+        deduped   = []
+        for g in new_games:
+            if g["game_id"] not in seen_ids:
+                seen_ids.add(g["game_id"])
+                deduped.append(g)
+        new_games = deduped
+        
         log.info(
             "New games to process for %d: %d of %d total",
             season, len(new_games), len(games)
