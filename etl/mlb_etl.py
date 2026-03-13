@@ -122,8 +122,7 @@ def upsert(engine, df, schema, table, key_cols):
         schema="dbo",
         if_exists="replace",
         index=False,
-        method="multi",
-        chunksize=100,
+        chunksize=200,
     )
 
     non_key_cols = [c for c in df.columns if c not in key_cols and c != "created_at"]
