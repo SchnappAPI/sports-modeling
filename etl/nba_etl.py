@@ -12,28 +12,38 @@ import os
 import time
 from datetime import date, timedelta
 
+# ---------------------------------------------------------------------------
+# Proxy configuration
+# Must happen before nba_api is imported so the patched Session is used
+# for every request the library makes.
+# Routes traffic through a residential proxy to bypass NBA.com's block
+# on cloud provider IP ranges (GitHub Actions runs on Azure).
+# Set NBA_PROXY_URL in GitHub Actions secrets.
+# Format: http://username:password@host:port
+# ---------------------------------------------------------------------------
+import requests
+
+_proxy_url = os.environ.get("NBA_PROXY_URL")
+if _proxy_url:
+    _original_session_init = requests.Session.__init__
+
+    def _patched_session_init(self, *args, **kwargs):
+        _original_session_init(self, *args, **kwargs)
+        self.proxies = {"http": _proxy_url, "https": _proxy_url}
+
+    requests.Session.__init__ = _patched_session_init
+    print(f"Proxy active via {_proxy_url.split('@')[-1]}", flush=True)
+else:
+    print(
+        "WARNING: NBA_PROXY_URL not set. Requests will use the runner IP "
+        "and will likely be blocked by stats.nba.com.",
+        flush=True,
+    )
+
 import pandas as pd
 from sqlalchemy import create_engine, text
 
 from nba_api.stats.endpoints import boxscoretraditionalv3, leaguegamefinder
-from nba_api.stats.library import http as nba_http
-
-# ---------------------------------------------------------------------------
-# Proxy configuration
-# Routes all nba_api requests through a residential proxy to bypass
-# NBA.com's block on cloud provider IP ranges (GitHub Actions uses Azure IPs).
-# Set NBA_PROXY_URL in GitHub Actions secrets.
-# Format: http://username:password@host:port
-# ---------------------------------------------------------------------------
-_proxy_url = os.environ.get("NBA_PROXY_URL")
-if _proxy_url:
-    nba_http.PROXY = _proxy_url
-    logging.getLogger(__name__).info("Proxy configured: %s", _proxy_url.split("@")[-1])
-else:
-    logging.getLogger(__name__).warning(
-        "NBA_PROXY_URL not set. Requests will use the runner's IP directly "
-        "and may be blocked by stats.nba.com."
-    )
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -53,17 +63,12 @@ SEASON_TYPE = "Regular Season"
 LEAGUE_ID = "00"
 QUARTERS = [1, 2, 3, 4]
 
-# nba_api built-in rate limiting: pause between every API call to avoid 429s
-# The library has its own delay but we add an explicit one for safety
 CALL_DELAY_SECONDS = 1.0
-
-# How many times to retry a failed API call before skipping
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 10
 
 # ---------------------------------------------------------------------------
 # Column map: nba_api camelCase field -> SQL column name
-# Only the fields we want to keep. Others are dropped.
 # ---------------------------------------------------------------------------
 PLAYER_COLUMN_MAP = {
     "gameId":                   "game_id",
@@ -102,10 +107,10 @@ PLAYER_COLUMN_MAP = {
 # Database connection
 # ---------------------------------------------------------------------------
 def get_engine():
-    server = os.environ["DB_SERVER"]
-    database = os.environ["DB_NAME"]
-    username = os.environ["DB_USERNAME"]
-    password = os.environ["DB_PASSWORD"]
+    server   = os.environ["AZURE_SQL_SERVER"]
+    database = os.environ["AZURE_SQL_DATABASE"]
+    username = os.environ["AZURE_SQL_USERNAME"]
+    password = os.environ["AZURE_SQL_PASSWORD"]
     conn_str = (
         f"mssql+pyodbc://{username}:{password}@{server}/{database}"
         "?driver=ODBC+Driver+18+for+SQL+Server"
@@ -128,16 +133,11 @@ def fetch_with_retry(fn, *args, **kwargs):
             log.warning("Attempt %d failed: %s", attempt, exc)
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_DELAY_SECONDS)
-    log.error("All %d attempts failed for %s %s", MAX_RETRIES, fn.__name__, kwargs)
+    log.error("All %d attempts failed for %s", MAX_RETRIES, fn.__name__)
     return None
 
 
 def get_game_ids_for_date(game_date: date) -> list[str]:
-    """
-    Return unique game IDs for all games played on game_date.
-    Uses LeagueGameFinder filtered by date range equal to the single date.
-    Returns an empty list if no games were found or the call failed.
-    """
     date_str = game_date.strftime("%m/%d/%Y")
     log.info("Fetching game IDs for %s", date_str)
 
@@ -156,18 +156,12 @@ def get_game_ids_for_date(game_date: date) -> list[str]:
         log.warning("No games found for %s", date_str)
         return []
 
-    # GAME_ID appears twice per game (one row per team). Deduplicate.
     ids = df["GAME_ID"].unique().tolist()
     log.info("Found %d game(s) on %s: %s", len(ids), date_str, ids)
     return ids
 
 
 def fetch_quarter_box_score(game_id: str, quarter: int) -> pd.DataFrame | None:
-    """
-    Fetch player box score for a single quarter of a single game.
-    Returns a DataFrame with renamed columns plus a 'quarter' column,
-    or None if the call failed.
-    """
     log.info("  Q%d  game %s", quarter, game_id)
 
     def _call():
@@ -180,20 +174,18 @@ def fetch_quarter_box_score(game_id: str, quarter: int) -> pd.DataFrame | None:
             end_range=0,
             timeout=30,
         )
-        # get_data_frames()[0] is PlayerStats after nba_api >= 1.10.1
         return box.get_data_frames()[0]
 
     df = fetch_with_retry(_call)
     if df is None or df.empty:
         return None
 
-    # Keep only the columns we want and rename them
     cols_present = [c for c in PLAYER_COLUMN_MAP if c in df.columns]
     df = df[cols_present].rename(columns=PLAYER_COLUMN_MAP)
     df["quarter"] = f"Q{quarter}"
 
-    # Drop rows where the player did not play (null minutes / comment = 'DNP')
-    df = df[df["comment"].str.upper().str.startswith("DNP") == False].copy()  # noqa: E712
+    # Drop DNP rows
+    df = df[~df["comment"].str.upper().str.startswith("DNP")].copy()
 
     return df
 
@@ -269,7 +261,6 @@ WHEN NOT MATCHED THEN INSERT (
 
 
 def upsert_rows(engine, df: pd.DataFrame) -> int:
-    """Upsert all rows in df. Returns number of rows processed."""
     records = df.where(pd.notnull(df), None).to_dict(orient="records")
     with engine.begin() as conn:
         for row in records:
