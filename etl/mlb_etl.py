@@ -56,6 +56,43 @@ def get_engine():
     return create_engine(conn_str)
 
 # ---------------------------------------------------------------------------
+# Teardown: clear all MLB tables in reverse dependency order.
+#
+# This runs once at the start of main() before any loading begins.
+# Deleting in reverse FK order means child rows are removed before the
+# parent rows they reference, so SQL Server never raises a constraint
+# violation. TRUNCATE cannot be used here because SQL Server blocks it
+# on any table that is the target of a foreign key constraint, even when
+# the referencing table is already empty. DELETE has no such restriction.
+#
+# If new tables are added to the schema, insert them in this list at the
+# correct reverse-dependency position before their parent tables.
+# ---------------------------------------------------------------------------
+
+TEARDOWN_ORDER = [
+    # Deepest dependents first
+    ("mlb", "pitcher_season_stats"),   # depends on players, teams
+    ("mlb", "player_season_batting"),  # depends on players, teams
+    ("mlb", "pitching_stats"),         # depends on games, players, teams
+    ("mlb", "batting_stats"),          # depends on games, players, teams
+    ("mlb", "games"),                  # depends on teams (home/away FKs)
+    ("mlb", "players"),                # depends on teams
+    ("mlb", "teams"),                  # no dependencies - must be last
+]
+
+def teardown_mlb_tables(engine):
+    """
+    Delete all rows from every MLB table in safe reverse dependency order.
+    Called once at the top of main() before any loading begins.
+    """
+    log.info("Teardown: clearing MLB tables in reverse dependency order")
+    with engine.begin() as conn:
+        for schema, table in TEARDOWN_ORDER:
+            conn.execute(text(f"DELETE FROM [{schema}].[{table}]"))
+            log.info("  Cleared [%s].[%s]", schema, table)
+    log.info("Teardown complete")
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -604,8 +641,12 @@ def load_pitcher_season_stats(engine, season):
 def main():
     log.info("=== MLB ETL started ===")
     engine = get_engine()
-    current_season    = date.today().year
+    current_season     = date.today().year
     historical_seasons = [2023, 2024, current_season]
+
+    # Step 0: Clear all MLB tables in reverse dependency order before loading anything.
+    # This prevents FK violations when truncating parent tables that child tables reference.
+    teardown_mlb_tables(engine)
 
     # Steps 1 and 2: reference tables
     team_abbr = load_teams(engine, season=current_season)
