@@ -150,12 +150,12 @@ def upsert(engine, df, schema, table, key_cols):
 
 
 def truncate_and_load(engine, df, schema, table):
-    """Truncate a table and reload it entirely. Used for reference and snapshot tables."""
+    """Reload a table entirely. Used for reference and snapshot tables."""
     if df.empty:
         log.warning("Truncate/load skipped: empty dataframe for %s.%s", schema, table)
         return
     with engine.begin() as conn:
-        conn.execute(text(f"TRUNCATE TABLE [{schema}].[{table}]"))
+        conn.execute(text(f"DELETE FROM [{schema}].[{table}]"))
     df.to_sql(table, engine, schema=schema, if_exists="append", index=False, method="multi")
     log.info("Loaded %d rows into %s.%s", len(df), schema, table)
 
