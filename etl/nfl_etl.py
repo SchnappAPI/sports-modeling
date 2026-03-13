@@ -302,7 +302,12 @@ def load_ftn_charting(engine, season: int) -> None:
     df = df.rename(columns={"nflverse_game_id": "game_id"})
 
     if "date_pulled" in df.columns:
-        df["date_pulled"] = pd.to_datetime(df["date_pulled"], errors="coerce")
+        # Strip timezone info before insert -- SQL Server rejects tz-aware datetimes
+        # and may infer the column as a timestamp type if the value is tz-aware
+        df["date_pulled"] = (
+            pd.to_datetime(df["date_pulled"], errors="coerce", utc=True)
+            .dt.tz_localize(None)
+        )
 
     df = clean_df(df)
     rows = upsert(engine, df, "ftn_charting", "nfl", ["ftn_game_id", "ftn_play_id"])
