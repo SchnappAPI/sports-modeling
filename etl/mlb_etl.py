@@ -257,20 +257,26 @@ def load_teams(engine, season):
 # 2. Players
 # ---------------------------------------------------------------------------
 
-def load_players(engine, season):
-    log.info("Loading players for season %d", season)
-    data = api_get("sports_players", {"sport_id": 1, "season": season})
+def load_players(engine, seasons):
     rows = []
-    for p in data.get("people", []):
-        rows.append({
-            "player_id":   p["id"],
-            "player_name": p.get("fullName", ""),
-            "team_id":     p.get("currentTeam", {}).get("id"),
-            "position":    p.get("primaryPosition", {}).get("abbreviation"),
-            "bat_side":    p.get("batSide", {}).get("code"),
-            "pitch_hand":  p.get("pitchHand", {}).get("code"),
-        })
-    df = pd.DataFrame(rows).drop_duplicates(subset=["player_id"])
+    seen = set()
+    for season in seasons:
+        log.info("Loading players for season %d", season)
+        data = api_get("sports_players", {"sport_id": 1, "season": season})
+        for p in data.get("people", []):
+            pid = p["id"]
+            if pid in seen:
+                continue
+            seen.add(pid)
+            rows.append({
+                "player_id":   pid,
+                "player_name": p.get("fullName", ""),
+                "team_id":     p.get("currentTeam", {}).get("id"),
+                "position":    p.get("primaryPosition", {}).get("abbreviation"),
+                "bat_side":    p.get("batSide", {}).get("code"),
+                "pitch_hand":  p.get("pitchHand", {}).get("code"),
+            })
+    df = pd.DataFrame(rows)
     truncate_and_load(engine, df, "mlb", "players")
 
 # ---------------------------------------------------------------------------
@@ -650,7 +656,7 @@ def main():
 
     # Steps 1 and 2: reference tables
     team_abbr = load_teams(engine, season=current_season)
-    load_players(engine, season=current_season)
+    load_players(engine, seasons=historical_seasons)
 
     # Steps 3, 4, 5: games and box scores in one pass
     load_games_and_box_scores(engine, historical_seasons, team_abbr)
