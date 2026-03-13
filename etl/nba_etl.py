@@ -16,6 +16,24 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 from nba_api.stats.endpoints import boxscoretraditionalv3, leaguegamefinder
+from nba_api.stats.library import http as nba_http
+
+# ---------------------------------------------------------------------------
+# Proxy configuration
+# Routes all nba_api requests through a residential proxy to bypass
+# NBA.com's block on cloud provider IP ranges (GitHub Actions uses Azure IPs).
+# Set NBA_PROXY_URL in GitHub Actions secrets.
+# Format: http://username:password@host:port
+# ---------------------------------------------------------------------------
+_proxy_url = os.environ.get("NBA_PROXY_URL")
+if _proxy_url:
+    nba_http.PROXY = _proxy_url
+    logging.getLogger(__name__).info("Proxy configured: %s", _proxy_url.split("@")[-1])
+else:
+    logging.getLogger(__name__).warning(
+        "NBA_PROXY_URL not set. Requests will use the runner's IP directly "
+        "and may be blocked by stats.nba.com."
+    )
 
 # ---------------------------------------------------------------------------
 # Logging
