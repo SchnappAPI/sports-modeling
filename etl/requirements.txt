@@ -1,0 +1,8 @@
+nflreadpy
+nfl-data-py
+sqlalchemy
+pyodbc
+pandas
+requests
+mlb-statsapi
+nba_api
