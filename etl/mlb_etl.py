@@ -123,6 +123,7 @@ def upsert(engine, df, schema, table, key_cols):
         if_exists="replace",
         index=False,
         method="multi",
+        chunksize=100,
     )
 
     non_key_cols = [c for c in df.columns if c not in key_cols and c != "created_at"]
@@ -156,7 +157,11 @@ def truncate_and_load(engine, df, schema, table):
         return
     with engine.begin() as conn:
         conn.execute(text(f"DELETE FROM [{schema}].[{table}]"))
-    df.to_sql(table, engine, schema=schema, if_exists="append", index=False, method="multi")
+    df.to_sql(
+        table, engine, schema=schema,
+        if_exists="append", index=False,
+        method="multi", chunksize=100
+    )
     log.info("Loaded %d rows into %s.%s", len(df), schema, table)
 
 
