@@ -12,6 +12,14 @@ Load order (respects foreign key dependencies):
     6. mlb.player_season_batting  - Season cumulative batting snapshot. Truncate and reload.
     7. mlb.pitcher_season_stats   - Season cumulative pitching snapshot. Truncate and reload.
 
+Teams and players are always fully rebuilt from the API. Foreign key constraints on
+the child tables (games, batting_stats, pitching_stats, season snapshots) have been
+dropped via drop_mlb_fk_constraints.sql, so teams and players can be reloaded without
+clearing box score history.
+
+Box score tables use upsert logic. Games already present in batting_stats are skipped,
+so only new games are fetched from the API on each run.
+
 Historical box score load: 2023, 2024, and current season.
 Season snapshot tables always reflect the current season only.
 
@@ -54,43 +62,6 @@ def get_engine():
         f"@{server}/{database}?driver={driver}"
     )
     return create_engine(conn_str)
-
-# ---------------------------------------------------------------------------
-# Teardown: clear all MLB tables in reverse dependency order.
-#
-# This runs once at the start of main() before any loading begins.
-# Deleting in reverse FK order means child rows are removed before the
-# parent rows they reference, so SQL Server never raises a constraint
-# violation. TRUNCATE cannot be used here because SQL Server blocks it
-# on any table that is the target of a foreign key constraint, even when
-# the referencing table is already empty. DELETE has no such restriction.
-#
-# If new tables are added to the schema, insert them in this list at the
-# correct reverse-dependency position before their parent tables.
-# ---------------------------------------------------------------------------
-
-TEARDOWN_ORDER = [
-    # Deepest dependents first
-    ("mlb", "pitcher_season_stats"),   # depends on players, teams
-    ("mlb", "player_season_batting"),  # depends on players, teams
-    ("mlb", "pitching_stats"),         # depends on games, players, teams
-    ("mlb", "batting_stats"),          # depends on games, players, teams
-    ("mlb", "games"),                  # depends on teams (home/away FKs)
-    ("mlb", "players"),                # depends on teams
-    ("mlb", "teams"),                  # no dependencies - must be last
-]
-
-def teardown_mlb_tables(engine):
-    """
-    Delete all rows from every MLB table in safe reverse dependency order.
-    Called once at the top of main() before any loading begins.
-    """
-    log.info("Teardown: clearing MLB tables in reverse dependency order")
-    with engine.begin() as conn:
-        for schema, table in TEARDOWN_ORDER:
-            conn.execute(text(f"DELETE FROM [{schema}].[{table}]"))
-            log.info("  Cleared [%s].[%s]", schema, table)
-    log.info("Teardown complete")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -707,18 +678,16 @@ def main():
     current_season     = date.today().year
     historical_seasons = [2023, 2024, 2025, current_season]
 
-    # Step 0: Clear all MLB tables in reverse dependency order before loading anything.
-    # This prevents FK violations when truncating parent tables that child tables reference.
-    teardown_mlb_tables(engine)
-
-    # Steps 1 and 2: reference tables
+    # Steps 1 and 2: rebuild reference tables fresh every run.
+    # FK constraints on child tables have been dropped via drop_mlb_fk_constraints.sql,
+    # so reloading teams and players does not affect box score history.
     team_abbr = load_teams(engine, season=current_season)
     load_players(engine, seasons=historical_seasons)
 
-    # Steps 3, 4, 5: games and box scores in one pass
+    # Steps 3, 4, 5: upsert only new games. Already-loaded game_pks are skipped.
     load_games_and_box_scores(engine, historical_seasons, team_abbr)
 
-    # Steps 6 and 7: season snapshots for current season only
+    # Steps 6 and 7: season snapshots for current season only.
     load_player_season_batting(engine, season=current_season)
     load_pitcher_season_stats(engine, season=current_season)
 
