@@ -200,11 +200,22 @@ def load_players(engine) -> None:
         "ngs_status_short_description": "ngs_status_short",
     })
 
-    # Float -> Int for nullable ID columns
-    for col in ["pff_id", "otc_id", "espn_id", "jersey_number", "years_of_experience",
-                "draft_round", "draft_pick"]:
+    # Float -> Int for nullable ID columns.
+    # pff_id, otc_id, espn_id are large ints with no tinyint risk.
+    for col in ["pff_id", "otc_id", "espn_id"]:
         if col in df.columns:
             df[col] = safe_int(df[col])
+
+    # jersey_number, draft_round, draft_pick are declared TINYINT (0-255).
+    # Clip defensively in case nflverse returns out-of-range values.
+    for col in ["jersey_number", "draft_round", "draft_pick"]:
+        if col in df.columns:
+            s = safe_int(df[col])
+            df[col] = s.where(s.isna() | (s <= 255), other=pd.NA)
+
+    # years_of_experience can exceed 255 for historical players; stored as SMALLINT.
+    if "years_of_experience" in df.columns:
+        df["years_of_experience"] = safe_int(df["years_of_experience"])
 
     for col in ["rookie_season", "last_season", "draft_year"]:
         if col in df.columns:
@@ -429,6 +440,35 @@ def load_team_game_stats(engine, season: int) -> None:
     log.info("Loading nfl.team_game_stats for season %d...", season)
 
     df = nflreadpy.load_team_stats(season).to_pandas()
+
+    # Explicitly keep only columns in the DDL. The API returns extra columns
+    # including game_id which is not in nfl.team_game_stats per the audit report.
+    keep = [
+        "season", "week", "team", "season_type", "opponent_team",
+        "completions", "attempts", "passing_yards", "passing_tds",
+        "passing_interceptions", "sacks_suffered", "sack_yards_lost",
+        "sack_fumbles", "sack_fumbles_lost", "passing_air_yards",
+        "passing_yards_after_catch", "passing_first_downs", "passing_epa",
+        "passing_cpoe", "passing_2pt_conversions", "carries", "rushing_yards",
+        "rushing_tds", "rushing_fumbles", "rushing_fumbles_lost",
+        "rushing_first_downs", "rushing_epa", "rushing_2pt_conversions",
+        "receptions", "targets", "receiving_yards", "receiving_tds",
+        "receiving_fumbles", "receiving_fumbles_lost", "receiving_air_yards",
+        "receiving_yards_after_catch", "receiving_first_downs", "receiving_epa",
+        "receiving_2pt_conversions", "special_teams_tds",
+        "def_tackles_solo", "def_tackles_with_assist", "def_tackle_assists",
+        "def_tackles_for_loss", "def_tackles_for_loss_yards", "def_fumbles_forced",
+        "def_sacks", "def_sack_yards", "def_qb_hits", "def_interceptions",
+        "def_interception_yards", "def_pass_defended", "def_tds", "def_fumbles",
+        "def_safeties", "misc_yards", "fumble_recovery_own",
+        "fumble_recovery_yards_own", "fumble_recovery_opp",
+        "fumble_recovery_yards_opp", "fumble_recovery_tds",
+        "penalties", "penalty_yards", "timeouts",
+        "punt_returns", "punt_return_yards", "kickoff_returns", "kickoff_return_yards",
+        "fg_made", "fg_att", "fg_missed", "fg_long", "fg_pct", "fg_made_list",
+        "fg_missed_list", "pat_made", "pat_att", "pat_pct",
+    ]
+    df = df[[c for c in keep if c in df.columns]].copy()
 
     int_cols = [
         "passing_tds", "passing_interceptions", "sacks_suffered",
