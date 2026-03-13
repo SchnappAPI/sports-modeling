@@ -159,7 +159,7 @@ def truncate_and_load(engine, df, schema, table):
     df.to_sql(
         table, engine, schema=schema,
         if_exists="append", index=False,
-        method="multi", chunksize=100
+        chunksize=200
     )
     log.info("Loaded %d rows into %s.%s", len(df), schema, table)
 
