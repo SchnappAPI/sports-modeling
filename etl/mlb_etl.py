@@ -395,7 +395,7 @@ def parse_boxscore(game, boxscore):
             if b.get("personId", 0) == 0:
                 continue
             batter_rows.append({
-                "batter_game_id":  f"{b['personId']}-{game_pk}",
+                "batter_game_id":  f"{b['personId']}-{game_pk}-{team_id}",
                 "game_pk":         game_pk,
                 "game_date":       game_date,
                 "player_id":       b["personId"],
