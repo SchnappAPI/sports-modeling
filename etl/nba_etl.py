@@ -10,8 +10,7 @@ Covers:
   - Teams reference                         -> nba.teams  (truncate/reload)
   - Players reference                       -> nba.players (upsert)
   - Advanced box scores (usage, ratings)    -> nba.player_tracking_stats
-  - Player tracking (drives/touches/passes/rebounds/shooting)
-                                            -> nba.player_tracking_stats
+  - Player tracking (touches/passes/reb)    -> nba.player_tracking_stats
   - Matchup position aggregation            -> nba.matchup_position_stats
 
 Run modes:
@@ -36,12 +35,7 @@ from nba_api.stats.endpoints import (
     LeagueGameFinder,
     BoxScoreTraditionalV3,
     BoxScoreAdvancedV3,
-    PlayerTrackingDrives,
-    PlayerTrackingPasses,
-    PlayerTrackingPossessions,
-    PlayerTrackingRebounding,
-    PlayerTrackingShooting,
-    TeamInfoCommon,
+    BoxScorePlayerTrackV3,
 )
 from nba_api.stats.static import teams as static_teams
 
@@ -56,13 +50,13 @@ log = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-PROXY_URL = os.environ.get("NBA_PROXY_URL")
-PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
-CURRENT_SEASON = "2025-26"
-CURRENT_SEASON_ID = "22025"   # LeagueGameFinder season_id format
-API_DELAY = 0.75               # seconds between API calls to avoid rate limits
+PROXY_URL     = os.environ.get("NBA_PROXY_URL")
+PROXIES       = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+CURRENT_SEASON    = "2025-26"
+CURRENT_SEASON_ID = "22025"
+API_DELAY     = 0.75   # seconds between API calls
 
-# Quarter label map: API period int -> stored CHAR(3) label
+
 def period_label(period: int) -> str:
     if period <= 4:
         return f"Q{period}"
@@ -88,7 +82,7 @@ def get_engine():
 
 
 # ---------------------------------------------------------------------------
-# Helper: safe float/int conversion
+# Safe type helpers
 # ---------------------------------------------------------------------------
 
 def safe_float(val):
@@ -132,34 +126,24 @@ def load_teams(engine):
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Discover game IDs for the target date range
+# Step 2: Discover game IDs
 # ---------------------------------------------------------------------------
 
-def get_game_ids(target_dates: list[date]) -> list[tuple[str, date]]:
-    """
-    Returns list of (game_id, game_date) for games played on any of the
-    given dates. Uses LeagueGameFinder with the current season.
-    """
+def get_game_ids(target_dates: list) -> list:
     log.info(f"Fetching game IDs for {len(target_dates)} date(s)")
     date_strings = {d.strftime("%m/%d/%Y") for d in target_dates}
-
     finder = LeagueGameFinder(
         season_nullable=CURRENT_SEASON,
         league_id_nullable="00",
         proxy=PROXY_URL,
     )
     time.sleep(API_DELAY)
-
     df = finder.get_data_frames()[0]
     if df.empty:
         log.warning("LeagueGameFinder returned no games")
         return []
-
-    # GAME_DATE comes back as YYYY-MM-DD string
     df["_date_fmt"] = pd.to_datetime(df["GAME_DATE"]).dt.strftime("%m/%d/%Y")
     df_filtered = df[df["_date_fmt"].isin(date_strings)].copy()
-
-    # Each game appears twice (once per team); deduplicate on GAME_ID
     pairs = (
         df_filtered[["GAME_ID", "GAME_DATE"]]
         .drop_duplicates("GAME_ID")
@@ -170,7 +154,7 @@ def get_game_ids(target_dates: list[date]) -> list[tuple[str, date]]:
     return result
 
 
-def get_all_season_game_ids() -> list[tuple[str, date]]:
+def get_all_season_game_ids() -> list:
     log.info(f"Backfill mode: fetching all game IDs for season {CURRENT_SEASON}")
     finder = LeagueGameFinder(
         season_nullable=CURRENT_SEASON,
@@ -197,26 +181,19 @@ def process_game(game_id: str, game_date: date, engine) -> None:
     log.info(f"  Processing game {game_id} ({game_date})")
 
     # ------------------------------------------------------------------
-    # 3a. BoxScoreTraditionalV3: detect periods, player rows, team rows
+    # 3a. BoxScoreTraditionalV3: player rows + team rows across all periods
     # ------------------------------------------------------------------
     try:
-        trad = BoxScoreTraditionalV3(
-            game_id=game_id,
-            proxy=PROXY_URL,
-        )
+        trad = BoxScoreTraditionalV3(game_id=game_id, proxy=PROXY_URL)
         time.sleep(API_DELAY)
     except Exception as exc:
         log.error(f"    BoxScoreTraditionalV3 failed for {game_id}: {exc}")
         return
 
     trad_data = trad.get_normalized_dict()
-
-    # Figure out how many periods this game had
-    # The response contains one entry per period in player stats
     player_stats_raw = trad_data.get("PlayerStats", [])
     team_stats_raw   = trad_data.get("TeamStats", [])
 
-    # Derive num_periods from the maximum period seen in team stats
     periods_present = set()
     for row in team_stats_raw:
         p = safe_int(row.get("PERIOD") or row.get("period"))
@@ -224,113 +201,104 @@ def process_game(game_id: str, game_date: date, engine) -> None:
             periods_present.add(p)
     num_periods = max(periods_present) if periods_present else 4
 
-    # Build player box score rows for ALL periods
     player_rows = []
     for row in player_stats_raw:
-        period = safe_int(row.get("PERIOD") or row.get("period"))
+        period  = safe_int(row.get("PERIOD") or row.get("period"))
         if not period:
             continue
         comment = (row.get("COMMENT") or "").strip()
-        if comment:          # DNP - skip
+        if comment:
             continue
         player_rows.append({
-            "game_id":          game_id,
-            "player_id":        safe_int(row.get("PLAYER_ID")),
-            "quarter":          period_label(period),
-            "first_name":       row.get("PLAYER_NAME_I", "").split(". ")[-1] if ". " in str(row.get("PLAYER_NAME_I","")) else "",
-            "last_name":        row.get("PLAYER_NAME_I", ""),
-            "team_id":          safe_int(row.get("TEAM_ID")),
-            "team_abbreviation":row.get("TEAM_ABBREVIATION", ""),
-            "position":         row.get("START_POSITION", ""),
-            "comment":          comment,
-            "jersey_num":       str(row.get("JERSEY_NUM", "") or ""),
-            "min":              str(row.get("MIN", "") or ""),
-            "fgm":              safe_int(row.get("FGM")),
-            "fga":              safe_int(row.get("FGA")),
-            "fg_pct":           safe_float(row.get("FG_PCT")),
-            "fg3m":             safe_int(row.get("FG3M")),
-            "fg3a":             safe_int(row.get("FG3A")),
-            "fg3_pct":          safe_float(row.get("FG3_PCT")),
-            "ftm":              safe_int(row.get("FTM")),
-            "fta":              safe_int(row.get("FTA")),
-            "ft_pct":           safe_float(row.get("FT_PCT")),
-            "oreb":             safe_int(row.get("OREB")),
-            "dreb":             safe_int(row.get("DREB")),
-            "reb":              safe_int(row.get("REB")),
-            "ast":              safe_int(row.get("AST")),
-            "stl":              safe_int(row.get("STL")),
-            "blk":              safe_int(row.get("BLK")),
-            "tov":              safe_int(row.get("TO")),
-            "pf":               safe_int(row.get("PF")),
-            "pts":              safe_int(row.get("PTS")),
-            "plus_minus":       safe_float(row.get("PLUS_MINUS")),
+            "game_id":           game_id,
+            "player_id":         safe_int(row.get("PLAYER_ID")),
+            "quarter":           period_label(period),
+            "first_name":        (row.get("PLAYER_NAME_I") or ""),
+            "last_name":         (row.get("PLAYER_NAME_I") or ""),
+            "team_id":           safe_int(row.get("TEAM_ID")),
+            "team_abbreviation": (row.get("TEAM_ABBREVIATION") or ""),
+            "position":          (row.get("START_POSITION") or ""),
+            "comment":           comment,
+            "jersey_num":        str(row.get("JERSEY_NUM") or ""),
+            "min":               str(row.get("MIN") or ""),
+            "fgm":               safe_int(row.get("FGM")),
+            "fga":               safe_int(row.get("FGA")),
+            "fg_pct":            safe_float(row.get("FG_PCT")),
+            "fg3m":              safe_int(row.get("FG3M")),
+            "fg3a":              safe_int(row.get("FG3A")),
+            "fg3_pct":           safe_float(row.get("FG3_PCT")),
+            "ftm":               safe_int(row.get("FTM")),
+            "fta":               safe_int(row.get("FTA")),
+            "ft_pct":            safe_float(row.get("FT_PCT")),
+            "oreb":              safe_int(row.get("OREB")),
+            "dreb":              safe_int(row.get("DREB")),
+            "reb":               safe_int(row.get("REB")),
+            "ast":               safe_int(row.get("AST")),
+            "stl":               safe_int(row.get("STL")),
+            "blk":               safe_int(row.get("BLK")),
+            "tov":               safe_int(row.get("TO")),
+            "pf":                safe_int(row.get("PF")),
+            "pts":               safe_int(row.get("PTS")),
+            "plus_minus":        safe_float(row.get("PLUS_MINUS")),
         })
 
-    # Build team box score rows
     team_rows = []
     for row in team_stats_raw:
         period = safe_int(row.get("PERIOD") or row.get("period"))
         if not period:
             continue
         team_rows.append({
-            "game_id":          game_id,
-            "team_id":          safe_int(row.get("TEAM_ID")),
-            "team_abbreviation":row.get("TEAM_ABBREVIATION", ""),
-            "quarter":          period_label(period),
-            "min":              str(row.get("MIN", "") or ""),
-            "fgm":              safe_int(row.get("FGM")),
-            "fga":              safe_int(row.get("FGA")),
-            "fg_pct":           safe_float(row.get("FG_PCT")),
-            "fg3m":             safe_int(row.get("FG3M")),
-            "fg3a":             safe_int(row.get("FG3A")),
-            "fg3_pct":          safe_float(row.get("FG3_PCT")),
-            "ftm":              safe_int(row.get("FTM")),
-            "fta":              safe_int(row.get("FTA")),
-            "ft_pct":           safe_float(row.get("FT_PCT")),
-            "oreb":             safe_int(row.get("OREB")),
-            "dreb":             safe_int(row.get("DREB")),
-            "reb":              safe_int(row.get("REB")),
-            "ast":              safe_int(row.get("AST")),
-            "stl":              safe_int(row.get("STL")),
-            "blk":              safe_int(row.get("BLK")),
-            "tov":              safe_int(row.get("TO")),
-            "pf":               safe_int(row.get("PF")),
-            "pts":              safe_int(row.get("PTS")),
+            "game_id":           game_id,
+            "team_id":           safe_int(row.get("TEAM_ID")),
+            "team_abbreviation": (row.get("TEAM_ABBREVIATION") or ""),
+            "quarter":           period_label(period),
+            "min":               str(row.get("MIN") or ""),
+            "fgm":               safe_int(row.get("FGM")),
+            "fga":               safe_int(row.get("FGA")),
+            "fg_pct":            safe_float(row.get("FG_PCT")),
+            "fg3m":              safe_int(row.get("FG3M")),
+            "fg3a":              safe_int(row.get("FG3A")),
+            "fg3_pct":           safe_float(row.get("FG3_PCT")),
+            "ftm":               safe_int(row.get("FTM")),
+            "fta":               safe_int(row.get("FTA")),
+            "ft_pct":            safe_float(row.get("FT_PCT")),
+            "oreb":              safe_int(row.get("OREB")),
+            "dreb":              safe_int(row.get("DREB")),
+            "reb":               safe_int(row.get("REB")),
+            "ast":               safe_int(row.get("AST")),
+            "stl":               safe_int(row.get("STL")),
+            "blk":               safe_int(row.get("BLK")),
+            "tov":               safe_int(row.get("TO")),
+            "pf":                safe_int(row.get("PF")),
+            "pts":               safe_int(row.get("PTS")),
         })
 
-    # Derive game totals from team rows summed across all periods
-    home_pts, away_pts = None, None
-    home_team_id, away_team_id = None, None
-    home_abbr, away_abbr = "", ""
-    # The API marks home/away in TEAM_ID ordering within the game code.
-    # Simpler: sum pts per team from full-game team rows where PERIOD sums exist.
-    # We'll aggregate after writing since we have period-level data.
+    # Derive game totals from team period rows
     team_totals = {}
     for row in team_stats_raw:
-        tid = safe_int(row.get("TEAM_ID"))
-        pts = safe_int(row.get("PTS"))
-        abbr = row.get("TEAM_ABBREVIATION", "")
+        tid  = safe_int(row.get("TEAM_ID"))
+        pts  = safe_int(row.get("PTS")) or 0
+        abbr = row.get("TEAM_ABBREVIATION") or ""
         if tid not in team_totals:
             team_totals[tid] = {"pts": 0, "abbr": abbr}
-        if pts:
-            team_totals[tid]["pts"] += pts
+        team_totals[tid]["pts"] += pts
 
     team_ids = list(team_totals.keys())
+    home_team_id = away_team_id = None
+    home_abbr = away_abbr = ""
+    home_pts = away_pts = game_total = None
+
     if len(team_ids) == 2:
-        # Determine home/away from game_id convention: last 3 chars = home abbr
-        # Actually derive from LeagueGameFinder; for now assign arbitrarily
-        # and let the games table be updated via upsert with correct ordering.
         home_team_id = team_ids[0]
         away_team_id = team_ids[1]
         home_abbr    = team_totals[home_team_id]["abbr"]
         away_abbr    = team_totals[away_team_id]["abbr"]
         home_pts     = team_totals[home_team_id]["pts"]
         away_pts     = team_totals[away_team_id]["pts"]
-
-    game_total = (home_pts + away_pts) if (home_pts is not None and away_pts is not None) else None
+        game_total   = home_pts + away_pts
 
     # ------------------------------------------------------------------
-    # 3b. BoxScoreAdvancedV3: per player per period usage + ratings
+    # 3b. BoxScoreAdvancedV3: usage, ratings, pace, PIE per player
     # ------------------------------------------------------------------
     advanced_by_player = {}
     try:
@@ -338,161 +306,90 @@ def process_game(game_id: str, game_date: date, engine) -> None:
         time.sleep(API_DELAY)
         adv_data = adv.get_normalized_dict()
         for row in adv_data.get("PlayerStats", []):
-            pid = safe_int(row.get("PLAYER_ID"))
-            if pid not in advanced_by_player:
-                advanced_by_player[pid] = {
-                    "usage_pct":  safe_float(row.get("USG_PCT")),
-                    "off_rating": safe_float(row.get("OFF_RATING")),
-                    "def_rating": safe_float(row.get("DEF_RATING")),
-                    "net_rating": safe_float(row.get("NET_RATING")),
-                    "pace":       safe_float(row.get("PACE")),
-                    "pie":        safe_float(row.get("PIE")),
-                }
+            pid = safe_int(row.get("personId") or row.get("PLAYER_ID"))
+            if pid is None:
+                continue
+            advanced_by_player[pid] = {
+                "usage_pct":  safe_float(row.get("usagePercentage") or row.get("USG_PCT")),
+                "off_rating": safe_float(row.get("offensiveRating") or row.get("OFF_RATING")),
+                "def_rating": safe_float(row.get("defensiveRating") or row.get("DEF_RATING")),
+                "net_rating": safe_float(row.get("netRating") or row.get("NET_RATING")),
+                "pace":       safe_float(row.get("pace") or row.get("PACE")),
+                "pie":        safe_float(row.get("PIE")),
+                "true_shooting_pct": safe_float(row.get("trueShootingPercentage")),
+                "efg_pct":    safe_float(row.get("effectiveFieldGoalPercentage")),
+            }
     except Exception as exc:
         log.warning(f"    BoxScoreAdvancedV3 failed for {game_id}: {exc}")
 
     # ------------------------------------------------------------------
-    # 3c. Player tracking endpoints (game-level, not period-level)
+    # 3c. BoxScorePlayerTrackV3: touches, rebound chances, passes, contested shots
     # ------------------------------------------------------------------
     tracking_by_player = {}
-
-    def merge_tracking(endpoint_cls, field_map):
-        try:
-            ep = endpoint_cls(game_id=game_id, proxy=PROXY_URL)
-            time.sleep(API_DELAY)
-            data = ep.get_data_frames()[0]
-            for _, row in data.iterrows():
-                pid = safe_int(row.get("PLAYER_ID"))
-                if pid is None:
-                    continue
-                if pid not in tracking_by_player:
-                    tracking_by_player[pid] = {
-                        "team_id": safe_int(row.get("TEAM_ID"))
-                    }
-                for dest, src in field_map.items():
-                    val = row.get(src)
-                    tracking_by_player[pid][dest] = safe_float(val) if isinstance(safe_float(val), float) else safe_int(val)
-        except Exception as exc:
-            log.warning(f"    {endpoint_cls.__name__} failed for {game_id}: {exc}")
-
-    merge_tracking(PlayerTrackingDrives, {
-        "drives":            "DRIVES",
-        "drive_fgm":         "DRIVE_FGM",
-        "drive_fga":         "DRIVE_FGA",
-        "drive_fg_pct":      "DRIVE_FG_PCT",
-        "drive_ftm":         "DRIVE_FTM",
-        "drive_fta":         "DRIVE_FTA",
-        "drive_ft_pct":      "DRIVE_FT_PCT",
-        "drive_pts":         "DRIVE_PTS",
-        "drive_pts_pct":     "DRIVE_PTS_PCT",
-        "drive_passes":      "DRIVE_PASSES",
-        "drive_passes_pct":  "DRIVE_PASSES_PCT",
-        "drive_ast":         "DRIVE_AST",
-        "drive_ast_pct":     "DRIVE_AST_PCT",
-        "drive_tov":         "DRIVE_TOV",
-        "drive_tov_pct":     "DRIVE_TOV_PCT",
-    })
-
-    merge_tracking(PlayerTrackingPasses, {
-        "passes_made":           "PASSES_MADE",
-        "passes_received":       "PASSES_RECEIVED",
-        "ft_ast":                "FT_AST",
-        "secondary_ast":         "SECONDARY_AST",
-        "potential_ast":         "POTENTIAL_AST",
-        "ast_pts_created":       "AST_PTS_CREATED",
-        "ast_adj":               "AST_ADJ",
-        "ast_to_pass_pct":       "AST_TO_PASS_PCT",
-        "ast_to_pass_pct_adj":   "AST_TO_PASS_PCT_ADJ",
-    })
-
-    merge_tracking(PlayerTrackingPossessions, {
-        "touches":               "TOUCHES",
-        "front_ct_touches":      "FRONT_CT_TOUCHES",
-        "time_of_poss":          "TIME_OF_POSS",
-        "avg_sec_per_touch":     "AVG_SEC_PER_TOUCH",
-        "avg_drib_per_touch":    "AVG_DRIB_PER_TOUCH",
-        "pts_per_touch":         "PTS_PER_TOUCH",
-        "elbow_touches":         "ELBOW_TOUCHES",
-        "post_touches":          "POST_TOUCHES",
-        "paint_touches":         "PAINT_TOUCHES",
-        "pts_per_paint_touch":   "PTS_PER_PAINT_TOUCH",
-    })
-
-    merge_tracking(PlayerTrackingRebounding, {
-        "contested_reb":         "CONTESTED_REBOUNDS",
-        "contested_oreb":        "CONTESTED_OREB",
-        "contested_dreb":        "CONTESTED_DREB",
-        "reb_chances":           "REB_CHANCES",
-        "oreb_chances":          "OREB_CHANCES",
-        "dreb_chances":          "DREB_CHANCES",
-        "reb_chance_pct":        "REB_CHANCE_PCT",
-        "oreb_chance_pct":       "OREB_CHANCE_PCT",
-        "dreb_chance_pct":       "DREB_CHANCE_PCT",
-    })
-
-    merge_tracking(PlayerTrackingShooting, {
-        "catch_shoot_fgm":       "CATCH_SHOOT_FGM",
-        "catch_shoot_fga":       "CATCH_SHOOT_FGA",
-        "catch_shoot_fg_pct":    "CATCH_SHOOT_FG_PCT",
-        "catch_shoot_pts":       "CATCH_SHOOT_PTS",
-        "pull_up_fgm":           "PULL_UP_FGM",
-        "pull_up_fga":           "PULL_UP_FGA",
-        "pull_up_fg_pct":        "PULL_UP_FG_PCT",
-        "pull_up_pts":           "PULL_UP_PTS",
-    })
+    try:
+        trk = BoxScorePlayerTrackV3(game_id=game_id, proxy=PROXY_URL)
+        time.sleep(API_DELAY)
+        trk_data = trk.get_normalized_dict()
+        for row in trk_data.get("PlayerStats", []):
+            pid = safe_int(row.get("personId") or row.get("PLAYER_ID"))
+            if pid is None:
+                continue
+            tracking_by_player[pid] = {
+                "team_id":                      safe_int(row.get("teamId") or row.get("TEAM_ID")),
+                "speed":                        safe_float(row.get("speed")),
+                "distance":                     safe_float(row.get("distance")),
+                "touches":                      safe_int(row.get("touches")),
+                "passes_made":                  safe_int(row.get("passes")),
+                "secondary_ast":                safe_int(row.get("secondaryAssists")),
+                "ft_ast":                       safe_int(row.get("freeThrowAssists")),
+                "reb_chances":                  safe_int(row.get("reboundChancesTotal")),
+                "oreb_chances":                 safe_int(row.get("reboundChancesOffensive")),
+                "dreb_chances":                 safe_int(row.get("reboundChancesDefensive")),
+                "contested_fgm":                safe_int(row.get("contestedFieldGoalsMade")),
+                "contested_fga":                safe_int(row.get("contestedFieldGoalsAttempted")),
+                "contested_fg_pct":             safe_float(row.get("contestedFieldGoalPercentage")),
+                "uncontested_fgm":              safe_int(row.get("uncontestedFieldGoalsMade")),
+                "uncontested_fga":              safe_int(row.get("uncontestedFieldGoalsAttempted")),
+                "uncontested_fg_pct":           safe_float(row.get("uncontestedFieldGoalsPercentage")),
+                "defended_at_rim_fgm":          safe_int(row.get("defendedAtRimFieldGoalsMade")),
+                "defended_at_rim_fga":          safe_int(row.get("defendedAtRimFieldGoalsAttempted")),
+                "defended_at_rim_fg_pct":       safe_float(row.get("defendedAtRimFieldGoalPercentage")),
+            }
+    except Exception as exc:
+        log.warning(f"    BoxScorePlayerTrackV3 failed for {game_id}: {exc}")
 
     # ------------------------------------------------------------------
     # 3d. Write to database
     # ------------------------------------------------------------------
 
-    # Player box scores: upsert on (game_id, player_id, quarter)
     if player_rows:
         df_players = pd.DataFrame(player_rows)
-        _upsert(
-            df=df_players,
-            engine=engine,
-            schema="nba",
-            table="player_box_score_stats",
-            pk_cols=["game_id", "player_id", "quarter"],
-        )
+        _upsert(df_players, engine, "nba", "player_box_score_stats",
+                ["game_id", "player_id", "quarter"])
         log.info(f"    Upserted {len(df_players)} player box score rows")
 
-    # Team box scores: upsert on (game_id, team_id, quarter)
     if team_rows:
         df_teams_box = pd.DataFrame(team_rows)
-        _upsert(
-            df=df_teams_box,
-            engine=engine,
-            schema="nba",
-            table="team_box_score_stats",
-            pk_cols=["game_id", "team_id", "quarter"],
-        )
+        _upsert(df_teams_box, engine, "nba", "team_box_score_stats",
+                ["game_id", "team_id", "quarter"])
         log.info(f"    Upserted {len(df_teams_box)} team box score rows")
 
-    # Games: upsert on game_id
     if home_team_id and away_team_id:
         df_game = pd.DataFrame([{
-            "game_id":          game_id,
-            "game_date":        game_date,
-            "season_id":        CURRENT_SEASON_ID,
-            "home_team_id":     home_team_id,
-            "home_team_abbr":   home_abbr,
-            "away_team_id":     away_team_id,
-            "away_team_abbr":   away_abbr,
-            "home_score":       home_pts,
-            "away_score":       away_pts,
-            "game_total":       game_total,
-            "num_periods":      num_periods,
+            "game_id":        game_id,
+            "game_date":      game_date,
+            "season_id":      CURRENT_SEASON_ID,
+            "home_team_id":   home_team_id,
+            "home_team_abbr": home_abbr,
+            "away_team_id":   away_team_id,
+            "away_team_abbr": away_abbr,
+            "home_score":     home_pts,
+            "away_score":     away_pts,
+            "game_total":     game_total,
+            "num_periods":    num_periods,
         }])
-        _upsert(
-            df=df_game,
-            engine=engine,
-            schema="nba",
-            table="games",
-            pk_cols=["game_id"],
-        )
+        _upsert(df_game, engine, "nba", "games", ["game_id"])
 
-    # Player tracking: merge advanced + tracking dicts, upsert on (game_id, player_id)
     all_pids = set(advanced_by_player.keys()) | set(tracking_by_player.keys())
     if all_pids:
         tracking_rows = []
@@ -502,23 +399,12 @@ def process_game(game_id: str, game_date: date, engine) -> None:
             row.update(tracking_by_player.get(pid, {}))
             tracking_rows.append(row)
         df_tracking = pd.DataFrame(tracking_rows)
-        _upsert(
-            df=df_tracking,
-            engine=engine,
-            schema="nba",
-            table="player_tracking_stats",
-            pk_cols=["game_id", "player_id"],
-        )
+        _upsert(df_tracking, engine, "nba", "player_tracking_stats",
+                ["game_id", "player_id"])
         log.info(f"    Upserted {len(df_tracking)} player tracking rows")
 
-    # Matchup position aggregation
     if player_rows:
-        _aggregate_matchup(
-            player_rows=player_rows,
-            game_id=game_id,
-            game_date=game_date,
-            engine=engine,
-        )
+        _aggregate_matchup(player_rows, game_id, game_date, engine)
 
 
 # ---------------------------------------------------------------------------
@@ -526,10 +412,6 @@ def process_game(game_id: str, game_date: date, engine) -> None:
 # ---------------------------------------------------------------------------
 
 def _aggregate_matchup(player_rows, game_id, game_date, engine):
-    """
-    For each player row, the defending team is the opponent of the player's
-    team. We derive that from game context: there are only two teams per game.
-    """
     df = pd.DataFrame(player_rows)
     if df.empty or "team_id" not in df.columns:
         return
@@ -545,84 +427,63 @@ def _aggregate_matchup(player_rows, game_id, game_date, engine):
         .to_dict()
     )
 
-    # Sum across all quarters per player (game totals)
-    numeric_cols = ["fgm","fga","fg3m","fg3a","ftm","fta","oreb","dreb","reb","ast","stl","blk","tov","pf","pts"]
+    numeric_cols = ["fgm","fga","fg3m","fg3a","ftm","fta",
+                    "oreb","dreb","reb","ast","stl","blk","tov","pf","pts"]
     for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    player_game = df.groupby(["player_id","team_id","position"])[numeric_cols].sum().reset_index()
+    player_game = (
+        df.groupby(["player_id", "team_id", "position"])[numeric_cols]
+        .sum()
+        .reset_index()
+    )
 
-    # For each player, the defending team is the other team
     matchup_rows = []
     for _, row in player_game.iterrows():
         att_team = row["team_id"]
         def_team = team_ids[0] if att_team == team_ids[1] else team_ids[1]
         pos = str(row.get("position") or "").strip() or "UNKNOWN"
         matchup_rows.append({
-            "game_id":              game_id,
-            "game_date":            game_date,
-            "defending_team_id":    def_team,
-            "defending_team_abbr":  team_abbr_map.get(def_team, ""),
-            "position_group":       pos,
-            "_fgm":  row["fgm"], "_fga":  row["fga"],
-            "_fg3m": row["fg3m"],"_fg3a": row["fg3a"],
-            "_ftm":  row["ftm"], "_fta":  row["fta"],
-            "_oreb": row["oreb"],"_dreb": row["dreb"],
-            "_reb":  row["reb"], "_ast":  row["ast"],
-            "_stl":  row["stl"], "_blk":  row["blk"],
-            "_tov":  row["tov"], "_pts":  row["pts"],
+            "game_id":             game_id,
+            "game_date":           game_date,
+            "defending_team_id":   def_team,
+            "defending_team_abbr": team_abbr_map.get(def_team, ""),
+            "position_group":      pos,
+            "total_fgm":  int(row["fgm"]),  "total_fga":  int(row["fga"]),
+            "total_fg3m": int(row["fg3m"]), "total_fg3a": int(row["fg3a"]),
+            "total_ftm":  int(row["ftm"]),  "total_fta":  int(row["fta"]),
+            "total_reb":  int(row["reb"]),  "total_ast":  int(row["ast"]),
+            "total_stl":  int(row["stl"]),  "total_blk":  int(row["blk"]),
+            "total_tov":  int(row["tov"]),  "total_pts":  int(row["pts"]),
         })
 
     if not matchup_rows:
         return
 
     agg_df = pd.DataFrame(matchup_rows)
-    sum_map = {c: c.lstrip("_") for c in agg_df.columns if c.startswith("_")}
+    sum_cols = [c for c in agg_df.columns if c.startswith("total_")]
     grouped = (
-        agg_df.groupby(["game_id","game_date","defending_team_id","defending_team_abbr","position_group"])
-        [[c for c in agg_df.columns if c.startswith("_")]]
+        agg_df.groupby(["game_id","game_date","defending_team_id",
+                         "defending_team_abbr","position_group"])[sum_cols]
         .sum()
         .reset_index()
     )
-    grouped["player_count"] = (
-        agg_df.groupby(["game_id","game_date","defending_team_id","defending_team_abbr","position_group"])
+    counts = (
+        agg_df.groupby(["game_id","game_date","defending_team_id",
+                          "defending_team_abbr","position_group"])
         .size()
-        .reset_index(name="player_count")["player_count"]
-        .values
+        .reset_index(name="player_count")
     )
-    grouped.rename(columns=sum_map, inplace=True)
+    final_df = grouped.merge(counts, on=["game_id","game_date","defending_team_id",
+                                          "defending_team_abbr","position_group"])
 
-    # Also need total_min (sum of numeric minutes per player)
-    def parse_min(m):
-        try:
-            parts = str(m).split(":")
-            return int(parts[0]) + int(parts[1]) / 60 if len(parts) == 2 else float(parts[0])
-        except Exception:
-            return 0.0
-
-    player_game["min_float"] = df.groupby(["player_id","team_id","position"])["min"].first().reset_index()["min"].apply(parse_min).values if False else 0.0
-
-    final_cols = [
-        "game_id","game_date","defending_team_id","defending_team_abbr",
-        "position_group","player_count",
-        "fgm","fga","fg3m","fg3a","ftm","fta","oreb","dreb","reb",
-        "ast","stl","blk","tov","pts",
-    ]
-    grouped["total_min"] = None   # placeholder; would require min parsing above
-    final_df = grouped[[c for c in final_cols if c in grouped.columns]]
-
-    _upsert(
-        df=final_df,
-        engine=engine,
-        schema="nba",
-        table="matchup_position_stats",
-        pk_cols=["game_id","defending_team_id","position_group"],
-    )
+    _upsert(final_df, engine, "nba", "matchup_position_stats",
+            ["game_id", "defending_team_id", "position_group"])
     log.info(f"    Upserted {len(final_df)} matchup position rows")
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Players reference (upsert from box score data)
+# Players reference upsert (runs after all box scores loaded)
 # ---------------------------------------------------------------------------
 
 def upsert_players(engine):
@@ -651,7 +512,8 @@ def upsert_players(engine):
         WHEN NOT MATCHED THEN INSERT
             (player_id, first_name, last_name, team_id, team_abbreviation, position)
         VALUES
-            (src.player_id, src.first_name, src.last_name, src.team_id, src.team_abbreviation, src.position);
+            (src.player_id, src.first_name, src.last_name,
+             src.team_id, src.team_abbreviation, src.position);
     """
     with engine.begin() as conn:
         result = conn.execute(text(sql))
@@ -659,18 +521,22 @@ def upsert_players(engine):
 
 
 # ---------------------------------------------------------------------------
-# Generic upsert helper (MERGE)
+# Generic upsert via MERGE
 # ---------------------------------------------------------------------------
 
-def _upsert(df: pd.DataFrame, engine, schema: str, table: str, pk_cols: list[str]):
+def _upsert(df: pd.DataFrame, engine, schema: str, table: str, pk_cols: list):
     if df.empty:
         return
 
-    non_pk = [c for c in df.columns if c not in pk_cols]
+    non_pk    = [c for c in df.columns if c not in pk_cols]
     col_list  = ", ".join(df.columns)
     val_list  = ", ".join(f":{c}" for c in df.columns)
     on_clause = " AND ".join(f"tgt.{c} = src.{c}" for c in pk_cols)
-    update_set = ", ".join(f"tgt.{c} = src.{c}" for c in non_pk) if non_pk else "tgt.{} = tgt.{}".format(pk_cols[0], pk_cols[0])
+    update_set = (
+        ", ".join(f"tgt.{c} = src.{c}" for c in non_pk)
+        if non_pk
+        else f"tgt.{pk_cols[0]} = tgt.{pk_cols[0]}"
+    )
 
     merge_sql = f"""
         MERGE {schema}.{table} AS tgt
@@ -697,21 +563,19 @@ def main():
     )
     args = parser.parse_args()
 
-    if PROXIES:
+    if PROXY_URL:
         log.info(f"Using residential proxy: {PROXY_URL.split('@')[-1]}")
     else:
         log.warning("NBA_PROXY_URL not set. Requests may be blocked by stats.nba.com.")
 
     engine = get_engine()
 
-    # Always reload teams reference
     load_teams(engine)
 
-    # Determine target dates / game IDs
     if args.backfill:
         game_pairs = get_all_season_game_ids()
     else:
-        yesterday = date.today() - timedelta(days=1)
+        yesterday  = date.today() - timedelta(days=1)
         game_pairs = get_game_ids([yesterday])
 
     if not game_pairs:
@@ -722,9 +586,7 @@ def main():
     for game_id, game_date in game_pairs:
         process_game(game_id, game_date, engine)
 
-    # After all box scores are loaded, sync players reference
     upsert_players(engine)
-
     log.info("NBA ETL complete.")
 
 
