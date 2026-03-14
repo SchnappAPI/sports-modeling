@@ -37,7 +37,7 @@ from nba_api.stats.endpoints import (
     BoxScoreTraditionalV3,
     BoxScoreAdvancedV3,
     BoxScorePlayerTrackV3,
-    ScoreboardV2,
+    ScoreboardV3,
 )
 from nba_api.stats.static import teams as static_teams
 
@@ -128,20 +128,23 @@ def load_teams(engine):
 
 # ---------------------------------------------------------------------------
 # Step 2: Fetch scoreboard metadata for a set of dates
-# Returns dict keyed by game_id with full metadata from ScoreboardV2
+# Returns dict keyed by game_id with full metadata for nba.games.
+# Uses ScoreboardV3 which is correct for the 2025-26 season.
+#
+# ScoreboardV3 GameHeader fields used:
+#   gameId, gameCode, gameTimeUTC
+# ScoreboardV3 LineScore fields used:
+#   gameId, teamId, teamTricode, score
+#   Row order within each game: away team first, home team second.
 # ---------------------------------------------------------------------------
 
 def fetch_scoreboard_metadata(target_dates: list) -> dict:
-    """
-    Calls ScoreboardV2 once per unique date and returns a dict of
-    game_id -> metadata dict covering all columns in nba.games.
-    """
     metadata = {}
     unique_dates = sorted(set(target_dates))
     for game_date in unique_dates:
         date_str = game_date.strftime("%Y-%m-%d")
         try:
-            sb = ScoreboardV2(
+            sb = ScoreboardV3(
                 game_date=date_str,
                 league_id="00",
                 proxy=PROXY_URL,
@@ -149,49 +152,63 @@ def fetch_scoreboard_metadata(target_dates: list) -> dict:
             time.sleep(API_DELAY)
             sb_data = sb.get_normalized_dict()
 
-            # GameHeader: game_id, game_sequence, game_code, home/away team ids, arena
+            # GameHeader: one row per game
             headers = {
-                row["GAME_ID"]: row
+                row["gameId"]: row
                 for row in sb_data.get("GameHeader", [])
             }
 
-            # LineScore: final scores per team per game
-            scores = {}
+            # LineScore: two rows per game (away first, home second)
+            # Group by gameId preserving insertion order
+            line_scores = {}
             for row in sb_data.get("LineScore", []):
-                gid  = row["GAME_ID"]
-                tid  = str(row.get("TEAM_ID", ""))
-                pts  = safe_int(row.get("PTS"))
-                abbr = row.get("TEAM_ABBREVIATION", "")
-                if gid not in scores:
-                    scores[gid] = []
-                scores[gid].append({"team_id": tid, "pts": pts, "abbr": abbr})
+                gid = row.get("gameId")
+                if not gid:
+                    continue
+                if gid not in line_scores:
+                    line_scores[gid] = []
+                line_scores[gid].append({
+                    "team_id":  str(row.get("teamId", "")),
+                    "tricode":  row.get("teamTricode", ""),
+                    "score":    safe_int(row.get("score")),
+                })
 
             for gid, hdr in headers.items():
-                game_code   = hdr.get("GAMECODE") or ""
-                home_tid    = str(hdr.get("HOME_TEAM_ID") or "")
-                away_tid    = str(hdr.get("VISITOR_TEAM_ID") or "")
-                game_seq    = safe_int(hdr.get("GAME_SEQUENCE"))
-                arena       = hdr.get("ARENA_NAME") or ""
-                # Derive team abbreviations and scores from LineScore
-                home_abbr = away_abbr = ""
-                home_pts  = away_pts  = None
-                for entry in scores.get(gid, []):
-                    if entry["team_id"] == home_tid:
-                        home_abbr = entry["abbr"]
-                        home_pts  = entry["pts"]
-                    elif entry["team_id"] == away_tid:
-                        away_abbr = entry["abbr"]
-                        away_pts  = entry["pts"]
+                game_code  = hdr.get("gameCode") or ""
+                game_time  = hdr.get("gameTimeUTC") or ""
+
+                # Derive sequence number from game_code if present
+                # Format is YYYYMMDD/AWYHOM, sequence not directly in V3
+                # Use position in the day's game list as a proxy
+                game_seq = None
+
+                # Extract home/away from line score rows
+                # Away = index 0, Home = index 1
+                ls = line_scores.get(gid, [])
+                away_abbr = away_tid = ""
+                home_abbr = home_tid = ""
+                away_pts  = home_pts = None
+                if len(ls) >= 2:
+                    away_abbr = ls[0]["tricode"]
+                    away_tid  = ls[0]["team_id"]
+                    away_pts  = ls[0]["score"]
+                    home_abbr = ls[1]["tricode"]
+                    home_tid  = ls[1]["team_id"]
+                    home_pts  = ls[1]["score"]
+                elif len(ls) == 1:
+                    # Incomplete data; take what we have
+                    home_abbr = ls[0]["tricode"]
+                    home_tid  = ls[0]["team_id"]
+                    home_pts  = ls[0]["score"]
 
                 game_total = (
                     (home_pts + away_pts)
                     if home_pts is not None and away_pts is not None
                     else None
                 )
-                # game_display mirrors the Excel source format e.g. "01 PHX@SAC"
                 game_display = (
-                    f"{game_seq:02d} {away_abbr}@{home_abbr}"
-                    if game_seq and away_abbr and home_abbr
+                    f"{away_abbr}@{home_abbr}"
+                    if away_abbr and home_abbr
                     else ""
                 )
 
@@ -211,7 +228,7 @@ def fetch_scoreboard_metadata(target_dates: list) -> dict:
                 }
 
         except Exception as exc:
-            log.warning(f"    ScoreboardV2 failed for {date_str}: {exc}")
+            log.warning(f"    ScoreboardV3 failed for {date_str}: {exc}")
 
     log.info(f"  Fetched scoreboard metadata for {len(metadata)} game(s) "
              f"across {len(unique_dates)} date(s)")
@@ -263,7 +280,12 @@ def get_all_season_game_ids() -> list:
         .drop_duplicates("GAME_ID")
         .values.tolist()
     )
-    return [(gid, pd.to_datetime(gdate).date()) for gid, gdate in pairs]
+    # Skip preseason games (IDs starting with 001)
+    return [
+        (gid, pd.to_datetime(gdate).date())
+        for gid, gdate in pairs
+        if not str(gid).startswith("001")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -450,22 +472,30 @@ def process_game(game_id: str, game_date: date, game_meta: dict, engine) -> None
                 ["game_id", "team_id", "quarter"])
         log.info(f"    Upserted {len(df_teams_box)} team box score rows")
 
-    # Games: use ScoreboardV2 metadata where available, fall back to box score totals
+    # Games: use ScoreboardV3 metadata. Wrapped in try/except so an FK
+    # violation on an unrecognized team abbreviation logs a warning and
+    # does not kill the run. The game is still considered processed since
+    # player box scores already landed above.
     meta = game_meta.get(game_id)
     if meta:
-        df_game = pd.DataFrame([{
-            "game_id":       game_id,
-            "game_date":     meta["game_date"],
-            "game_sequence": meta["game_sequence"],
-            "game_code":     meta["game_code"],
-            "game_display":  meta["game_display"],
-            "home_team":     meta["home_team"],
-            "home_team_id":  meta["home_team_id"],
-            "away_team":     meta["away_team"],
-            "away_team_id":  meta["away_team_id"],
-            "season_year":   meta["season_year"],
-        }])
-        _upsert(df_game, engine, "nba", "games", ["game_id"])
+        try:
+            df_game = pd.DataFrame([{
+                "game_id":       game_id,
+                "game_date":     meta["game_date"],
+                "game_sequence": meta["game_sequence"],
+                "game_code":     meta["game_code"],
+                "game_display":  meta["game_display"],
+                "home_team":     meta["home_team"],
+                "home_team_id":  meta["home_team_id"],
+                "away_team":     meta["away_team"],
+                "away_team_id":  meta["away_team_id"],
+                "season_year":   meta["season_year"],
+            }])
+            _upsert(df_game, engine, "nba", "games", ["game_id"])
+        except Exception as exc:
+            log.warning(f"    Games upsert failed for {game_id}: {exc}")
+    else:
+        log.warning(f"    No scoreboard metadata found for {game_id}, skipping games row")
 
     all_pids = set(advanced_by_player.keys()) | set(tracking_by_player.keys())
     if all_pids:
