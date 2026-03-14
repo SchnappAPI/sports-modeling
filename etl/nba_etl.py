@@ -7,7 +7,7 @@ Covers:
   - Quarter box scores (Q1-Q4 + OT periods) -> nba.player_box_score_stats
   - Team box scores per period              -> nba.team_box_score_stats
   - Game metadata                           -> nba.games
-  - Teams reference                         -> nba.teams  (delete/reload)
+  - Teams reference                         -> nba.teams  (upsert)
   - Players reference                       -> nba.players (upsert)
   - Advanced box scores (usage, ratings)    -> nba.player_tracking_stats
   - Player tracking (touches/passes/reb)    -> nba.player_tracking_stats
@@ -37,6 +37,7 @@ from nba_api.stats.endpoints import (
     BoxScoreTraditionalV3,
     BoxScoreAdvancedV3,
     BoxScorePlayerTrackV3,
+    ScoreboardV2,
 )
 from nba_api.stats.static import teams as static_teams
 
@@ -100,7 +101,7 @@ def safe_int(val):
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Load teams reference (delete + reload)
+# Step 1: Load teams reference (upsert, no delete)
 # ---------------------------------------------------------------------------
 
 def load_teams(engine):
@@ -124,8 +125,101 @@ def load_teams(engine):
     _upsert(df, engine, "nba", "teams", ["nba_team"])
     log.info(f"  Loaded {len(df)} teams")
 
+
 # ---------------------------------------------------------------------------
-# Step 2: Discover game IDs
+# Step 2: Fetch scoreboard metadata for a set of dates
+# Returns dict keyed by game_id with full metadata from ScoreboardV2
+# ---------------------------------------------------------------------------
+
+def fetch_scoreboard_metadata(target_dates: list) -> dict:
+    """
+    Calls ScoreboardV2 once per unique date and returns a dict of
+    game_id -> metadata dict covering all columns in nba.games.
+    """
+    metadata = {}
+    unique_dates = sorted(set(target_dates))
+    for game_date in unique_dates:
+        date_str = game_date.strftime("%Y-%m-%d")
+        try:
+            sb = ScoreboardV2(
+                game_date=date_str,
+                league_id="00",
+                proxy=PROXY_URL,
+            )
+            time.sleep(API_DELAY)
+            sb_data = sb.get_normalized_dict()
+
+            # GameHeader: game_id, game_sequence, game_code, home/away team ids, arena
+            headers = {
+                row["GAME_ID"]: row
+                for row in sb_data.get("GameHeader", [])
+            }
+
+            # LineScore: final scores per team per game
+            scores = {}
+            for row in sb_data.get("LineScore", []):
+                gid  = row["GAME_ID"]
+                tid  = str(row.get("TEAM_ID", ""))
+                pts  = safe_int(row.get("PTS"))
+                abbr = row.get("TEAM_ABBREVIATION", "")
+                if gid not in scores:
+                    scores[gid] = []
+                scores[gid].append({"team_id": tid, "pts": pts, "abbr": abbr})
+
+            for gid, hdr in headers.items():
+                game_code   = hdr.get("GAMECODE") or ""
+                home_tid    = str(hdr.get("HOME_TEAM_ID") or "")
+                away_tid    = str(hdr.get("VISITOR_TEAM_ID") or "")
+                game_seq    = safe_int(hdr.get("GAME_SEQUENCE"))
+                arena       = hdr.get("ARENA_NAME") or ""
+                # Derive team abbreviations and scores from LineScore
+                home_abbr = away_abbr = ""
+                home_pts  = away_pts  = None
+                for entry in scores.get(gid, []):
+                    if entry["team_id"] == home_tid:
+                        home_abbr = entry["abbr"]
+                        home_pts  = entry["pts"]
+                    elif entry["team_id"] == away_tid:
+                        away_abbr = entry["abbr"]
+                        away_pts  = entry["pts"]
+
+                game_total = (
+                    (home_pts + away_pts)
+                    if home_pts is not None and away_pts is not None
+                    else None
+                )
+                # game_display mirrors the Excel source format e.g. "01 PHX@SAC"
+                game_display = (
+                    f"{game_seq:02d} {away_abbr}@{home_abbr}"
+                    if game_seq and away_abbr and home_abbr
+                    else ""
+                )
+
+                metadata[gid] = {
+                    "game_date":     game_date,
+                    "game_sequence": game_seq,
+                    "game_code":     game_code,
+                    "game_display":  game_display,
+                    "home_team":     home_abbr,
+                    "home_team_id":  home_tid,
+                    "away_team":     away_abbr,
+                    "away_team_id":  away_tid,
+                    "home_pts":      home_pts,
+                    "away_pts":      away_pts,
+                    "game_total":    game_total,
+                    "season_year":   CURRENT_SEASON[:4],
+                }
+
+        except Exception as exc:
+            log.warning(f"    ScoreboardV2 failed for {date_str}: {exc}")
+
+    log.info(f"  Fetched scoreboard metadata for {len(metadata)} game(s) "
+             f"across {len(unique_dates)} date(s)")
+    return metadata
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Discover game IDs
 # ---------------------------------------------------------------------------
 
 def get_game_ids(target_dates: list) -> list:
@@ -173,14 +267,14 @@ def get_all_season_game_ids() -> list:
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Process one game
+# Step 4: Process one game
 # ---------------------------------------------------------------------------
 
-def process_game(game_id: str, game_date: date, engine) -> None:
+def process_game(game_id: str, game_date: date, game_meta: dict, engine) -> None:
     log.info(f"  Processing game {game_id} ({game_date})")
 
     # ------------------------------------------------------------------
-    # 3a. BoxScoreTraditionalV3: player rows + team rows across all periods
+    # 4a. BoxScoreTraditionalV3: player rows + team rows across all periods
     # ------------------------------------------------------------------
     trad = None
     for attempt in range(1, 4):
@@ -279,32 +373,8 @@ def process_game(game_id: str, game_date: date, engine) -> None:
             "pts":               safe_int(row.get("PTS")),
         })
 
-    # Derive game totals from team period rows
-    team_totals = {}
-    for row in team_stats_raw:
-        tid  = safe_int(row.get("TEAM_ID"))
-        pts  = safe_int(row.get("PTS")) or 0
-        abbr = row.get("TEAM_ABBREVIATION") or ""
-        if tid not in team_totals:
-            team_totals[tid] = {"pts": 0, "abbr": abbr}
-        team_totals[tid]["pts"] += pts
-
-    team_ids = list(team_totals.keys())
-    home_team_id = away_team_id = None
-    home_abbr = away_abbr = ""
-    home_pts = away_pts = game_total = None
-
-    if len(team_ids) == 2:
-        home_team_id = team_ids[0]
-        away_team_id = team_ids[1]
-        home_abbr    = team_totals[home_team_id]["abbr"]
-        away_abbr    = team_totals[away_team_id]["abbr"]
-        home_pts     = team_totals[home_team_id]["pts"]
-        away_pts     = team_totals[away_team_id]["pts"]
-        game_total   = home_pts + away_pts
-
     # ------------------------------------------------------------------
-    # 3b. BoxScoreAdvancedV3: usage, ratings, pace, PIE per player
+    # 4b. BoxScoreAdvancedV3: usage, ratings, pace, PIE per player
     # ------------------------------------------------------------------
     advanced_by_player = {}
     try:
@@ -329,7 +399,7 @@ def process_game(game_id: str, game_date: date, engine) -> None:
         log.warning(f"    BoxScoreAdvancedV3 failed for {game_id}: {exc}")
 
     # ------------------------------------------------------------------
-    # 3c. BoxScorePlayerTrackV3: touches, rebound chances, passes, contested shots
+    # 4c. BoxScorePlayerTrackV3: touches, rebound chances, passes, contested shots
     # ------------------------------------------------------------------
     tracking_by_player = {}
     try:
@@ -365,7 +435,7 @@ def process_game(game_id: str, game_date: date, engine) -> None:
         log.warning(f"    BoxScorePlayerTrackV3 failed for {game_id}: {exc}")
 
     # ------------------------------------------------------------------
-    # 3d. Write to database
+    # 4d. Write to database
     # ------------------------------------------------------------------
 
     if player_rows:
@@ -380,19 +450,20 @@ def process_game(game_id: str, game_date: date, engine) -> None:
                 ["game_id", "team_id", "quarter"])
         log.info(f"    Upserted {len(df_teams_box)} team box score rows")
 
-    if home_team_id and away_team_id:
+    # Games: use ScoreboardV2 metadata where available, fall back to box score totals
+    meta = game_meta.get(game_id)
+    if meta:
         df_game = pd.DataFrame([{
-            "game_id":        game_id,
-            "game_date":      game_date,
-            "season_id":      CURRENT_SEASON_ID,
-            "home_team_id":   home_team_id,
-            "home_team_abbr": home_abbr,
-            "away_team_id":   away_team_id,
-            "away_team_abbr": away_abbr,
-            "home_score":     home_pts,
-            "away_score":     away_pts,
-            "game_total":     game_total,
-            "num_periods":    num_periods,
+            "game_id":       game_id,
+            "game_date":     meta["game_date"],
+            "game_sequence": meta["game_sequence"],
+            "game_code":     meta["game_code"],
+            "game_display":  meta["game_display"],
+            "home_team":     meta["home_team"],
+            "home_team_id":  meta["home_team_id"],
+            "away_team":     meta["away_team"],
+            "away_team_id":  meta["away_team_id"],
+            "season_year":   meta["season_year"],
         }])
         _upsert(df_game, engine, "nba", "games", ["game_id"])
 
@@ -580,9 +651,7 @@ def main():
 
     if args.backfill:
         game_pairs = get_all_season_game_ids()
-        # Sort oldest first so batches always fill in chronological order
         game_pairs.sort(key=lambda x: x[1])
-        # Filter to only games not yet loaded
         with engine.connect() as conn:
             loaded = {
                 row[0] for row in conn.execute(
@@ -603,9 +672,13 @@ def main():
         log.info("No games found for the target date range. Nothing to load.")
         return
 
+    # Fetch scoreboard metadata once per unique date for all target games
+    target_dates = list({gdate for _, gdate in game_pairs})
+    game_meta = fetch_scoreboard_metadata(target_dates)
+
     log.info(f"Processing {len(game_pairs)} game(s)")
     for game_id, game_date in game_pairs:
-        process_game(game_id, game_date, engine)
+        process_game(game_id, game_date, game_meta, engine)
 
     upsert_players(engine)
     log.info("NBA ETL complete.")
