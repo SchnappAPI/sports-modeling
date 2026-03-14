@@ -104,17 +104,19 @@ def safe_int(val):
 # ---------------------------------------------------------------------------
 
 def load_teams(engine):
-    log.info("Loading nba.teams (truncate + reload)")
+    log.info("Loading nba.teams (delete + reload)")
     raw = static_teams.get_teams()
     rows = [
         {
-            "team_id":      t["id"],
-            "full_name":    t["full_name"],
-            "abbreviation": t["abbreviation"],
-            "nickname":     t["nickname"],
-            "city":         t["city"],
-            "state":        t["state"],
-            "year_founded": safe_int(t.get("year_founded")),
+            "nba_team_id":   t["id"],
+            "nba_team":      t["abbreviation"],
+            "nba_team_name": t["full_name"],
+            "roto_team":     t["abbreviation"],
+            "espn_team":     t["abbreviation"],
+            "espn_team_id":  None,
+            "aywt_team":     t["abbreviation"],
+            "aywt_team_id":  None,
+            "conference":    None,
         }
         for t in raw
     ]
