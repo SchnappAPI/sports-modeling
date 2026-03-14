@@ -7,15 +7,16 @@ Covers:
   - Quarter box scores (Q1-Q4 + OT periods) -> nba.player_box_score_stats
   - Team box scores per period              -> nba.team_box_score_stats
   - Game metadata                           -> nba.games
-  - Teams reference                         -> nba.teams  (truncate/reload)
+  - Teams reference                         -> nba.teams  (delete/reload)
   - Players reference                       -> nba.players (upsert)
   - Advanced box scores (usage, ratings)    -> nba.player_tracking_stats
   - Player tracking (touches/passes/reb)    -> nba.player_tracking_stats
   - Matchup position aggregation            -> nba.matchup_position_stats
 
 Run modes:
-  python nba_etl.py                  # yesterday's games only (nightly)
-  python nba_etl.py --backfill       # all games in the current season
+  python nba_etl.py                           # yesterday's games only (nightly)
+  python nba_etl.py --backfill                # all unloaded games in current season
+  python nba_etl.py --backfill --limit 200    # oldest 200 unloaded games only
 
 Secrets (GitHub Actions env vars):
   AZURE_SQL_SERVER, AZURE_SQL_DATABASE, AZURE_SQL_USERNAME,
@@ -50,11 +51,10 @@ log = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-PROXY_URL     = os.environ.get("NBA_PROXY_URL")
-PROXIES       = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+PROXY_URL         = os.environ.get("NBA_PROXY_URL")
 CURRENT_SEASON    = "2025-26"
 CURRENT_SEASON_ID = "22025"
-API_DELAY     = 0.75   # seconds between API calls
+API_DELAY         = 0.75   # seconds between API calls
 
 
 def period_label(period: int) -> str:
@@ -100,7 +100,7 @@ def safe_int(val):
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Load teams reference (truncate + reload)
+# Step 1: Load teams reference (delete + reload)
 # ---------------------------------------------------------------------------
 
 def load_teams(engine):
@@ -108,15 +108,15 @@ def load_teams(engine):
     raw = static_teams.get_teams()
     rows = [
         {
-            "nba_team_id":   t["id"],
-            "nba_team":      t["abbreviation"],
-            "nba_team_name": t["full_name"],
-            "roto_team":     t["abbreviation"],
-            "espn_team":     t["abbreviation"],
-            "espn_team_id":  None,
-            "aywt_team":     t["abbreviation"],
-            "aywt_team_id":  None,
-            "conference":    None,
+            "nba_team_id":  t["id"],
+            "nba_team":     t["abbreviation"],
+            "nba_team_name":t["full_name"],
+            "roto_team":    t["abbreviation"],
+            "espn_team":    t["abbreviation"],
+            "espn_team_id": None,
+            "aywt_team":    t["abbreviation"],
+            "aywt_team_id": None,
+            "conference":   None,
         }
         for t in raw
     ]
@@ -178,6 +178,7 @@ def get_all_season_game_ids() -> list:
 # ---------------------------------------------------------------------------
 # Step 3: Process one game
 # ---------------------------------------------------------------------------
+
 def process_game(game_id: str, game_date: date, engine) -> None:
     log.info(f"  Processing game {game_id} ({game_date})")
 
@@ -318,14 +319,14 @@ def process_game(game_id: str, game_date: date, engine) -> None:
             if pid is None:
                 continue
             advanced_by_player[pid] = {
-                "usage_pct":  safe_float(row.get("usagePercentage") or row.get("USG_PCT")),
-                "off_rating": safe_float(row.get("offensiveRating") or row.get("OFF_RATING")),
-                "def_rating": safe_float(row.get("defensiveRating") or row.get("DEF_RATING")),
-                "net_rating": safe_float(row.get("netRating") or row.get("NET_RATING")),
-                "pace":       safe_float(row.get("pace") or row.get("PACE")),
-                "pie":        safe_float(row.get("PIE")),
+                "usage_pct":         safe_float(row.get("usagePercentage") or row.get("USG_PCT")),
+                "off_rating":        safe_float(row.get("offensiveRating") or row.get("OFF_RATING")),
+                "def_rating":        safe_float(row.get("defensiveRating") or row.get("DEF_RATING")),
+                "net_rating":        safe_float(row.get("netRating") or row.get("NET_RATING")),
+                "pace":              safe_float(row.get("pace") or row.get("PACE")),
+                "pie":               safe_float(row.get("PIE")),
                 "true_shooting_pct": safe_float(row.get("trueShootingPercentage")),
-                "efg_pct":    safe_float(row.get("effectiveFieldGoalPercentage")),
+                "efg_pct":           safe_float(row.get("effectiveFieldGoalPercentage")),
             }
     except Exception as exc:
         log.warning(f"    BoxScoreAdvancedV3 failed for {game_id}: {exc}")
@@ -343,25 +344,25 @@ def process_game(game_id: str, game_date: date, engine) -> None:
             if pid is None:
                 continue
             tracking_by_player[pid] = {
-                "team_id":                      safe_int(row.get("teamId") or row.get("TEAM_ID")),
-                "speed":                        safe_float(row.get("speed")),
-                "distance":                     safe_float(row.get("distance")),
-                "touches":                      safe_int(row.get("touches")),
-                "passes_made":                  safe_int(row.get("passes")),
-                "secondary_ast":                safe_int(row.get("secondaryAssists")),
-                "ft_ast":                       safe_int(row.get("freeThrowAssists")),
-                "reb_chances":                  safe_int(row.get("reboundChancesTotal")),
-                "oreb_chances":                 safe_int(row.get("reboundChancesOffensive")),
-                "dreb_chances":                 safe_int(row.get("reboundChancesDefensive")),
-                "contested_fgm":                safe_int(row.get("contestedFieldGoalsMade")),
-                "contested_fga":                safe_int(row.get("contestedFieldGoalsAttempted")),
-                "contested_fg_pct":             safe_float(row.get("contestedFieldGoalPercentage")),
-                "uncontested_fgm":              safe_int(row.get("uncontestedFieldGoalsMade")),
-                "uncontested_fga":              safe_int(row.get("uncontestedFieldGoalsAttempted")),
-                "uncontested_fg_pct":           safe_float(row.get("uncontestedFieldGoalsPercentage")),
-                "defended_at_rim_fgm":          safe_int(row.get("defendedAtRimFieldGoalsMade")),
-                "defended_at_rim_fga":          safe_int(row.get("defendedAtRimFieldGoalsAttempted")),
-                "defended_at_rim_fg_pct":       safe_float(row.get("defendedAtRimFieldGoalPercentage")),
+                "team_id":                safe_int(row.get("teamId") or row.get("TEAM_ID")),
+                "speed":                  safe_float(row.get("speed")),
+                "distance":               safe_float(row.get("distance")),
+                "touches":                safe_int(row.get("touches")),
+                "passes_made":            safe_int(row.get("passes")),
+                "secondary_ast":          safe_int(row.get("secondaryAssists")),
+                "ft_ast":                 safe_int(row.get("freeThrowAssists")),
+                "reb_chances":            safe_int(row.get("reboundChancesTotal")),
+                "oreb_chances":           safe_int(row.get("reboundChancesOffensive")),
+                "dreb_chances":           safe_int(row.get("reboundChancesDefensive")),
+                "contested_fgm":          safe_int(row.get("contestedFieldGoalsMade")),
+                "contested_fga":          safe_int(row.get("contestedFieldGoalsAttempted")),
+                "contested_fg_pct":       safe_float(row.get("contestedFieldGoalPercentage")),
+                "uncontested_fgm":        safe_int(row.get("uncontestedFieldGoalsMade")),
+                "uncontested_fga":        safe_int(row.get("uncontestedFieldGoalsAttempted")),
+                "uncontested_fg_pct":     safe_float(row.get("uncontestedFieldGoalsPercentage")),
+                "defended_at_rim_fgm":    safe_int(row.get("defendedAtRimFieldGoalsMade")),
+                "defended_at_rim_fga":    safe_int(row.get("defendedAtRimFieldGoalsAttempted")),
+                "defended_at_rim_fg_pct": safe_float(row.get("defendedAtRimFieldGoalPercentage")),
             }
     except Exception as exc:
         log.warning(f"    BoxScorePlayerTrackV3 failed for {game_id}: {exc}")
@@ -472,18 +473,18 @@ def _aggregate_matchup(player_rows, game_id, game_date, engine):
     sum_cols = [c for c in agg_df.columns if c.startswith("total_")]
     grouped = (
         agg_df.groupby(["game_id","game_date","defending_team_id",
-                         "defending_team_abbr","position_group"])[sum_cols]
+                        "defending_team_abbr","position_group"])[sum_cols]
         .sum()
         .reset_index()
     )
     counts = (
         agg_df.groupby(["game_id","game_date","defending_team_id",
-                          "defending_team_abbr","position_group"])
+                        "defending_team_abbr","position_group"])
         .size()
         .reset_index(name="player_count")
     )
     final_df = grouped.merge(counts, on=["game_id","game_date","defending_team_id",
-                                          "defending_team_abbr","position_group"])
+                                         "defending_team_abbr","position_group"])
 
     _upsert(final_df, engine, "nba", "matchup_position_stats",
             ["game_id", "defending_team_id", "position_group"])
@@ -563,6 +564,12 @@ def main():
         action="store_true",
         help="Fetch all games in the current season rather than just yesterday.",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Process only the oldest N unloaded games. Use for batched backfill.",
+    )
     args = parser.parse_args()
 
     if PROXY_URL:
@@ -576,6 +583,21 @@ def main():
 
     if args.backfill:
         game_pairs = get_all_season_game_ids()
+        # Sort oldest first so batches always fill in chronological order
+        game_pairs.sort(key=lambda x: x[1])
+        # Filter to only games not yet loaded
+        with engine.connect() as conn:
+            loaded = {
+                row[0] for row in conn.execute(
+                    text("SELECT DISTINCT game_id FROM nba.player_box_score_stats")
+                )
+            }
+        game_pairs = [p for p in game_pairs if p[0] not in loaded]
+        if args.limit:
+            game_pairs = game_pairs[:args.limit]
+            log.info(f"  Batched backfill: {len(game_pairs)} unloaded game(s) targeted")
+        else:
+            log.info(f"  Full backfill: {len(game_pairs)} unloaded game(s) targeted")
     else:
         yesterday  = date.today() - timedelta(days=1)
         game_pairs = get_game_ids([yesterday])
