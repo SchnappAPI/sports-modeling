@@ -9,6 +9,10 @@ on:
         description: 'Run full season backfill (true/false)'
         required: false
         default: 'false'
+      limit:
+        description: 'Max games per backfill run (leave blank for all unloaded)'
+        required: false
+        default: '200'
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -44,7 +48,12 @@ jobs:
       - name: Run NBA ETL
         run: |
           if [ "${{ github.event.inputs.backfill }}" = "true" ]; then
-            python etl/nba_etl.py --backfill
+            LIMIT="${{ github.event.inputs.limit }}"
+            if [ -n "$LIMIT" ]; then
+              python etl/nba_etl.py --backfill --limit "$LIMIT"
+            else
+              python etl/nba_etl.py --backfill
+            fi
           else
             python etl/nba_etl.py
           fi
