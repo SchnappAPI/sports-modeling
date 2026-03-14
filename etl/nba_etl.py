@@ -120,7 +120,7 @@ def load_teams(engine):
     ]
     df = pd.DataFrame(rows)
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE TABLE nba.teams"))
+        conn.execute(text("DELETE FROM nba.teams"))
     df.to_sql("teams", engine, schema="nba", if_exists="append", index=False)
     log.info(f"  Loaded {len(df)} teams")
 
