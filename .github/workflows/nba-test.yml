@@ -1,30 +1,50 @@
-name: NBA ETL Test
+name: NBA Nightly ETL
 
 on:
+  schedule:
+    - cron: '0 9 * * *'   # UTC 09:00 = 3:00 AM CST / 4:00 AM CDT
   workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Run full season backfill (true/false)'
+        required: false
+        default: 'false'
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
   AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
   AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
   AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
-  NBA_PROXY_URL: ${{ secrets.NBA_PROXY_URL }}
+  NBA_PROXY_URL:      ${{ secrets.NBA_PROXY_URL }}
 
 jobs:
-  nba:
+  etl:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Install Microsoft ODBC Driver 18
         run: |
-          curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-          curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --batch --yes --dearmor \
+                -o /usr/share/keyrings/microsoft-prod.gpg
+          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
       - name: Install dependencies
         run: pip install -r etl/requirements.txt
+
       - name: Run NBA ETL
-        run: python etl/nba_etl.py
+        run: |
+          if [ "${{ github.event.inputs.backfill }}" = "true" ]; then
+            python etl/nba_etl.py --backfill
+          else
+            python etl/nba_etl.py
+          fi
