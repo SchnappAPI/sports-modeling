@@ -104,7 +104,7 @@ def safe_int(val):
 # ---------------------------------------------------------------------------
 
 def load_teams(engine):
-    log.info("Loading nba.teams (delete + reload)")
+    log.info("Loading nba.teams (upsert)")
     raw = static_teams.get_teams()
     rows = [
         {
@@ -121,10 +121,7 @@ def load_teams(engine):
         for t in raw
     ]
     df = pd.DataFrame(rows)
-    with engine.begin() as conn:
-        conn.execute(text("DELETE FROM nba.players"))
-        conn.execute(text("DELETE FROM nba.teams"))
-    df.to_sql("teams", engine, schema="nba", if_exists="append", index=False)
+    _upsert(df, engine, "nba", "teams", ["nba_team"])
     log.info(f"  Loaded {len(df)} teams")
 
 # ---------------------------------------------------------------------------
@@ -589,7 +586,7 @@ def main():
         with engine.connect() as conn:
             loaded = {
                 row[0] for row in conn.execute(
-                    text("SELECT DISTINCT game_id FROM nba.player_box_score_stats")
+                    text("SELECT DISTINCT game_id FROM nba.games")
                 )
             }
         game_pairs = [p for p in game_pairs if p[0] not in loaded]
