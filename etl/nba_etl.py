@@ -178,21 +178,27 @@ def get_all_season_game_ids() -> list:
 # ---------------------------------------------------------------------------
 # Step 3: Process one game
 # ---------------------------------------------------------------------------
-
 def process_game(game_id: str, game_date: date, engine) -> None:
     log.info(f"  Processing game {game_id} ({game_date})")
 
     # ------------------------------------------------------------------
     # 3a. BoxScoreTraditionalV3: player rows + team rows across all periods
     # ------------------------------------------------------------------
-    try:
-        trad = BoxScoreTraditionalV3(game_id=game_id, proxy=PROXY_URL)
-        time.sleep(API_DELAY)
-    except Exception as exc:
-        log.error(f"    BoxScoreTraditionalV3 failed for {game_id}: {exc}")
+    trad = None
+    for attempt in range(1, 4):
+        try:
+            trad = BoxScoreTraditionalV3(game_id=game_id, proxy=PROXY_URL)
+            time.sleep(API_DELAY)
+            break
+        except Exception as exc:
+            log.warning(f"    BoxScoreTraditionalV3 attempt {attempt}/3 failed for {game_id}: {exc}")
+            if attempt < 3:
+                time.sleep(5)
+    if trad is None:
+        log.error(f"    Skipping game {game_id} after 3 failed attempts")
         return
 
-    trad_data = trad.get_normalized_dict()
+    trad_data        = trad.get_normalized_dict()
     player_stats_raw = trad_data.get("PlayerStats", [])
     team_stats_raw   = trad_data.get("TeamStats", [])
 
@@ -494,28 +500,22 @@ def upsert_players(engine):
         MERGE nba.players AS tgt
         USING (
             SELECT DISTINCT
-                player_id,
-                first_name,
-                last_name,
-                team_id,
-                team_abbreviation,
+                player_id                    AS nba_player_id,
+                first_name + ' ' + last_name AS player_name,
+                team_abbreviation            AS nba_team,
                 position
             FROM nba.player_box_score_stats
             WHERE player_id IS NOT NULL
         ) AS src
-        ON tgt.player_id = src.player_id
+        ON tgt.nba_player_id = src.nba_player_id
         WHEN MATCHED THEN UPDATE SET
-            tgt.first_name        = src.first_name,
-            tgt.last_name         = src.last_name,
-            tgt.team_id           = src.team_id,
-            tgt.team_abbreviation = src.team_abbreviation,
-            tgt.position          = src.position,
-            tgt.updated_at        = GETUTCDATE()
+            tgt.player_name = src.player_name,
+            tgt.nba_team    = src.nba_team,
+            tgt.position    = src.position
         WHEN NOT MATCHED THEN INSERT
-            (player_id, first_name, last_name, team_id, team_abbreviation, position)
+            (nba_player_id, player_name, nba_team, position)
         VALUES
-            (src.player_id, src.first_name, src.last_name,
-             src.team_id, src.team_abbreviation, src.position);
+            (src.nba_player_id, src.player_name, src.nba_team, src.position);
     """
     with engine.begin() as conn:
         result = conn.execute(text(sql))
