@@ -41,16 +41,16 @@ Tables written per run:
   nba.lineup_stats               Season-to-date 5-man lineup stats. Upserted each run.
   nba.gravity_leaders            Season gravity scores per player. Upserted each run.
 
-API calls per game (up to 12, all proxied):
+API calls per game (up to 10 for regulation, +1 per OT period, all proxied):
   1-4.  BoxScoreTraditionalV3 x4   Q1, Q2, Q3, Q4 -> player_box_score_stats,
                                                       team_box_score_stats
-  5+.   BoxScoreTraditionalV3 xN   OT periods until empty, summed into one OT row
+  5+.   BoxScoreTraditionalV3 xN   OT periods until empty (no sleep on empty check),
+                                   summed into one OT row
   Next. PlayByPlayV3               -> nba.play_by_play
   Next. BoxScoreAdvancedV3         -> merged into nba.player_tracking_stats
   Next. BoxScorePlayerTrackV3      -> merged into nba.player_tracking_stats
   Next. BoxScoreHustleV2           -> nba.player_box_score_hustle
   Next. BoxScoreMatchupsV3         -> nba.player_box_score_matchups
-  Next. GameRotation               -> nba.game_rotation
 
 Once per run (not per game, proxied):
   ScoreboardV3               -> nba.games metadata for each target date
@@ -101,7 +101,6 @@ from nba_api.stats.endpoints import (
     boxscoreplayertrackv3,
     boxscorehustlev2,
     boxscorematchupsv3,
-    gamerotation,
     playbyplayv3,
     scoreboardv3,
     leaguedashplayerstats,
@@ -124,7 +123,7 @@ log = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 PROXY_URL     = os.environ.get("NBA_PROXY_URL")
-API_DELAY     = 0.75   # seconds between API calls
+API_DELAY     = 0.30   # seconds between API calls
 RETRY_WAIT    = 5      # seconds before a retry attempt
 RETRY_COUNT   = 3      # retry attempts per call
 DEFAULT_BATCH = 30     # games per run if --batch not specified
@@ -1199,31 +1198,29 @@ def process_game(game_id, game_date, game_meta, engine):
 
         log.info(f"    {quarter_label}: {len(p_rows)} player rows, {len(t_rows)} team rows")
 
-    # OT: fetch periods 5, 6, ... until empty
+    # OT: fetch periods 5, 6, ... until empty.
+    # Uses a direct try/except rather than api_call() so the API_DELAY sleep
+    # is only paid when a period actually has data. Non-OT games pay zero
+    # extra delay here because the first empty response exits immediately.
     ot_periods_data = []
     ot_period = 5
     while True:
-        ep_ot = api_call(
-            lambda p=ot_period: boxscoretraditionalv3.BoxScoreTraditionalV3(
+        try:
+            ep_ot = boxscoretraditionalv3.BoxScoreTraditionalV3(
                 game_id=game_id,
-                start_period=p,
-                end_period=p,
+                start_period=ot_period,
+                end_period=ot_period,
                 range_type=2,
                 start_range=0,
                 end_range=0,
                 proxy=PROXY_URL,
-            ),
-            f"BoxScoreTraditionalV3 {game_id} OT{ot_period - 4}",
-        )
-        if ep_ot is None:
-            break
-        try:
+            )
             ot_p_df = ep_ot.player_stats.get_data_frame()
             ot_t_df = ep_ot.team_stats.get_data_frame()
         except Exception:
             break
 
-        # An empty DataFrame or all-None minutes means this period did not happen
+        # Empty or all-null minutes means this period did not happen
         if ot_p_df is None or ot_p_df.empty:
             break
         has_data = (
@@ -1234,6 +1231,8 @@ def process_game(game_id, game_date, game_meta, engine):
         if not has_data:
             break
 
+        # Only sleep when data was actually returned
+        time.sleep(API_DELAY)
         ot_periods_data.append((ot_p_df, ot_t_df))
         ot_period += 1
 
@@ -1511,47 +1510,6 @@ def process_game(game_id, game_date, game_meta, engine):
         except Exception as exc:
             log.warning(f"  BoxScoreMatchupsV3 parse failed for {game_id}: {exc}")
 
-    # ------------------------------------------------------------------
-    # 5f. GameRotation  ->  nba.game_rotation
-    # Accessors: .away_team and .home_team. Legacy UPPER_CASE field names.
-    # ------------------------------------------------------------------
-    rotation_ep = api_call(
-        lambda: gamerotation.GameRotation(game_id=game_id, proxy=PROXY_URL),
-        f"GameRotation {game_id}",
-    )
-    if rotation_ep is not None:
-        try:
-            away_df = rotation_ep.away_team.get_data_frame()
-            home_df = rotation_ep.home_team.get_data_frame()
-            rotation_df = pd.concat([away_df, home_df], ignore_index=True)
-            rotation_rows = []
-            for _, row in rotation_df.iterrows():
-                pid     = safe_int(row.get("PERSON_ID"))
-                tid     = safe_int(row.get("TEAM_ID"))
-                in_time = safe_int(row.get("IN_TIME_REAL"))
-                if pid is None or tid is None or in_time is None:
-                    continue
-                rotation_rows.append({
-                    "game_id":       game_id,
-                    "team_id":       tid,
-                    "team_city":     safe_str(row.get("TEAM_CITY")),
-                    "team_name":     safe_str(row.get("TEAM_NAME")),
-                    "person_id":     pid,
-                    "player_first":  safe_str(row.get("PLAYER_FIRST")),
-                    "player_last":   safe_str(row.get("PLAYER_LAST")),
-                    "in_time_real":  in_time,
-                    "out_time_real": safe_int(row.get("OUT_TIME_REAL")),
-                    "player_pts":    safe_int(row.get("PLAYER_PTS")),
-                    "pt_diff":       safe_int(row.get("PT_DIFF")),
-                    "usg_pct":       safe_float(row.get("USG_PCT")),
-                })
-            if rotation_rows:
-                upsert(pd.DataFrame(rotation_rows), engine,
-                       "nba", "game_rotation",
-                       ["game_id", "team_id", "person_id", "in_time_real"])
-                log.info(f"    Rotation: {len(rotation_rows)} rows")
-        except Exception as exc:
-            log.warning(f"  GameRotation parse failed for {game_id}: {exc}")
 
     # ------------------------------------------------------------------
     # 5g. Matchup position aggregation (in-memory, no extra API call)
