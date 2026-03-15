@@ -6,4 +6,4 @@ pandas
 pyarrow
 requests
 mlb-statsapi
-nba_api>=1.10.1
+nba_api>=1.11.4
