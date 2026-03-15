@@ -730,8 +730,19 @@ def _upsert(df: pd.DataFrame, engine, schema: str, table: str, pk_cols: list):
     if df.empty:
         return
 
-    # Replace pandas NA/NaN with None so pyodbc sends NULL
-    df = df.where(pd.notnull(df), None)
+    # Convert all NaN/NaT values to None so pyodbc sends NULL
+    # Use applymap (pandas < 2.1) or map (pandas >= 2.1) for element-wise conversion
+    def _to_none(val):
+        if val is None:
+            return None
+        try:
+            if pd.isna(val):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return val
+
+    df = df.apply(lambda col: col.map(_to_none))
 
     non_pk    = [c for c in df.columns if c not in pk_cols]
     col_list  = ", ".join(df.columns)
