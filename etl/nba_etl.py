@@ -754,8 +754,17 @@ def api_call(fn, label):
 # Generic MERGE upsert
 # ---------------------------------------------------------------------------
 def _to_none(val):
+    """
+    Convert NaN, NaT, inf, or None to Python None so pyodbc sends NULL.
+    Handles float nan/inf, numpy scalars, and pandas NA types.
+    """
     if val is None:
         return None
+    if isinstance(val, float):
+        import math
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return val
     try:
         if pd.isna(val):
             return None
@@ -1378,6 +1387,12 @@ def process_game(game_id, game_date, game_meta, engine):
             row.update(advanced_by_player.get(pid, {}))
             row.update(tracking_by_player.get(pid, {}))
             tracking_rows.append(row)
+
+        # Seed any players that appear in advanced/tracking but were DNP in the
+        # traditional box score and therefore never passed through _seed_players.
+        # This prevents FK violations on player_tracking_stats.
+        _seed_players(tracking_rows, engine)
+
         upsert(pd.DataFrame(tracking_rows), engine,
                "nba", "player_tracking_stats", ["game_id", "player_id"])
         log.info(f"    Tracking: {len(tracking_rows)} rows")
