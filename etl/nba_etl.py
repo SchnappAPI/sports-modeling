@@ -3,20 +3,34 @@ nba_etl.py
 ----------
 Nightly NBA ETL for the sports modeling database.
 
-Covers:
-  - Quarter box scores (Q1-Q4 + OT periods) -> nba.player_box_score_stats
-  - Team box scores per period              -> nba.team_box_score_stats
-  - Game metadata                           -> nba.games
-  - Teams reference                         -> nba.teams  (upsert)
-  - Players reference                       -> nba.players (upsert)
-  - Advanced box scores (usage, ratings)    -> nba.player_tracking_stats
-  - Player tracking (touches/passes/reb)    -> nba.player_tracking_stats
-  - Matchup position aggregation            -> nba.matchup_position_stats
+Loads per run:
+  nba.play_by_play          Raw PBP events. PK: game_id + action_number.
+                            Use this table to derive per-quarter or any
+                            custom time-window box scores in Power BI or SQL.
+
+  nba.player_box_score_stats  Full-game box score per player. quarter='GAME'.
+                            Provides accurate min and plus_minus which cannot
+                            be reliably derived from PBP alone.
+
+  nba.team_box_score_stats  Full-game box score per team. quarter='GAME'.
+
+  nba.player_tracking_stats Game-level tracking stats (touches, rebound
+                            chances, passes, contested shots, usage, ratings).
+                            No quarter-level tracking exists in the NBA API.
+
+  nba.games                 One row per game with scoreboard metadata.
+  nba.teams                 30-team reference. Upserted each run.
+  nba.players               Player reference. Upserted from box score data.
+  nba.matchup_position_stats  Stats allowed by each team to each position
+                            group per game.
 
 Run modes:
-  python nba_etl.py                           # yesterday's games only (nightly)
-  python nba_etl.py --backfill                # all unloaded games in current season
-  python nba_etl.py --backfill --limit 200    # oldest 200 unloaded games only
+  python nba_etl.py                           # yesterday only (nightly)
+  python nba_etl.py --backfill                # all unloaded games
+  python nba_etl.py --backfill --limit 200    # oldest 200 unloaded games
+
+Prerequisites:
+  Run nba_play_by_play.sql in Azure SQL before first use.
 
 Secrets (GitHub Actions env vars):
   AZURE_SQL_SERVER, AZURE_SQL_DATABASE, AZURE_SQL_USERNAME,
@@ -37,6 +51,7 @@ from nba_api.stats.endpoints import (
     BoxScoreTraditionalV3,
     BoxScoreAdvancedV3,
     BoxScorePlayerTrackV3,
+    PlayByPlayV3,
     ScoreboardV3,
 )
 from nba_api.stats.static import teams as static_teams
@@ -55,14 +70,8 @@ log = logging.getLogger(__name__)
 PROXY_URL         = os.environ.get("NBA_PROXY_URL")
 CURRENT_SEASON    = "2025-26"
 CURRENT_SEASON_ID = "22025"
-API_DELAY         = 0.75   # seconds between API calls
-
-
-def period_label(period: int) -> str:
-    if period <= 4:
-        return f"Q{period}"
-    ot = period - 4
-    return "OT" if ot == 1 else f"OT{ot}"
+API_DELAY         = 0.75   # seconds between calls to avoid rate limits
+RETRY_WAIT        = 5      # seconds between retry attempts
 
 
 # ---------------------------------------------------------------------------
@@ -88,16 +97,53 @@ def get_engine():
 
 def safe_float(val):
     try:
-        return float(val) if val not in (None, "", "None") else None
+        return float(val) if val not in (None, "", "None") and not (isinstance(val, float) and pd.isna(val)) else None
     except (ValueError, TypeError):
         return None
 
 
 def safe_int(val):
     try:
-        return int(val) if val not in (None, "", "None") else None
+        return int(val) if val not in (None, "", "None") and not (isinstance(val, float) and pd.isna(val)) else None
     except (ValueError, TypeError):
         return None
+
+
+def safe_str(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    return str(val).strip() or None
+
+
+def safe_bit(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    try:
+        return int(bool(val))
+    except (ValueError, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Retry wrapper for NBA API calls
+# ---------------------------------------------------------------------------
+
+def api_call_with_retry(fn, label, attempts=3):
+    """
+    Calls fn() up to `attempts` times. Returns the result or None on failure.
+    fn should be a zero-argument lambda that constructs and returns the endpoint.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            result = fn()
+            time.sleep(API_DELAY)
+            return result
+        except Exception as exc:
+            log.warning(f"    {label} attempt {attempt}/{attempts} failed: {exc}")
+            if attempt < attempts:
+                time.sleep(RETRY_WAIT)
+    log.error(f"    {label} failed after {attempts} attempts, skipping")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +173,12 @@ def load_teams(engine):
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Fetch scoreboard metadata for a set of dates
-# Returns dict keyed by game_id with full metadata for nba.games.
-# Uses ScoreboardV3 which is correct for the 2025-26 season.
+# Step 2: Fetch scoreboard metadata via ScoreboardV3
+# Returns dict keyed by game_id (string) with metadata for nba.games.
 #
-# ScoreboardV3 GameHeader fields used:
-#   gameId, gameCode, gameTimeUTC
-# ScoreboardV3 LineScore fields used:
-#   gameId, teamId, teamTricode, score
-#   Row order within each game: away team first, home team second.
+# ScoreboardV3 uses typed DataSet objects, NOT get_normalized_dict().
+# .game_header.get_data_frame() returns one row per game.
+# .line_score.get_data_frame() returns two rows per game: away first, home second.
 # ---------------------------------------------------------------------------
 
 def fetch_scoreboard_metadata(target_dates: list) -> dict:
@@ -143,95 +186,73 @@ def fetch_scoreboard_metadata(target_dates: list) -> dict:
     unique_dates = sorted(set(target_dates))
     for game_date in unique_dates:
         date_str = game_date.strftime("%Y-%m-%d")
+        sb = api_call_with_retry(
+            lambda d=date_str: ScoreboardV3(game_date=d, league_id="00", proxy=PROXY_URL),
+            f"ScoreboardV3 {date_str}",
+        )
+        if sb is None:
+            continue
         try:
-            sb = ScoreboardV3(
-                game_date=date_str,
-                league_id="00",
-                proxy=PROXY_URL,
-            )
-            time.sleep(API_DELAY)
-            sb_data = sb.get_normalized_dict()
+            headers_df = sb.game_header.get_data_frame()
+            lines_df   = sb.line_score.get_data_frame()
 
-            # GameHeader: one row per game
-            headers = {
-                row["gameId"]: row
-                for row in sb_data.get("GameHeader", [])
-            }
+            # Ensure gameId is string in both frames for reliable matching
+            headers_df["gameId"] = headers_df["gameId"].astype(str)
+            lines_df["gameId"]   = lines_df["gameId"].astype(str)
 
-            # LineScore: two rows per game (away first, home second)
-            # Group by gameId preserving insertion order
-            line_scores = {}
-            for row in sb_data.get("LineScore", []):
-                gid = row.get("gameId")
-                if not gid:
-                    continue
-                if gid not in line_scores:
-                    line_scores[gid] = []
-                line_scores[gid].append({
-                    "team_id":  str(row.get("teamId", "")),
-                    "tricode":  row.get("teamTricode", ""),
-                    "score":    safe_int(row.get("score")),
-                })
+            for _, hdr in headers_df.iterrows():
+                gid       = str(hdr["gameId"])
+                game_code = safe_str(hdr.get("gameCode")) or ""
 
-            for gid, hdr in headers.items():
-                game_code  = hdr.get("gameCode") or ""
-                game_time  = hdr.get("gameTimeUTC") or ""
-
-                # Derive sequence number from game_code if present
-                # Format is YYYYMMDD/AWYHOM, sequence not directly in V3
-                # Use position in the day's game list as a proxy
-                game_seq = None
-
-                # Extract home/away from line score rows
-                # Away = index 0, Home = index 1
-                ls = line_scores.get(gid, [])
-                away_abbr = away_tid = ""
-                home_abbr = home_tid = ""
+                # LineScore rows for this game: away=index 0, home=index 1
+                game_ls = lines_df[lines_df["gameId"] == gid]
+                away_abbr = away_tid = home_abbr = home_tid = ""
                 away_pts  = home_pts = None
-                if len(ls) >= 2:
-                    away_abbr = ls[0]["tricode"]
-                    away_tid  = ls[0]["team_id"]
-                    away_pts  = ls[0]["score"]
-                    home_abbr = ls[1]["tricode"]
-                    home_tid  = ls[1]["team_id"]
-                    home_pts  = ls[1]["score"]
-                elif len(ls) == 1:
-                    # Incomplete data; take what we have
-                    home_abbr = ls[0]["tricode"]
-                    home_tid  = ls[0]["team_id"]
-                    home_pts  = ls[0]["score"]
+
+                if len(game_ls) >= 2:
+                    away_row  = game_ls.iloc[0]
+                    home_row  = game_ls.iloc[1]
+                    away_abbr = safe_str(away_row.get("teamTricode")) or ""
+                    away_tid  = str(safe_int(away_row.get("teamId")) or "")
+                    away_pts  = safe_int(away_row.get("score"))
+                    home_abbr = safe_str(home_row.get("teamTricode")) or ""
+                    home_tid  = str(safe_int(home_row.get("teamId")) or "")
+                    home_pts  = safe_int(home_row.get("score"))
+                elif len(game_ls) == 1:
+                    home_abbr = safe_str(game_ls.iloc[0].get("teamTricode")) or ""
+                    home_tid  = str(safe_int(game_ls.iloc[0].get("teamId")) or "")
+                    home_pts  = safe_int(game_ls.iloc[0].get("score"))
 
                 game_total = (
-                    (home_pts + away_pts)
+                    home_pts + away_pts
                     if home_pts is not None and away_pts is not None
                     else None
                 )
                 game_display = (
                     f"{away_abbr}@{home_abbr}"
-                    if away_abbr and home_abbr
-                    else ""
+                    if away_abbr and home_abbr else ""
                 )
 
                 metadata[gid] = {
-                    "game_date":     game_date,
-                    "game_sequence": game_seq,
-                    "game_code":     game_code,
-                    "game_display":  game_display,
-                    "home_team":     home_abbr,
-                    "home_team_id":  home_tid,
-                    "away_team":     away_abbr,
-                    "away_team_id":  away_tid,
-                    "home_pts":      home_pts,
-                    "away_pts":      away_pts,
-                    "game_total":    game_total,
-                    "season_year":   CURRENT_SEASON[:4],
+                    "game_date":    game_date,
+                    "game_code":    game_code,
+                    "game_display": game_display,
+                    "home_team":    home_abbr,
+                    "home_team_id": home_tid,
+                    "away_team":    away_abbr,
+                    "away_team_id": away_tid,
+                    "home_pts":     home_pts,
+                    "away_pts":     away_pts,
+                    "game_total":   game_total,
+                    "season_year":  CURRENT_SEASON[:4],
                 }
-
         except Exception as exc:
-            log.warning(f"    ScoreboardV3 failed for {date_str}: {exc}")
+            log.warning(f"    ScoreboardV3 parse failed for {date_str}: {exc}")
 
-    log.info(f"  Fetched scoreboard metadata for {len(metadata)} game(s) "
-             f"across {len(unique_dates)} date(s)")
+    log.info(
+        f"  Fetched scoreboard metadata for {len(metadata)} game(s) "
+        f"across {len(unique_dates)} date(s)"
+    )
     return metadata
 
 
@@ -242,12 +263,16 @@ def fetch_scoreboard_metadata(target_dates: list) -> dict:
 def get_game_ids(target_dates: list) -> list:
     log.info(f"Fetching game IDs for {len(target_dates)} date(s)")
     date_strings = {d.strftime("%m/%d/%Y") for d in target_dates}
-    finder = LeagueGameFinder(
-        season_nullable=CURRENT_SEASON,
-        league_id_nullable="00",
-        proxy=PROXY_URL,
+    finder = api_call_with_retry(
+        lambda: LeagueGameFinder(
+            season_nullable=CURRENT_SEASON,
+            league_id_nullable="00",
+            proxy=PROXY_URL,
+        ),
+        "LeagueGameFinder",
     )
-    time.sleep(API_DELAY)
+    if finder is None:
+        return []
     df = finder.get_data_frames()[0]
     if df.empty:
         log.warning("LeagueGameFinder returned no games")
@@ -265,13 +290,17 @@ def get_game_ids(target_dates: list) -> list:
 
 
 def get_all_season_game_ids() -> list:
-    log.info(f"Backfill mode: fetching all game IDs for season {CURRENT_SEASON}")
-    finder = LeagueGameFinder(
-        season_nullable=CURRENT_SEASON,
-        league_id_nullable="00",
-        proxy=PROXY_URL,
+    log.info(f"Backfill: fetching all game IDs for season {CURRENT_SEASON}")
+    finder = api_call_with_retry(
+        lambda: LeagueGameFinder(
+            season_nullable=CURRENT_SEASON,
+            league_id_nullable="00",
+            proxy=PROXY_URL,
+        ),
+        "LeagueGameFinder (backfill)",
     )
-    time.sleep(API_DELAY)
+    if finder is None:
+        return []
     df = finder.get_data_frames()[0]
     if df.empty:
         return []
@@ -290,174 +319,239 @@ def get_all_season_game_ids() -> list:
 
 # ---------------------------------------------------------------------------
 # Step 4: Process one game
+#
+# API calls per game (4 total):
+#   1. PlayByPlayV3         -> nba.play_by_play (raw events, all periods)
+#   2. BoxScoreTraditionalV3 -> nba.player_box_score_stats, nba.team_box_score_stats
+#                              (full-game totals for accurate min + plus_minus)
+#   3. BoxScoreAdvancedV3   -> nba.player_tracking_stats (usage, ratings)
+#   4. BoxScorePlayerTrackV3 -> nba.player_tracking_stats (touches, reb chances, etc.)
 # ---------------------------------------------------------------------------
 
 def process_game(game_id: str, game_date: date, game_meta: dict, engine) -> None:
     log.info(f"  Processing game {game_id} ({game_date})")
 
     # ------------------------------------------------------------------
-    # 4a. BoxScoreTraditionalV3: player rows + team rows across all periods
+    # 4a. Play-by-Play (primary source for quarter-level derivations)
     # ------------------------------------------------------------------
-    trad = None
-    for attempt in range(1, 4):
-        try:
-            trad = BoxScoreTraditionalV3(game_id=game_id, proxy=PROXY_URL)
-            time.sleep(API_DELAY)
-            break
-        except Exception as exc:
-            log.warning(f"    BoxScoreTraditionalV3 attempt {attempt}/3 failed for {game_id}: {exc}")
-            if attempt < 3:
-                time.sleep(5)
-    if trad is None:
-        log.error(f"    Skipping game {game_id} after 3 failed attempts")
+    pbp_ep = api_call_with_retry(
+        lambda: PlayByPlayV3(game_id=game_id, proxy=PROXY_URL),
+        f"PlayByPlayV3 {game_id}",
+    )
+    if pbp_ep is None:
+        log.error(f"    Skipping game {game_id}: PBP fetch failed")
         return
 
-    trad_data        = trad.get_normalized_dict()
-    player_stats_raw = trad_data.get("PlayerStats", [])
-    team_stats_raw   = trad_data.get("TeamStats", [])
+    try:
+        pbp_df = pbp_ep.play_by_play.get_data_frame()
+    except Exception as exc:
+        log.error(f"    Skipping game {game_id}: PBP parse failed: {exc}")
+        return
 
-    periods_present = set()
-    for row in team_stats_raw:
-        p = safe_int(row.get("PERIOD") or row.get("period"))
-        if p:
-            periods_present.add(p)
-    num_periods = max(periods_present) if periods_present else 4
+    if pbp_df.empty:
+        log.warning(f"    PBP returned empty for {game_id}")
+    else:
+        pbp_rows = []
+        for _, row in pbp_df.iterrows():
+            pbp_rows.append({
+                "game_id":        game_id,
+                "action_number":  safe_int(row.get("actionNumber")),
+                "period":         safe_int(row.get("period")),
+                "clock":          safe_str(row.get("clock")),
+                "team_id":        safe_int(row.get("teamId")),
+                "team_tricode":   safe_str(row.get("teamTricode")),
+                "person_id":      safe_int(row.get("personId")),
+                "player_name":    safe_str(row.get("playerName")),
+                "player_name_i":  safe_str(row.get("playerNameI")),
+                "x_legacy":       safe_float(row.get("xLegacy")),
+                "y_legacy":       safe_float(row.get("yLegacy")),
+                "shot_distance":  safe_float(row.get("shotDistance")),
+                "shot_result":    safe_str(row.get("shotResult")),
+                "is_field_goal":  safe_bit(row.get("isFieldGoal")),
+                "score_home":     safe_int(row.get("scoreHome")),
+                "score_away":     safe_int(row.get("scoreAway")),
+                "points_total":   safe_int(row.get("pointsTotal")),
+                "location":       safe_str(row.get("location")),
+                "description":    safe_str(row.get("description")),
+                "action_type":    safe_str(row.get("actionType")),
+                "sub_type":       safe_str(row.get("subType")),
+                "video_available":safe_bit(row.get("videoAvailable")),
+                "action_id":      safe_int(row.get("actionId")),
+            })
+
+        # Drop rows where action_number is None (cannot form PK)
+        pbp_rows = [r for r in pbp_rows if r["action_number"] is not None]
+
+        if pbp_rows:
+            df_pbp = pd.DataFrame(pbp_rows)
+            _upsert(df_pbp, engine, "nba", "play_by_play",
+                    ["game_id", "action_number"])
+            log.info(f"    Upserted {len(df_pbp)} PBP rows")
+
+    # ------------------------------------------------------------------
+    # 4b. BoxScoreTraditionalV3: full-game player and team box scores
+    #     Provides accurate min and plus_minus (not derivable from PBP).
+    #     quarter='GAME' marks these as full-game totals.
+    #     All V3 endpoints use .dataset_attr.get_data_frame() with camelCase fields.
+    # ------------------------------------------------------------------
+    trad_ep = api_call_with_retry(
+        lambda: BoxScoreTraditionalV3(game_id=game_id, proxy=PROXY_URL),
+        f"BoxScoreTraditionalV3 {game_id}",
+    )
 
     player_rows = []
-    for row in player_stats_raw:
-        period  = safe_int(row.get("PERIOD") or row.get("period"))
-        if not period:
-            continue
-        comment = (row.get("COMMENT") or "").strip()
-        if comment:
-            continue
-        player_rows.append({
-            "game_id":           game_id,
-            "player_id":         safe_int(row.get("PLAYER_ID")),
-            "quarter":           period_label(period),
-            "first_name":        (row.get("PLAYER_NAME_I") or ""),
-            "last_name":         (row.get("PLAYER_NAME_I") or ""),
-            "team_id":           safe_int(row.get("TEAM_ID")),
-            "team_abbreviation": (row.get("TEAM_ABBREVIATION") or ""),
-            "position":          (row.get("START_POSITION") or ""),
-            "comment":           comment,
-            "jersey_num":        str(row.get("JERSEY_NUM") or ""),
-            "min":               str(row.get("MIN") or ""),
-            "fgm":               safe_int(row.get("FGM")),
-            "fga":               safe_int(row.get("FGA")),
-            "fg_pct":            safe_float(row.get("FG_PCT")),
-            "fg3m":              safe_int(row.get("FG3M")),
-            "fg3a":              safe_int(row.get("FG3A")),
-            "fg3_pct":           safe_float(row.get("FG3_PCT")),
-            "ftm":               safe_int(row.get("FTM")),
-            "fta":               safe_int(row.get("FTA")),
-            "ft_pct":            safe_float(row.get("FT_PCT")),
-            "oreb":              safe_int(row.get("OREB")),
-            "dreb":              safe_int(row.get("DREB")),
-            "reb":               safe_int(row.get("REB")),
-            "ast":               safe_int(row.get("AST")),
-            "stl":               safe_int(row.get("STL")),
-            "blk":               safe_int(row.get("BLK")),
-            "tov":               safe_int(row.get("TO")),
-            "pf":                safe_int(row.get("PF")),
-            "pts":               safe_int(row.get("PTS")),
-            "plus_minus":        safe_float(row.get("PLUS_MINUS")),
-        })
+    team_rows   = []
+    team_totals = {}
 
-    team_rows = []
-    for row in team_stats_raw:
-        period = safe_int(row.get("PERIOD") or row.get("period"))
-        if not period:
-            continue
-        team_rows.append({
-            "game_id":           game_id,
-            "team_id":           safe_int(row.get("TEAM_ID")),
-            "team_abbreviation": (row.get("TEAM_ABBREVIATION") or ""),
-            "quarter":           period_label(period),
-            "min":               str(row.get("MIN") or ""),
-            "fgm":               safe_int(row.get("FGM")),
-            "fga":               safe_int(row.get("FGA")),
-            "fg_pct":            safe_float(row.get("FG_PCT")),
-            "fg3m":              safe_int(row.get("FG3M")),
-            "fg3a":              safe_int(row.get("FG3A")),
-            "fg3_pct":           safe_float(row.get("FG3_PCT")),
-            "ftm":               safe_int(row.get("FTM")),
-            "fta":               safe_int(row.get("FTA")),
-            "ft_pct":            safe_float(row.get("FT_PCT")),
-            "oreb":              safe_int(row.get("OREB")),
-            "dreb":              safe_int(row.get("DREB")),
-            "reb":               safe_int(row.get("REB")),
-            "ast":               safe_int(row.get("AST")),
-            "stl":               safe_int(row.get("STL")),
-            "blk":               safe_int(row.get("BLK")),
-            "tov":               safe_int(row.get("TO")),
-            "pf":                safe_int(row.get("PF")),
-            "pts":               safe_int(row.get("PTS")),
-        })
+    if trad_ep is not None:
+        try:
+            player_df = trad_ep.player_stats.get_data_frame()
+            team_df   = trad_ep.team_stats.get_data_frame()
+
+            for _, row in player_df.iterrows():
+                comment = safe_str(row.get("comment")) or ""
+                if comment:   # DNP players have a comment; skip them
+                    continue
+                pid = safe_int(row.get("personId"))
+                if pid is None:
+                    continue
+                player_rows.append({
+                    "game_id":           game_id,
+                    "player_id":         pid,
+                    "quarter":           "GAME",
+                    "first_name":        safe_str(row.get("firstName")) or "",
+                    "last_name":         safe_str(row.get("familyName")) or "",
+                    "team_id":           safe_int(row.get("teamId")),
+                    "team_abbreviation": safe_str(row.get("teamTricode")) or "",
+                    "position":          safe_str(row.get("position")) or "",
+                    "comment":           comment,
+                    "jersey_num":        safe_str(row.get("jerseyNum")) or "",
+                    "min":               safe_str(row.get("minutes")) or "",
+                    "fgm":               safe_int(row.get("fieldGoalsMade")),
+                    "fga":               safe_int(row.get("fieldGoalsAttempted")),
+                    "fg_pct":            safe_float(row.get("fieldGoalsPercentage")),
+                    "fg3m":              safe_int(row.get("threePointersMade")),
+                    "fg3a":              safe_int(row.get("threePointersAttempted")),
+                    "fg3_pct":           safe_float(row.get("threePointersPercentage")),
+                    "ftm":               safe_int(row.get("freeThrowsMade")),
+                    "fta":               safe_int(row.get("freeThrowsAttempted")),
+                    "ft_pct":            safe_float(row.get("freeThrowsPercentage")),
+                    "oreb":              safe_int(row.get("reboundsOffensive")),
+                    "dreb":              safe_int(row.get("reboundsDefensive")),
+                    "reb":               safe_int(row.get("reboundsTotal")),
+                    "ast":               safe_int(row.get("assists")),
+                    "stl":               safe_int(row.get("steals")),
+                    "blk":               safe_int(row.get("blocks")),
+                    "tov":               safe_int(row.get("turnovers")),
+                    "pf":                safe_int(row.get("foulsPersonal")),
+                    "pts":               safe_int(row.get("points")),
+                    "plus_minus":        safe_float(row.get("plusMinusPoints")),
+                })
+
+            for _, row in team_df.iterrows():
+                tid  = safe_int(row.get("teamId"))
+                abbr = safe_str(row.get("teamTricode")) or ""
+                pts  = safe_int(row.get("points")) or 0
+                if tid is not None:
+                    team_totals[tid] = {"abbr": abbr, "pts": pts}
+                team_rows.append({
+                    "game_id":           game_id,
+                    "team_id":           tid,
+                    "team_abbreviation": abbr,
+                    "quarter":           "GAME",
+                    "min":               safe_str(row.get("minutes")) or "",
+                    "fgm":               safe_int(row.get("fieldGoalsMade")),
+                    "fga":               safe_int(row.get("fieldGoalsAttempted")),
+                    "fg_pct":            safe_float(row.get("fieldGoalsPercentage")),
+                    "fg3m":              safe_int(row.get("threePointersMade")),
+                    "fg3a":              safe_int(row.get("threePointersAttempted")),
+                    "fg3_pct":           safe_float(row.get("threePointersPercentage")),
+                    "ftm":               safe_int(row.get("freeThrowsMade")),
+                    "fta":               safe_int(row.get("freeThrowsAttempted")),
+                    "ft_pct":            safe_float(row.get("freeThrowsPercentage")),
+                    "oreb":              safe_int(row.get("reboundsOffensive")),
+                    "dreb":              safe_int(row.get("reboundsDefensive")),
+                    "reb":               safe_int(row.get("reboundsTotal")),
+                    "ast":               safe_int(row.get("assists")),
+                    "stl":               safe_int(row.get("steals")),
+                    "blk":               safe_int(row.get("blocks")),
+                    "tov":               safe_int(row.get("turnovers")),
+                    "pf":                safe_int(row.get("foulsPersonal")),
+                    "pts":               safe_int(row.get("points")),
+                })
+
+        except Exception as exc:
+            log.warning(f"    BoxScoreTraditionalV3 parse failed for {game_id}: {exc}")
 
     # ------------------------------------------------------------------
-    # 4b. BoxScoreAdvancedV3: usage, ratings, pace, PIE per player
+    # 4c. BoxScoreAdvancedV3: game-level usage, ratings, pace, PIE
     # ------------------------------------------------------------------
     advanced_by_player = {}
-    try:
-        adv = BoxScoreAdvancedV3(game_id=game_id, proxy=PROXY_URL)
-        time.sleep(API_DELAY)
-        adv_data = adv.get_normalized_dict()
-        for row in adv_data.get("PlayerStats", []):
-            pid = safe_int(row.get("personId") or row.get("PLAYER_ID"))
-            if pid is None:
-                continue
-            advanced_by_player[pid] = {
-                "usage_pct":         safe_float(row.get("usagePercentage") or row.get("USG_PCT")),
-                "off_rating":        safe_float(row.get("offensiveRating") or row.get("OFF_RATING")),
-                "def_rating":        safe_float(row.get("defensiveRating") or row.get("DEF_RATING")),
-                "net_rating":        safe_float(row.get("netRating") or row.get("NET_RATING")),
-                "pace":              safe_float(row.get("pace") or row.get("PACE")),
-                "pie":               safe_float(row.get("PIE")),
-                "true_shooting_pct": safe_float(row.get("trueShootingPercentage")),
-                "efg_pct":           safe_float(row.get("effectiveFieldGoalPercentage")),
-            }
-    except Exception as exc:
-        log.warning(f"    BoxScoreAdvancedV3 failed for {game_id}: {exc}")
+    adv_ep = api_call_with_retry(
+        lambda: BoxScoreAdvancedV3(game_id=game_id, proxy=PROXY_URL),
+        f"BoxScoreAdvancedV3 {game_id}",
+    )
+    if adv_ep is not None:
+        try:
+            adv_df = adv_ep.player_stats.get_data_frame()
+            for _, row in adv_df.iterrows():
+                pid = safe_int(row.get("personId"))
+                if pid is None:
+                    continue
+                advanced_by_player[pid] = {
+                    "usage_pct":         safe_float(row.get("usagePercentage")),
+                    "off_rating":        safe_float(row.get("offensiveRating")),
+                    "def_rating":        safe_float(row.get("defensiveRating")),
+                    "net_rating":        safe_float(row.get("netRating")),
+                    "pace":              safe_float(row.get("pace")),
+                    "pie":               safe_float(row.get("PIE")),
+                    "true_shooting_pct": safe_float(row.get("trueShootingPercentage")),
+                    "efg_pct":           safe_float(row.get("effectiveFieldGoalPercentage")),
+                }
+        except Exception as exc:
+            log.warning(f"    BoxScoreAdvancedV3 parse failed for {game_id}: {exc}")
 
     # ------------------------------------------------------------------
-    # 4c. BoxScorePlayerTrackV3: touches, rebound chances, passes, contested shots
+    # 4d. BoxScorePlayerTrackV3: game-level tracking stats
     # ------------------------------------------------------------------
     tracking_by_player = {}
-    try:
-        trk = BoxScorePlayerTrackV3(game_id=game_id, proxy=PROXY_URL)
-        time.sleep(API_DELAY)
-        trk_data = trk.get_normalized_dict()
-        for row in trk_data.get("PlayerStats", []):
-            pid = safe_int(row.get("personId") or row.get("PLAYER_ID"))
-            if pid is None:
-                continue
-            tracking_by_player[pid] = {
-                "team_id":                safe_int(row.get("teamId") or row.get("TEAM_ID")),
-                "speed":                  safe_float(row.get("speed")),
-                "distance":               safe_float(row.get("distance")),
-                "touches":                safe_int(row.get("touches")),
-                "passes_made":            safe_int(row.get("passes")),
-                "secondary_ast":          safe_int(row.get("secondaryAssists")),
-                "ft_ast":                 safe_int(row.get("freeThrowAssists")),
-                "reb_chances":            safe_int(row.get("reboundChancesTotal")),
-                "oreb_chances":           safe_int(row.get("reboundChancesOffensive")),
-                "dreb_chances":           safe_int(row.get("reboundChancesDefensive")),
-                "contested_fgm":          safe_int(row.get("contestedFieldGoalsMade")),
-                "contested_fga":          safe_int(row.get("contestedFieldGoalsAttempted")),
-                "contested_fg_pct":       safe_float(row.get("contestedFieldGoalPercentage")),
-                "uncontested_fgm":        safe_int(row.get("uncontestedFieldGoalsMade")),
-                "uncontested_fga":        safe_int(row.get("uncontestedFieldGoalsAttempted")),
-                "uncontested_fg_pct":     safe_float(row.get("uncontestedFieldGoalsPercentage")),
-                "defended_at_rim_fgm":    safe_int(row.get("defendedAtRimFieldGoalsMade")),
-                "defended_at_rim_fga":    safe_int(row.get("defendedAtRimFieldGoalsAttempted")),
-                "defended_at_rim_fg_pct": safe_float(row.get("defendedAtRimFieldGoalPercentage")),
-            }
-    except Exception as exc:
-        log.warning(f"    BoxScorePlayerTrackV3 failed for {game_id}: {exc}")
+    trk_ep = api_call_with_retry(
+        lambda: BoxScorePlayerTrackV3(game_id=game_id, proxy=PROXY_URL),
+        f"BoxScorePlayerTrackV3 {game_id}",
+    )
+    if trk_ep is not None:
+        try:
+            trk_df = trk_ep.player_stats.get_data_frame()
+            for _, row in trk_df.iterrows():
+                pid = safe_int(row.get("personId"))
+                if pid is None:
+                    continue
+                tracking_by_player[pid] = {
+                    "team_id":                safe_int(row.get("teamId")),
+                    "speed":                  safe_float(row.get("speed")),
+                    "distance":               safe_float(row.get("distance")),
+                    "touches":                safe_int(row.get("touches")),
+                    "passes_made":            safe_int(row.get("passes")),
+                    "secondary_ast":          safe_int(row.get("secondaryAssists")),
+                    "ft_ast":                 safe_int(row.get("freeThrowAssists")),
+                    "reb_chances":            safe_int(row.get("reboundChancesTotal")),
+                    "oreb_chances":           safe_int(row.get("reboundChancesOffensive")),
+                    "dreb_chances":           safe_int(row.get("reboundChancesDefensive")),
+                    "contested_fgm":          safe_int(row.get("contestedFieldGoalsMade")),
+                    "contested_fga":          safe_int(row.get("contestedFieldGoalsAttempted")),
+                    "contested_fg_pct":       safe_float(row.get("contestedFieldGoalPercentage")),
+                    "uncontested_fgm":        safe_int(row.get("uncontestedFieldGoalsMade")),
+                    "uncontested_fga":        safe_int(row.get("uncontestedFieldGoalsAttempted")),
+                    "uncontested_fg_pct":     safe_float(row.get("uncontestedFieldGoalsPercentage")),
+                    "defended_at_rim_fgm":    safe_int(row.get("defendedAtRimFieldGoalsMade")),
+                    "defended_at_rim_fga":    safe_int(row.get("defendedAtRimFieldGoalsAttempted")),
+                    "defended_at_rim_fg_pct": safe_float(row.get("defendedAtRimFieldGoalPercentage")),
+                }
+        except Exception as exc:
+            log.warning(f"    BoxScorePlayerTrackV3 parse failed for {game_id}: {exc}")
 
     # ------------------------------------------------------------------
-    # 4d. Write to database
+    # 4e. Write to database
     # ------------------------------------------------------------------
 
     if player_rows:
@@ -472,17 +566,14 @@ def process_game(game_id: str, game_date: date, game_meta: dict, engine) -> None
                 ["game_id", "team_id", "quarter"])
         log.info(f"    Upserted {len(df_teams_box)} team box score rows")
 
-    # Games: use ScoreboardV3 metadata. Wrapped in try/except so an FK
-    # violation on an unrecognized team abbreviation logs a warning and
-    # does not kill the run. The game is still considered processed since
-    # player box scores already landed above.
+    # Games row: use scoreboard metadata for home/away/scores,
+    # wrapped in try/except so FK violations on edge-case team codes don't crash the run
     meta = game_meta.get(game_id)
     if meta:
         try:
             df_game = pd.DataFrame([{
                 "game_id":       game_id,
                 "game_date":     meta["game_date"],
-                "game_sequence": meta["game_sequence"],
                 "game_code":     meta["game_code"],
                 "game_display":  meta["game_display"],
                 "home_team":     meta["home_team"],
@@ -493,10 +584,11 @@ def process_game(game_id: str, game_date: date, game_meta: dict, engine) -> None
             }])
             _upsert(df_game, engine, "nba", "games", ["game_id"])
         except Exception as exc:
-            log.warning(f"    Games upsert failed for {game_id}: {exc}")
+            log.warning(f"    Games upsert skipped for {game_id}: {exc}")
     else:
-        log.warning(f"    No scoreboard metadata found for {game_id}, skipping games row")
+        log.warning(f"    No scoreboard metadata for {game_id}, games row skipped")
 
+    # Player tracking: merge advanced + tracking dicts
     all_pids = set(advanced_by_player.keys()) | set(tracking_by_player.keys())
     if all_pids:
         tracking_rows = []
@@ -510,6 +602,7 @@ def process_game(game_id: str, game_date: date, game_meta: dict, engine) -> None
                 ["game_id", "player_id"])
         log.info(f"    Upserted {len(df_tracking)} player tracking rows")
 
+    # Matchup position aggregation from full-game player rows
     if player_rows:
         _aggregate_matchup(player_rows, game_id, game_date, engine)
 
@@ -567,9 +660,9 @@ def _aggregate_matchup(player_rows, game_id, game_date, engine):
     if not matchup_rows:
         return
 
-    agg_df = pd.DataFrame(matchup_rows)
+    agg_df   = pd.DataFrame(matchup_rows)
     sum_cols = [c for c in agg_df.columns if c.startswith("total_")]
-    grouped = (
+    grouped  = (
         agg_df.groupby(["game_id","game_date","defending_team_id",
                         "defending_team_abbr","position_group"])[sum_cols]
         .sum()
@@ -581,8 +674,10 @@ def _aggregate_matchup(player_rows, game_id, game_date, engine):
         .size()
         .reset_index(name="player_count")
     )
-    final_df = grouped.merge(counts, on=["game_id","game_date","defending_team_id",
-                                         "defending_team_abbr","position_group"])
+    final_df = grouped.merge(
+        counts,
+        on=["game_id","game_date","defending_team_id","defending_team_abbr","position_group"]
+    )
 
     _upsert(final_df, engine, "nba", "matchup_position_stats",
             ["game_id", "defending_team_id", "position_group"])
@@ -590,7 +685,9 @@ def _aggregate_matchup(player_rows, game_id, game_date, engine):
 
 
 # ---------------------------------------------------------------------------
-# Players reference upsert (runs after all box scores loaded)
+# Players reference upsert (runs once after all games in the batch are loaded)
+# Sources from player_box_score_stats which has separate first_name / last_name.
+# Wrapped in try/except in case an edge-case team abbreviation violates the FK.
 # ---------------------------------------------------------------------------
 
 def upsert_players(engine):
@@ -599,12 +696,13 @@ def upsert_players(engine):
         MERGE nba.players AS tgt
         USING (
             SELECT DISTINCT
-                player_id                    AS nba_player_id,
-                first_name + ' ' + last_name AS player_name,
-                team_abbreviation            AS nba_team,
+                player_id                        AS nba_player_id,
+                LTRIM(first_name + ' ' + last_name) AS player_name,
+                team_abbreviation                AS nba_team,
                 position
             FROM nba.player_box_score_stats
             WHERE player_id IS NOT NULL
+              AND quarter = 'GAME'
         ) AS src
         ON tgt.nba_player_id = src.nba_player_id
         WHEN MATCHED THEN UPDATE SET
@@ -616,18 +714,24 @@ def upsert_players(engine):
         VALUES
             (src.nba_player_id, src.player_name, src.nba_team, src.position);
     """
-    with engine.begin() as conn:
-        result = conn.execute(text(sql))
-    log.info(f"  Players merge complete ({result.rowcount} rows affected)")
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(sql))
+        log.info(f"  Players merge complete ({result.rowcount} rows affected)")
+    except Exception as exc:
+        log.warning(f"  Players merge failed (likely FK violation on team abbr): {exc}")
 
 
 # ---------------------------------------------------------------------------
-# Generic upsert via MERGE
+# Generic upsert via MERGE (one MERGE per row via executemany)
 # ---------------------------------------------------------------------------
 
 def _upsert(df: pd.DataFrame, engine, schema: str, table: str, pk_cols: list):
     if df.empty:
         return
+
+    # Replace pandas NA/NaN with None so pyodbc sends NULL
+    df = df.where(pd.notnull(df), None)
 
     non_pk    = [c for c in df.columns if c not in pk_cols]
     col_list  = ", ".join(df.columns)
@@ -681,7 +785,7 @@ def main():
 
     if args.backfill:
         game_pairs = get_all_season_game_ids()
-        game_pairs.sort(key=lambda x: x[1])
+        game_pairs.sort(key=lambda x: x[1])   # oldest first
         with engine.connect() as conn:
             loaded = {
                 row[0] for row in conn.execute(
@@ -704,7 +808,7 @@ def main():
 
     # Fetch scoreboard metadata once per unique date for all target games
     target_dates = list({gdate for _, gdate in game_pairs})
-    game_meta = fetch_scoreboard_metadata(target_dates)
+    game_meta    = fetch_scoreboard_metadata(target_dates)
 
     log.info(f"Processing {len(game_pairs)} game(s)")
     for game_id, game_date in game_pairs:
