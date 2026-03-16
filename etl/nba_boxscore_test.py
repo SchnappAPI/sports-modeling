@@ -90,10 +90,20 @@ def get_engine():
         "&Connection+Timeout=90"
     )
     engine = create_engine(conn_str, fast_executemany=True)
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    log.info("Database connection established.")
-    return engine
+
+    for attempt in range(1, 4):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            log.info("Database connection established.")
+            return engine
+        except Exception as exc:
+            log.warning(f"DB connection attempt {attempt}/3 failed: {exc}")
+            if attempt < 3:
+                log.info("Waiting 60s for Azure SQL to resume...")
+                time.sleep(60)
+
+    raise RuntimeError("Could not connect to Azure SQL after 3 attempts.")
 
 # ---------------------------------------------------------------------------
 # Safe type helpers
