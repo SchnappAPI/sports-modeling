@@ -4,19 +4,12 @@ nba_boxscore_test.py
 Isolated test script for the box score quarter-split and matchup fixes.
 Processes a single game ID passed via --game-id argument.
 
-Validates:
-  1. BoxScoreTraditionalV3 with range_type=2 + second-based ranges returns
-     genuine per-quarter stats (not full-game totals repeated).
-  2. BoxScoreMatchupsV3 correctly maps positionDefend and
-     matchupPotentialAssist field names.
-
-Assumes nba.teams, nba.players are already populated.
-Does NOT write to nba.games as the loaded marker so re-runs are safe.
-
-Output:
-  Writes nba_boxscore_test_<game_id>.txt to the working directory.
-  The file contains pipe-delimited tables for each validated dataset
-  and is uploaded as a GitHub Actions artifact.
+Output formatting rules:
+  - Team tables exclude minutes column.
+  - Position null/nan = bench player (did not start), displayed as BENCH.
+  - OT columns are a subset of Q1-Q4 columns (no position, minutes, stl, blk, tov).
+  - All tables include game_id, team_id, and opponent_team_id.
+  - A combined table of all quarters appended together is shown at the end.
 
 Run:
   python nba_boxscore_test.py --game-id 0022400061
@@ -37,9 +30,6 @@ from sqlalchemy import create_engine, text
 
 from nba_api.stats.endpoints import (
     boxscoretraditionalv3,
-    boxscoreadvancedv3,
-    boxscoreplayertrackv3,
-    boxscorehustlev2,
     boxscorematchupsv3,
 )
 
@@ -63,8 +53,8 @@ RETRY_COUNT = 3
 
 # Period boundaries in tenths of a second from tip-off.
 # range_type=2 uses these to slice exactly one period.
-# Each regulation quarter = 2400 tenths (12 min).
-# Each OT period          = 3000 tenths (5 min).
+# Each regulation quarter = 7200 tenths (12 min x 60s x 10).
+# Each OT period          = 3000 tenths (5 min x 60s x 10).
 PERIOD_RANGES = [
     (1, "Q1", 0,     7200),
     (2, "Q2", 7200,  14400),
@@ -179,11 +169,14 @@ def _clean_val(v):
     return v
 
 # ---------------------------------------------------------------------------
-# MERGE upsert (same as production)
+# MERGE upsert
 # ---------------------------------------------------------------------------
 def upsert(df, engine, schema, table, pk_cols):
     if df is None or df.empty:
         return
+    # Drop any display-only columns not in the DB schema before upserting
+    db_cols = [c for c in df.columns if c != "opponent_team_id"]
+    df = df[db_cols]
     records = [
         {col: _clean_val(val) for col, val in row.items()}
         for row in df.to_dict(orient="records")
@@ -207,7 +200,7 @@ def upsert(df, engine, schema, table, pk_cols):
         conn.execute(text(merge_sql), records)
 
 # ---------------------------------------------------------------------------
-# _seed_players: FK safety net
+# _seed_players
 # ---------------------------------------------------------------------------
 def _seed_players(rows, engine):
     seed_sql = """
@@ -234,7 +227,17 @@ def _seed_players(rows, engine):
         conn.execute(text(seed_sql), seed_rows)
 
 # ---------------------------------------------------------------------------
-# Box score row builders (identical to production)
+# Derive opponent_team_id for each row
+# Returns {team_id: opponent_team_id}
+# ---------------------------------------------------------------------------
+def _build_opponent_map(player_rows):
+    team_ids = list({r["team_id"] for r in player_rows if r.get("team_id")})
+    if len(team_ids) != 2:
+        return {}
+    return {team_ids[0]: team_ids[1], team_ids[1]: team_ids[0]}
+
+# ---------------------------------------------------------------------------
+# Box score row builders
 # ---------------------------------------------------------------------------
 def _trad_player_rows(game_id, quarter_label, df):
     rows = []
@@ -247,6 +250,8 @@ def _trad_player_rows(game_id, quarter_label, df):
         pid = safe_int(row.get("personId"))
         if pid is None:
             continue
+        pos_raw  = safe_str(row.get("position"))
+        position = pos_raw if pos_raw and pos_raw.lower() != "nan" else "BENCH"
         rows.append({
             "game_id":           game_id,
             "player_id":         pid,
@@ -255,7 +260,7 @@ def _trad_player_rows(game_id, quarter_label, df):
             "last_name":         safe_str(row.get("familyName")),
             "team_id":           safe_int(row.get("teamId")),
             "team_abbreviation": safe_str(row.get("teamTricode")),
-            "position":          safe_str(row.get("position")),
+            "position":          position,
             "minutes":           safe_str(row.get("minutes")),
             "fgm":               safe_int(row.get("fieldGoalsMade")),
             "fga":               safe_int(row.get("fieldGoalsAttempted")),
@@ -279,7 +284,9 @@ def _trad_player_rows(game_id, quarter_label, df):
         })
     return rows
 
+
 def _trad_team_rows(game_id, quarter_label, df):
+    """Team rows. Minutes excluded per spec."""
     rows = []
     if df is None or df.empty:
         return rows
@@ -292,7 +299,6 @@ def _trad_team_rows(game_id, quarter_label, df):
             "team_id":           tid,
             "quarter":           quarter_label,
             "team_abbreviation": safe_str(row.get("teamTricode")),
-            "minutes":           safe_str(row.get("minutes")),
             "fgm":               safe_int(row.get("fieldGoalsMade")),
             "fga":               safe_int(row.get("fieldGoalsAttempted")),
             "fg_pct":            safe_float(row.get("fieldGoalsPercentage")),
@@ -314,6 +320,7 @@ def _trad_team_rows(game_id, quarter_label, df):
             "plus_minus":        safe_float(row.get("plusMinusPoints")),
         })
     return rows
+
 
 def _sum_ot_player_rows(game_id, ot_periods_data):
     if not ot_periods_data:
@@ -341,6 +348,7 @@ def _sum_ot_player_rows(game_id, ot_periods_data):
     merged["quarter"] = "OT"
     return merged.to_dict(orient="records")
 
+
 def _sum_ot_team_rows(game_id, ot_periods_data):
     if not ot_periods_data:
         return []
@@ -354,7 +362,7 @@ def _sum_ot_team_rows(game_id, ot_periods_data):
                   "oreb","dreb","reb","ast","stl","blk","tov","pf","pts","plus_minus"]
     for c in count_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    meta_cols  = ["game_id","team_id","quarter","team_abbreviation","minutes"]
+    meta_cols  = ["game_id","team_id","quarter","team_abbreviation"]
     agg_meta   = df.groupby("team_id")[meta_cols].first().reset_index(drop=True)
     agg_counts = df.groupby("team_id")[count_cols].sum().reset_index()
     agg_counts.rename(columns={"team_id": "_tid"}, inplace=True)
@@ -367,24 +375,22 @@ def _sum_ot_team_rows(game_id, ot_periods_data):
     return merged.to_dict(orient="records")
 
 # ---------------------------------------------------------------------------
-# Table formatter for output file
+# Table formatter
 # ---------------------------------------------------------------------------
 def format_table(title, rows, columns):
-    """
-    Returns a pipe-delimited text table with a header and separator row.
-    Truncates long string values so columns stay readable.
-    """
     if not rows:
         return f"\n{'='*60}\n{title}\n{'='*60}\nNo rows.\n"
 
-    df = pd.DataFrame(rows, columns=columns)
+    df = pd.DataFrame(rows)
+    columns = [c for c in columns if c in df.columns]
+    df = df[columns].copy()
 
-    # Truncate long strings to keep columns from blowing out
-    for col in df.select_dtypes(include="object").columns:
-        df[col] = df[col].astype(str).str[:20]
+    df = df.fillna("").astype(str)
+    for col in df.columns:
+        df[col] = df[col].str.replace("nan", "", regex=False).str[:22]
 
     col_widths = {
-        col: max(len(str(col)), df[col].astype(str).str.len().max())
+        col: max(len(str(col)), df[col].str.len().max())
         for col in df.columns
     }
 
@@ -397,15 +403,47 @@ def format_table(title, rows, columns):
     separator = "|-" + "-|-".join("-" * col_widths[col] for col in df.columns) + "-|"
     data_rows = "\n".join(fmt_row(row) for _, row in df.iterrows())
 
-    row_count = len(df)
     return (
         f"\n{'='*60}\n"
-        f"{title}  ({row_count} rows)\n"
+        f"{title}  ({len(df)} rows)\n"
         f"{'='*60}\n"
         f"{header}\n"
         f"{separator}\n"
         f"{data_rows}\n"
     )
+
+# ---------------------------------------------------------------------------
+# Column specs
+# ---------------------------------------------------------------------------
+PLAYER_Q_COLS = [
+    "game_id","team_id","opponent_team_id",
+    "quarter","first_name","last_name","team_abbreviation","position","minutes",
+    "fgm","fga","fg3m","fg3a","ftm","fta","reb","ast","stl","blk","tov","pts","plus_minus",
+]
+
+PLAYER_OT_COLS = [
+    "game_id","team_id","opponent_team_id",
+    "quarter","first_name","last_name","team_abbreviation",
+    "fgm","fga","fg3m","fg3a","ftm","fta","reb","ast","pts","plus_minus",
+]
+
+TEAM_COLS = [
+    "game_id","team_id","opponent_team_id",
+    "quarter","team_abbreviation",
+    "fgm","fga","fg3m","fg3a","ftm","fta","reb","ast","pts","plus_minus",
+]
+
+COMBINED_PLAYER_COLS = [
+    "game_id","team_id","opponent_team_id",
+    "quarter","first_name","last_name","team_abbreviation","position","minutes",
+    "fgm","fga","fg3m","fg3a","ftm","fta","reb","ast","stl","blk","tov","pts","plus_minus",
+]
+
+COMBINED_TEAM_COLS = [
+    "game_id","team_id","opponent_team_id",
+    "quarter","team_abbreviation",
+    "fgm","fga","fg3m","fg3a","ftm","fta","reb","ast","pts","plus_minus",
+]
 
 # ---------------------------------------------------------------------------
 # Main test logic
@@ -418,36 +456,12 @@ def run_test(game_id, engine, out_path):
         log.info(block)
         sections.append(block)
 
-    # ------------------------------------------------------------------
-    # Log which API field names the matchup endpoint actually exposes.
-    # This lets you confirm the corrected key names before trusting data.
-    # ------------------------------------------------------------------
-    log.info(f"\nInspecting BoxScoreMatchupsV3 column names for {game_id}")
-    probe_ep = api_call(
-        lambda: boxscorematchupsv3.BoxScoreMatchupsV3(
-            game_id=game_id, proxy=PROXY_URL),
-        f"BoxScoreMatchupsV3 column probe {game_id}",
-    )
-    if probe_ep is not None:
-        try:
-            probe_cols = probe_ep.player_stats.get_data_frame().columns.tolist()
-            col_section = (
-                f"\n{'='*60}\n"
-                f"BoxScoreMatchupsV3 raw column names\n"
-                f"{'='*60}\n"
-                + "\n".join(f"  {c}" for c in probe_cols)
-                + "\n"
-            )
-            log.info(col_section)
-            sections.append(col_section)
-        except Exception as exc:
-            log.warning(f"  Column probe failed: {exc}")
-
-    # ------------------------------------------------------------------
-    # BoxScoreTraditionalV3 — Q1 through Q4 using range_type=2
-    # ------------------------------------------------------------------
     all_player_rows = []
+    all_team_rows   = []
 
+    # ------------------------------------------------------------------
+    # Q1 through Q4
+    # ------------------------------------------------------------------
     for period_num, quarter_label, start_range, end_range in PERIOD_RANGES:
         ep = api_call(
             lambda s=start_range, e=end_range: boxscoretraditionalv3.BoxScoreTraditionalV3(
@@ -467,11 +481,17 @@ def run_test(game_id, engine, out_path):
             p_df = ep.player_stats.get_data_frame()
             t_df = ep.team_stats.get_data_frame()
         except Exception as exc:
-            log.warning(f"  Traditional parse failed {game_id} {quarter_label}: {exc}")
+            log.warning(f"  Parse failed {game_id} {quarter_label}: {exc}")
             continue
 
         p_rows = _trad_player_rows(game_id, quarter_label, p_df)
         t_rows = _trad_team_rows(game_id, quarter_label, t_df)
+
+        opp_map = _build_opponent_map(p_rows)
+        for r in p_rows:
+            r["opponent_team_id"] = opp_map.get(r["team_id"])
+        for r in t_rows:
+            r["opponent_team_id"] = opp_map.get(r["team_id"])
 
         if p_rows:
             _seed_players(p_rows, engine)
@@ -482,34 +502,16 @@ def run_test(game_id, engine, out_path):
         if t_rows:
             upsert(pd.DataFrame(t_rows), engine,
                    "nba", "team_box_score_stats", ["game_id","team_id","quarter"])
+            all_team_rows.extend(t_rows)
 
-        player_display_cols = [
-            "quarter","first_name","last_name","team_abbreviation","position",
-            "minutes","fgm","fga","fg3m","fg3a","ftm","fta",
-            "reb","ast","stl","blk","tov","pts","plus_minus",
-        ]
-        team_display_cols = [
-            "quarter","team_abbreviation","minutes","fgm","fga",
-            "fg3m","fg3a","ftm","fta","reb","ast","pts","plus_minus",
-        ]
-
-        log_section(
-            f"Player Box Score  —  {quarter_label}",
-            p_rows,
-            player_display_cols,
-        )
-        log_section(
-            f"Team Box Score  —  {quarter_label}",
-            t_rows,
-            team_display_cols,
-        )
+        log_section(f"Player Box Score  —  {quarter_label}", p_rows, PLAYER_Q_COLS)
+        log_section(f"Team Box Score  —  {quarter_label}", t_rows, TEAM_COLS)
 
     # ------------------------------------------------------------------
     # OT periods
     # ------------------------------------------------------------------
     ot_periods_data = []
-    ot_period  = 1
-    ot_start   = OT_START_RANGE
+    ot_start = OT_START_RANGE
 
     while True:
         ot_end = ot_start + OT_PERIOD_LEN
@@ -540,11 +542,16 @@ def run_test(game_id, engine, out_path):
         time.sleep(API_DELAY)
         ot_periods_data.append((ot_p_df, ot_t_df))
         ot_start += OT_PERIOD_LEN
-        ot_period += 1
 
     if ot_periods_data:
         ot_p_rows = _sum_ot_player_rows(game_id, ot_periods_data)
         ot_t_rows = _sum_ot_team_rows(game_id, ot_periods_data)
+
+        opp_map_ot = _build_opponent_map(all_player_rows) if all_player_rows else {}
+        for r in ot_p_rows:
+            r["opponent_team_id"] = opp_map_ot.get(r["team_id"])
+        for r in ot_t_rows:
+            r["opponent_team_id"] = opp_map_ot.get(r["team_id"])
 
         if ot_p_rows:
             _seed_players(ot_p_rows, engine)
@@ -555,27 +562,39 @@ def run_test(game_id, engine, out_path):
         if ot_t_rows:
             upsert(pd.DataFrame(ot_t_rows), engine,
                    "nba", "team_box_score_stats", ["game_id","team_id","quarter"])
+            all_team_rows.extend(ot_t_rows)
 
         log_section(
             f"Player Box Score  —  OT (summed across {len(ot_periods_data)} period(s))",
             ot_p_rows,
-            ["quarter","first_name","last_name","team_abbreviation",
-             "fgm","fga","fg3m","fg3a","ftm","fta","reb","ast","pts","plus_minus"],
+            PLAYER_OT_COLS,
         )
-        log_section(
-            f"Team Box Score  —  OT",
-            ot_t_rows,
-            ["quarter","team_abbreviation","fgm","fga","fg3m","fg3a",
-             "ftm","fta","reb","ast","pts","plus_minus"],
-        )
+        log_section("Team Box Score  —  OT", ot_t_rows, TEAM_COLS)
     else:
         no_ot = f"\n{'='*60}\nOT\n{'='*60}\nNo overtime periods detected.\n"
         log.info(no_ot)
         sections.append(no_ot)
 
     # ------------------------------------------------------------------
-    # Sanity check: compare per-quarter sums vs a direct full-game pull.
-    # If the fix is working, these totals should match.
+    # Combined tables: all quarters appended
+    # OT rows will have blank position/minutes/stl/blk/tov cells since
+    # those are not tracked at the OT summary level
+    # ------------------------------------------------------------------
+    if all_player_rows:
+        log_section(
+            "Player Box Score  —  All Quarters Combined",
+            all_player_rows,
+            COMBINED_PLAYER_COLS,
+        )
+    if all_team_rows:
+        log_section(
+            "Team Box Score  —  All Quarters Combined",
+            all_team_rows,
+            COMBINED_TEAM_COLS,
+        )
+
+    # ------------------------------------------------------------------
+    # Sanity check: quarter sums vs full-game pull
     # ------------------------------------------------------------------
     sanity_ep = api_call(
         lambda: boxscoretraditionalv3.BoxScoreTraditionalV3(
@@ -593,44 +612,38 @@ def run_test(game_id, engine, out_path):
     sanity_rows = []
     if sanity_ep is not None and all_player_rows:
         try:
-            full_df   = sanity_ep.player_stats.get_data_frame()
-            full_rows = _trad_player_rows(game_id, "FULL", full_df)
+            full_rows = _trad_player_rows(
+                game_id, "FULL", sanity_ep.player_stats.get_data_frame()
+            )
+            stat_cols = ["fgm","fga","fg3m","fg3a","ftm","fta",
+                         "oreb","dreb","reb","ast","stl","blk","tov","pf","pts"]
 
-            # Sum the quarter rows (Q1-Q4 and OT) per player
-            quarter_df = pd.DataFrame(all_player_rows)
-            stat_cols  = ["fgm","fga","fg3m","fg3a","ftm","fta",
-                          "oreb","dreb","reb","ast","stl","blk","tov","pf","pts"]
+            q_df = pd.DataFrame(all_player_rows)
             for c in stat_cols:
-                quarter_df[c] = pd.to_numeric(quarter_df[c], errors="coerce").fillna(0)
-            quarter_sums = (
-                quarter_df.groupby("player_id")[stat_cols].sum()
+                q_df[c] = pd.to_numeric(q_df[c], errors="coerce").fillna(0)
+            q_sums = (
+                q_df.groupby("player_id")[stat_cols].sum()
                 .reset_index()
                 .rename(columns={c: f"q_{c}" for c in stat_cols})
             )
 
-            full_df2 = pd.DataFrame(full_rows)
+            f_df = pd.DataFrame(full_rows)
             for c in stat_cols:
-                full_df2[c] = pd.to_numeric(full_df2[c], errors="coerce").fillna(0)
-            full_sums = (
-                full_df2.groupby("player_id")[stat_cols + ["first_name","last_name"]].first()
-                .reset_index()
-            )
+                f_df[c] = pd.to_numeric(f_df[c], errors="coerce").fillna(0)
+            f_sums = f_df.groupby("player_id")[stat_cols + ["first_name","last_name"]].first().reset_index()
 
-            merged = full_sums.merge(quarter_sums, on="player_id", how="left")
-            sanity_check = []
+            merged = f_sums.merge(q_sums, on="player_id", how="left")
             for _, r in merged.iterrows():
                 for c in ["pts","reb","ast"]:
-                    full_val    = int(r.get(c, 0) or 0)
-                    quarter_val = int(r.get(f"q_{c}", 0) or 0)
-                    match       = "OK" if full_val == quarter_val else "MISMATCH"
-                    sanity_check.append({
+                    fv = int(r.get(c, 0) or 0)
+                    qv = int(r.get(f"q_{c}", 0) or 0)
+                    sanity_rows.append({
                         "player":       f"{r.get('first_name','')} {r.get('last_name','')}".strip(),
                         "stat":         c,
-                        "full_game":    full_val,
-                        "sum_quarters": quarter_val,
-                        "result":       match,
+                        "full_game":    fv,
+                        "sum_quarters": qv,
+                        "result":       "OK" if fv == qv else "MISMATCH",
                     })
-            sanity_rows = sanity_check
         except Exception as exc:
             log.warning(f"  Sanity check failed: {exc}")
 
@@ -641,97 +654,27 @@ def run_test(game_id, engine, out_path):
     )
 
     # ------------------------------------------------------------------
-    # BoxScoreMatchupsV3 — with corrected field names
+    # Matchup column probe (informational only)
     # ------------------------------------------------------------------
-    matchups_ep = api_call(
+    probe_ep = api_call(
         lambda: boxscorematchupsv3.BoxScoreMatchupsV3(
             game_id=game_id, proxy=PROXY_URL),
-        f"BoxScoreMatchupsV3 {game_id}",
+        f"BoxScoreMatchupsV3 column probe {game_id}",
     )
-    matchup_rows = []
-    if matchups_ep is not None:
+    if probe_ep is not None:
         try:
-            for _, row in matchups_ep.player_stats.get_data_frame().iterrows():
-                pid_off = safe_int(row.get("personIdOff"))
-                pid_def = safe_int(row.get("personIdDef"))
-                if pid_off is None or pid_def is None:
-                    continue
-                matchup_rows.append({
-                    "game_id":                   game_id,
-                    "team_id":                   safe_int(row.get("teamId")),
-                    "team_tricode":              safe_str(row.get("teamTricode")),
-                    "person_id_off":             pid_off,
-                    "first_name_off":            safe_str(row.get("firstNameOff")),
-                    "family_name_off":           safe_str(row.get("familyNameOff")),
-                    "jersey_num_off":            safe_str(row.get("jerseyNumOff")),
-                    "person_id_def":             pid_def,
-                    "first_name_def":            safe_str(row.get("firstNameDef")),
-                    "family_name_def":           safe_str(row.get("familyNameDef")),
-                    "jersey_num_def":            safe_str(row.get("jerseyNumDef")),
-                    # FIXED: positionDefend (not positionDef)
-                    "position_def":              safe_str(row.get("positionDefend")),
-                    "matchup_minutes":           safe_str(row.get("matchupMinutes")),
-                    "matchup_minutes_sort":      safe_float(row.get("matchupMinutesSort")),
-                    "partial_possessions":       safe_float(row.get("partialPossessions")),
-                    "pct_defender_total_time":   safe_float(row.get("percentageDefenderTotalTime")),
-                    "pct_offensive_total_time":  safe_float(row.get("percentageOffensiveTotalTime")),
-                    "pct_total_time_both_on":    safe_float(row.get("percentageTotalTimeBothOn")),
-                    "switches_on":               safe_int(row.get("switchesOn")),
-                    "player_points":             safe_int(row.get("playerPoints")),
-                    "team_points":               safe_int(row.get("teamPoints")),
-                    "matchup_assists":           safe_int(row.get("matchupAssists")),
-                    # FIXED: matchupPotentialAssist (not matchupPotentialAssists)
-                    "matchup_potential_assists": safe_int(safe_float(row.get("matchupPotentialAssists"))),
-                    "matchup_turnovers":         safe_int(row.get("matchupTurnovers")),
-                    "matchup_blocks":            safe_int(row.get("matchupBlocks")),
-                    "matchup_fgm":               safe_int(row.get("matchupFieldGoalsMade")),
-                    "matchup_fga":               safe_int(row.get("matchupFieldGoalsAttempted")),
-                    "matchup_fg_pct":            safe_float(row.get("matchupFieldGoalsPercentage")),
-                    "matchup_fg3m":              safe_int(row.get("matchupThreePointersMade")),
-                    "matchup_fg3a":              safe_int(row.get("matchupThreePointersAttempted")),
-                    "matchup_fg3_pct":           safe_float(row.get("matchupThreePointersPercentage")),
-                    "help_blocks":               safe_int(row.get("helpBlocks")),
-                    "help_fgm":                  safe_int(row.get("helpFieldGoalsMade")),
-                    "help_fga":                  safe_int(row.get("helpFieldGoalsAttempted")),
-                    "help_fg_pct":               safe_float(row.get("helpFieldGoalsPercentage")),
-                    "matchup_ftm":               safe_int(row.get("matchupFreeThrowsMade")),
-                    "matchup_fta":               safe_int(row.get("matchupFreeThrowsAttempted")),
-                    "shooting_fouls":            safe_int(row.get("shootingFouls")),
-                })
-            if matchup_rows:
-                upsert(pd.DataFrame(matchup_rows), engine,
-                       "nba", "player_box_score_matchups",
-                       ["game_id","person_id_off","person_id_def"])
+            probe_cols = probe_ep.player_stats.get_data_frame().columns.tolist()
+            col_section = (
+                f"\n{'='*60}\n"
+                f"BoxScoreMatchupsV3 raw column names\n"
+                f"{'='*60}\n"
+                + "\n".join(f"  {c}" for c in probe_cols)
+                + "\n"
+            )
+            log.info(col_section)
+            sections.append(col_section)
         except Exception as exc:
-            log.warning(f"  BoxScoreMatchupsV3 parse failed for {game_id}: {exc}")
-
-    # Show the key columns that were previously broken
-    log_section(
-        "Matchups  —  Key columns (position_def and matchup_potential_assists)",
-        matchup_rows,
-        ["first_name_off","family_name_off","first_name_def","family_name_def",
-         "position_def","matchup_minutes","player_points","matchup_potential_assists",
-         "matchup_fgm","matchup_fga"],
-    )
-
-    # Summary of null/zero counts for the two fixed columns
-    if matchup_rows:
-        mdf        = pd.DataFrame(matchup_rows)
-        null_pos   = mdf["position_def"].isna().sum()
-        zero_pa    = (mdf["matchup_potential_assists"].fillna(0) == 0).sum()
-        total_rows = len(mdf)
-        fix_summary = (
-            f"\n{'='*60}\n"
-            f"Fix Validation Summary\n"
-            f"{'='*60}\n"
-            f"  Total matchup rows     : {total_rows}\n"
-            f"  position_def nulls     : {null_pos}  "
-            f"({'FIXED' if null_pos < total_rows else 'STILL BROKEN'})\n"
-            f"  matchup_potential_assists zeros : {zero_pa}  "
-            f"({'FIXED' if zero_pa < total_rows else 'STILL BROKEN'})\n"
-        )
-        log.info(fix_summary)
-        sections.append(fix_summary)
+            log.warning(f"  Column probe failed: {exc}")
 
     # ------------------------------------------------------------------
     # Write output file
@@ -750,7 +693,7 @@ def run_test(game_id, engine, out_path):
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Test script for NBA box score quarter-split and matchup fixes"
+        description="Test script for NBA box score quarter-split fix"
     )
     parser.add_argument(
         "--game-id", required=True,
@@ -761,7 +704,7 @@ def main():
     if PROXY_URL:
         log.info(f"Proxy active: {PROXY_URL.split('@')[-1]}")
     else:
-        log.warning("NBA_PROXY_URL not set. stats.nba.com requests will likely be blocked.")
+        log.warning("NBA_PROXY_URL not set.")
 
     engine   = get_engine()
     out_path = f"nba_boxscore_test_{args.game_id}.txt"
