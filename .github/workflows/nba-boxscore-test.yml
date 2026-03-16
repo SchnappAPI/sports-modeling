@@ -1,0 +1,59 @@
+name: NBA Box Score Fix Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      game_id:
+        description: "NBA game ID to test (e.g. 0022400061)"
+        required: true
+        type: string
+
+jobs:
+  nba-boxscore-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ODBC driver
+        run: |
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] \
+            https://packages.microsoft.com/ubuntu/22.04/prod jammy main" \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update -qq
+          ACCEPT_EULA=Y sudo apt-get install -y -qq msodbcsql18 unixodbc-dev
+
+      - name: Install Python dependencies
+        run: |
+          pip install --quiet \
+            nba_api==1.11.4 \
+            pandas \
+            sqlalchemy \
+            pyodbc
+
+      - name: Run box score fix test
+        env:
+          NBA_PROXY_URL:        ${{ secrets.NBA_PROXY_URL }}
+          AZURE_SQL_SERVER:     ${{ secrets.AZURE_SQL_SERVER }}
+          AZURE_SQL_DATABASE:   ${{ secrets.AZURE_SQL_DATABASE }}
+          AZURE_SQL_USERNAME:   ${{ secrets.AZURE_SQL_USERNAME }}
+          AZURE_SQL_PASSWORD:   ${{ secrets.AZURE_SQL_PASSWORD }}
+        run: |
+          python etl/nba_boxscore_test.py --game-id "${{ github.event.inputs.game_id }}"
+
+      - name: Upload test output as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-boxscore-test-${{ github.event.inputs.game_id }}
+          path: nba_boxscore_test_${{ github.event.inputs.game_id }}.txt
+          retention-days: 14
