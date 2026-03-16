@@ -681,7 +681,7 @@ def run_test(game_id, engine, out_path):
                     "team_points":               safe_int(row.get("teamPoints")),
                     "matchup_assists":           safe_int(row.get("matchupAssists")),
                     # FIXED: matchupPotentialAssist (not matchupPotentialAssists)
-                    "matchup_potential_assists": safe_int(row.get("matchupPotentialAssist")),
+                    "matchup_potential_assists": safe_int(safe_float(row.get("matchupPotentialAssists"))),
                     "matchup_turnovers":         safe_int(row.get("matchupTurnovers")),
                     "matchup_blocks":            safe_int(row.get("matchupBlocks")),
                     "matchup_fgm":               safe_int(row.get("matchupFieldGoalsMade")),
