@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       game_id:
-        description: "NBA game ID to test (e.g. 0022400061)"
+        description: "NBA game ID to test (e.g. 0022400061 or 0022500001)"
         required: true
         type: string
 
