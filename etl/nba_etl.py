@@ -110,8 +110,8 @@ log = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 PROXY_URL          = os.environ.get("NBA_PROXY_URL")
-API_DELAY          = 0.30  # seconds between API calls
-RETRY_WAIT         = 5     # seconds before retry
+API_DELAY          = 1.5  # seconds between API calls
+RETRY_WAIT         = 30     # seconds before retry
 RETRY_COUNT        = 3     # attempts per API call
 DEFAULT_BATCH      = 30    # games per run
 DB_CONNECT_RETRIES = 3     # Azure SQL auto-pause resume attempts
