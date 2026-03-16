@@ -10,9 +10,9 @@ on:
         required: false
         default: '30'
       season:
-        description: 'Season to target, e.g. 2024-25 (default: 2024-25)'
+        description: 'Season to target, e.g. 2025-26 (default: 2025-26)'
         required: false
-        default: '2024-25'
+        default: '2025-26'
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -49,5 +49,5 @@ jobs:
           BATCH="${{ github.event.inputs.batch }}"
           SEASON="${{ github.event.inputs.season }}"
           BATCH="${BATCH:-30}"
-          SEASON="${SEASON:-2024-25}"
+          SEASON="${SEASON:-2025-26}"
           python etl/nba_etl.py --batch "$BATCH" --season "$SEASON"
