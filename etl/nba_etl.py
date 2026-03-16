@@ -568,14 +568,51 @@ def api_call(fn, label):
 # ---------------------------------------------------------------------------
 # Generic MERGE upsert
 # ---------------------------------------------------------------------------
+def _clean_val(v):
+    """
+    Sanitize a single value for pyodbc. Converts numpy scalars, float nan,
+    float inf, and pandas NA types all to Python None. Converts surviving
+    numpy numeric types to plain Python int or float so pyodbc never sees
+    a numpy dtype.
+    """
+    import math
+    import numpy as np
+    if v is None:
+        return None
+    # Catch pandas NA / NaT
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    # Catch float nan / inf
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+    # Coerce numpy integer types to Python int
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    # Coerce numpy float types to Python float, then re-check nan/inf
+    if isinstance(v, (np.floating,)):
+        f = float(v)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    return v
+
+
 def upsert(df, engine, schema, table, pk_cols):
     """
-    MERGE upsert. Uses df.where(pd.notna(df), None) to convert all NaN/NaT
-    to Python None before sending to pyodbc, handling all column dtypes.
+    MERGE upsert. Sanitizes every value through _clean_val before sending
+    to pyodbc, handling numpy scalars, float nan/inf, and pandas NA across
+    all column dtypes.
     """
     if df is None or df.empty:
         return
-    df = df.where(pd.notna(df), other=None)
+    # Apply _clean_val element-wise across the entire DataFrame
+    records = [
+        {col: _clean_val(val) for col, val in row.items()}
+        for row in df.to_dict(orient="records")
+    ]
     non_pk    = [c for c in df.columns if c not in pk_cols]
     col_list  = ", ".join(df.columns)
     val_list  = ", ".join(f":{c}" for c in df.columns)
@@ -592,7 +629,7 @@ def upsert(df, engine, schema, table, pk_cols):
         WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list});
     """
     with engine.begin() as conn:
-        conn.execute(text(merge_sql), df.to_dict(orient="records"))
+        conn.execute(text(merge_sql), records)
 
 
 # ---------------------------------------------------------------------------
