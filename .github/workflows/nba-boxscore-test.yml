@@ -3,20 +3,28 @@ name: NBA Box Score Fix Test
 on:
   workflow_dispatch:
     inputs:
-      game_id:
-        description: "NBA game ID to test (e.g. 0022500001)"
+      game_ids:
+        description: "Comma-separated NBA game IDs (e.g. 0022500001,0022500002)"
         required: true
         type: string
       season:
-        description: "NBA season for passing stats (e.g. 2024-25)"
+        description: "NBA season string (e.g. 2024-25)"
         required: false
         default: "2024-25"
         type: string
+      skip_pt_stats:
+        description: "Skip passing and rebound stats (box score only)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   nba-boxscore-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -45,7 +53,16 @@ jobs:
             sqlalchemy \
             pyodbc
 
-      - name: Run box score fix test
+      - name: Build arguments
+        id: args
+        run: |
+          EXTRA=""
+          if [ "${{ github.event.inputs.skip_pt_stats }}" = "true" ]; then
+            EXTRA="--skip-pt-stats"
+          fi
+          echo "extra=$EXTRA" >> $GITHUB_OUTPUT
+
+      - name: Run box score test ETL
         env:
           NBA_PROXY_URL:        ${{ secrets.NBA_PROXY_URL }}
           AZURE_SQL_SERVER:     ${{ secrets.AZURE_SQL_SERVER }}
@@ -54,21 +71,30 @@ jobs:
           AZURE_SQL_PASSWORD:   ${{ secrets.AZURE_SQL_PASSWORD }}
         run: |
           python etl/nba_boxscore_test.py \
-            --game-id "${{ github.event.inputs.game_id }}" \
-            --season  "${{ github.event.inputs.season }}"
+            --game-ids "${{ github.event.inputs.game_ids }}" \
+            --season   "${{ github.event.inputs.season }}" \
+            ${{ steps.args.outputs.extra }}
 
       - name: Upload box score summary
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nba-boxscore-summary-${{ github.event.inputs.game_id }}
-          path: nba_boxscore_test_${{ github.event.inputs.game_id }}.txt
+          name: nba-boxscore-summary-run-${{ github.run_number }}
+          path: nba_boxscore_test_output.txt
           retention-days: 14
 
       - name: Upload passing stats log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nba-passing-stats-log-${{ github.run_number }}
+          name: nba-passing-stats-log-run-${{ github.run_number }}
           path: nba_passing_stats_log.csv
+          retention-days: 90
+
+      - name: Upload rebound chances log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-rebound-chances-log-run-${{ github.run_number }}
+          path: nba_rebound_chances_log.csv
           retention-days: 90
