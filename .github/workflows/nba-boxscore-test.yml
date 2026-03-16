@@ -4,14 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       game_id:
-        description: "NBA game ID to test (e.g. 0022400061 or 0022500001)"
+        description: "NBA game ID to test (e.g. 0022500001)"
         required: true
+        type: string
+      season:
+        description: "NBA season for passing stats (e.g. 2024-25)"
+        required: false
+        default: "2024-25"
         type: string
 
 jobs:
   nba-boxscore-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -48,12 +53,22 @@ jobs:
           AZURE_SQL_USERNAME:   ${{ secrets.AZURE_SQL_USERNAME }}
           AZURE_SQL_PASSWORD:   ${{ secrets.AZURE_SQL_PASSWORD }}
         run: |
-          python etl/nba_boxscore_test.py --game-id "${{ github.event.inputs.game_id }}"
+          python etl/nba_boxscore_test.py \
+            --game-id "${{ github.event.inputs.game_id }}" \
+            --season  "${{ github.event.inputs.season }}"
 
-      - name: Upload test output as artifact
+      - name: Upload box score summary
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nba-boxscore-test-${{ github.event.inputs.game_id }}
+          name: nba-boxscore-summary-${{ github.event.inputs.game_id }}
           path: nba_boxscore_test_${{ github.event.inputs.game_id }}.txt
           retention-days: 14
+
+      - name: Upload passing stats log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-passing-stats-log-${{ github.run_number }}
+          path: nba_passing_stats_log.csv
+          retention-days: 90
