@@ -471,7 +471,7 @@ def fetch_and_log_passing_stats(season, log_path):
             per_mode_simple="PerGame",
             season=season,
             season_type_all_star="Regular Season",
-            league_id="00",
+            league_id_nullable="00",
             proxy=PROXY_URL,
         ),
         "LeagueDashPtStats Passing",
@@ -481,10 +481,10 @@ def fetch_and_log_passing_stats(season, log_path):
         return []
 
     try:
-        df = ep.get_data_frames()[0]
+      df = ep.league_dash_pt_stats.get_data_frame()
     except Exception as exc:
-        log.warning(f"  LeagueDashPtStats parse failed: {exc}")
-        return []
+      log.warning(f"  LeagueDashPtStats parse failed: {exc}")
+      return []
 
     rows = []
     for _, row in df.iterrows():
