@@ -1,0 +1,51 @@
+name: NBA Pt Stats Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "NBA season (e.g. 2024-25)"
+        required: false
+        default: "2024-25"
+        type: string
+      days:
+        description: "Number of days to look back from yesterday"
+        required: false
+        default: "5"
+        type: string
+
+jobs:
+  nba-pt-stats-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --quiet nba_api==1.11.4 pandas
+
+      - name: Run pt stats test
+        env:
+          NBA_PROXY_URL: ${{ secrets.NBA_PROXY_URL }}
+        run: |
+          python etl/nba_pt_stats_test.py \
+            --season "${{ github.event.inputs.season }}" \
+            --days   "${{ github.event.inputs.days }}"
+
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-pt-stats-test-run-${{ github.run_number }}
+          path: |
+            nba_pt_stats_test_output.txt
+            nba_passing_stats_log.csv
+            nba_rebound_chances_log.csv
+          retention-days: 14
