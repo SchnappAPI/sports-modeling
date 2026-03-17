@@ -149,7 +149,7 @@ def fetch_pt_stats(game_date, pt_measure_type, season, timeout=60):
             resp = requests.get(
                 url,
                 headers=NBA_HEADERS,
-                proxies=None,
+                proxies={"http": None, "https": None},  # bypass any env-level proxy
                 timeout=timeout,
             )
 
