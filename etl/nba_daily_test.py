@@ -20,7 +20,8 @@ Run modes:
 Flow per run:
   1. Call ScoreboardV3 for --date to discover all game IDs on that day.
   2. For each game ID, fetch BoxScoreTraditionalV3 Q1-Q4 + OT with range_type=2.
-     Write player_box_score_stats and team_box_score_stats via MERGE upsert.
+     Seed nba.games, nba.players, then write player_box_score_stats and
+     team_box_score_stats via MERGE upsert.
   3. Call LeagueDashPtStats PtMeasureType=Passing via direct requests
      with DateFrom=DateTo=<date> and PerMode=Totals.
   4. Call LeagueDashPtStats PtMeasureType=Rebounding the same way.
@@ -272,6 +273,42 @@ def upsert(df, engine, schema, table, pk_cols, exclude_cols=None):
         conn.execute(text(merge_sql), records)
 
 # ---------------------------------------------------------------------------
+# _seed_games
+# ---------------------------------------------------------------------------
+def _seed_games(game_id, game_date, player_rows, engine):
+    """
+    Inserts a minimal row into nba.games if game_id does not already exist.
+    We derive the two team IDs from the player rows. The order is not
+    guaranteed to be home/away here since this is just a FK seed; the main
+    ETL will overwrite with the correct values when it runs.
+    """
+    team_ids = list({r["team_id"] for r in player_rows if r.get("team_id")})
+    if len(team_ids) != 2:
+        log.warning(f"  Could not determine both team IDs for {game_id}, skipping games seed.")
+        return
+
+    away_team_id = team_ids[0]
+    home_team_id = team_ids[1]
+
+    seed_sql = """
+        MERGE nba.games AS tgt
+        USING (VALUES (:game_id, :game_date, :away_team_id, :home_team_id))
+              AS src (game_id, game_date, away_team_id, home_team_id)
+        ON tgt.game_id = src.game_id
+        WHEN NOT MATCHED THEN INSERT
+            (game_id, game_date, away_team_id, home_team_id, created_at)
+        VALUES (src.game_id, src.game_date, src.away_team_id, src.home_team_id, GETUTCDATE());
+    """
+    with engine.begin() as conn:
+        conn.execute(text(seed_sql), {
+            "game_id":      game_id,
+            "game_date":    game_date,
+            "away_team_id": away_team_id,
+            "home_team_id": home_team_id,
+        })
+    log.info(f"  Seeded nba.games for {game_id} ({game_date})")
+
+# ---------------------------------------------------------------------------
 # _seed_players
 # ---------------------------------------------------------------------------
 def _seed_players(rows, engine):
@@ -311,7 +348,12 @@ def _build_opponent_map(player_rows):
 # Discover game IDs for a date via ScoreboardV3
 # ---------------------------------------------------------------------------
 def fetch_game_ids_for_date(game_date):
-    date_str = str(game_date)  # YYYY-MM-DD -- ScoreboardV3 takes this format directly
+    """
+    Returns a list of game ID strings for all games on game_date.
+    ScoreboardV3 is a V3 endpoint: game_date takes YYYY-MM-DD format and
+    columns are camelCase (gameId, not GAME_ID).
+    """
+    date_str = str(game_date)  # YYYY-MM-DD
     log.info(f"Fetching game IDs for {game_date} via ScoreboardV3...")
 
     ep = api_call(
@@ -336,7 +378,8 @@ def fetch_game_ids_for_date(game_date):
         log.info(f"  No games found on {game_date}.")
         return []
 
-    game_ids = games_df["gameId"].astype(str).tolist()  # camelCase, V3 endpoint
+    # V3 endpoint uses camelCase column names
+    game_ids = games_df["gameId"].astype(str).tolist()
     log.info(f"  Found {len(game_ids)} game(s): {game_ids}")
     return game_ids
 
@@ -579,7 +622,7 @@ def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
             col_names = data["resultSets"][0]["headers"]
             row_count = len(row_set)
 
-            log.info(f"  HTTP 200 — {row_count} rows returned")
+            log.info(f"  HTTP 200 -- {row_count} rows returned")
 
             if row_count == 0:
                 log.warning(f"  No {pt_measure_type} rows for {date_str} (no games or off day)")
@@ -670,15 +713,17 @@ def fetch_and_log_rebound_chances(game_date, season, log_path):
 # ---------------------------------------------------------------------------
 # Per-game box score processor
 # ---------------------------------------------------------------------------
-def process_game_box_score(game_id, engine, sections):
+def process_game_box_score(game_id, game_date, engine, sections):
     """
     Fetches Q1-Q4 and OT box score data for a single game.
+    Seeds nba.games and nba.players before the first upsert.
     Writes to Azure SQL via MERGE upsert.
     Returns (all_player_rows, all_team_rows) for display and sanity check.
     """
     log.info(f"\nProcessing box score for {game_id}")
     all_player_rows = []
     all_team_rows   = []
+    games_seeded    = False  # seed nba.games once on first successful quarter
 
     def log_section(title, rows, columns):
         block = format_table(title, rows, columns)
@@ -719,6 +764,9 @@ def process_game_box_score(game_id, engine, sections):
 
         if p_rows:
             _seed_players(p_rows, engine)
+            if not games_seeded:
+                _seed_games(game_id, game_date, p_rows, engine)
+                games_seeded = True
             upsert(pd.DataFrame(p_rows), engine,
                    "nba", "player_box_score_stats", ["game_id","player_id","quarter"],
                    exclude_cols=["opponent_team_id"])
@@ -959,7 +1007,7 @@ def main():
     # Step 2: Process box scores for every game on this date
     batch_player_rows = []
     for game_id in game_ids:
-        p_rows, t_rows = process_game_box_score(game_id, engine, sections)
+        p_rows, t_rows = process_game_box_score(game_id, game_date, engine, sections)
         run_sanity_check(game_id, p_rows, sections)
         batch_player_rows.extend(p_rows)
 
@@ -968,8 +1016,8 @@ def main():
         f"{len(game_ids)} game(s), {len(batch_player_rows)} total player-quarter rows."
     )
 
-    # Step 3: Fetch passing and rebounding tracking stats for the date
-    # These are called once per date (not once per game) because the endpoint
+    # Step 3: Fetch passing and rebounding tracking stats for the date.
+    # These are called once per date, not once per game, because the endpoint
     # returns all players across all games on that date in a single response.
     if not args.skip_pt_stats:
         log.info(f"\nFetching passing tracking stats for {game_date}...")
