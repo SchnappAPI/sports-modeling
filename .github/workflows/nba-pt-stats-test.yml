@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       season:
-        description: "NBA season (e.g. 2024-25)"
+        description: "NBA season (e.g. 2025-26)"
         required: false
-        default: "2024-25"
+        default: "2025-26"
         type: string
       days:
         description: "Number of days to look back from yesterday"
@@ -29,7 +29,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install --quiet nba_api==1.11.4 pandas
+        run: pip install --quiet nba_api==1.11.4 pandas requests
 
       - name: Run pt stats test
         env:
@@ -39,7 +39,7 @@ jobs:
             --season "${{ github.event.inputs.season }}" \
             --days   "${{ github.event.inputs.days }}"
 
-      - name: Upload summary
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
