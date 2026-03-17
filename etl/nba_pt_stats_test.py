@@ -116,7 +116,7 @@ def get_proxies():
 # ---------------------------------------------------------------------------
 # Core fetch — direct requests call mirroring the Excel fetchDate function
 # ---------------------------------------------------------------------------
-def fetch_pt_stats(game_date, pt_measure_type, season, timeout):
+def fetch_pt_stats(game_date, pt_measure_type, season, timeout=60):
     """
     Fetches LeagueDashPtStats for a single date using a direct HTTP request
     with the same headers as the Excel Power Query. PerMode=Totals with
@@ -149,7 +149,7 @@ def fetch_pt_stats(game_date, pt_measure_type, season, timeout):
             resp = requests.get(
                 url,
                 headers=NBA_HEADERS,
-                proxies=get_proxies(),
+                proxies=None,
                 timeout=timeout,
             )
 
