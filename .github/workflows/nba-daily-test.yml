@@ -1,5 +1,4 @@
 name: NBA Daily Test
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,28 +7,24 @@ on:
         required: false
         default: ""
       season:
-        description: "NBA season string, e.g. 2024-25"
+        description: "NBA season string, e.g. 2025-26"
         required: false
-        default: "2024-25"
+        default: "2025-26"
       skip_pt_stats:
         description: "Skip passing and rebounding tracking stats (true/false)"
         required: false
         default: "false"
-
 jobs:
   nba-daily-test:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install ODBC driver
         run: |
           curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
@@ -39,10 +34,8 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
       - name: Install Python dependencies
         run: pip install -r etl/requirements.txt
-
       - name: Run NBA daily test
         env:
           NBA_PROXY_URL:      ${{ secrets.NBA_PROXY_URL }}
@@ -62,7 +55,6 @@ jobs:
             ARGS="$ARGS --skip-pt-stats"
           fi
           python etl/nba_daily_test.py $ARGS
-
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@v4
