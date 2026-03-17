@@ -106,14 +106,6 @@ def safe_str(val):
     return s if s else None
 
 # ---------------------------------------------------------------------------
-# Proxy helper
-# ---------------------------------------------------------------------------
-def get_proxies():
-    if not PROXY_URL:
-        return None
-    return {"http": PROXY_URL, "https": PROXY_URL}
-
-# ---------------------------------------------------------------------------
 # Core fetch — direct requests call mirroring the Excel fetchDate function
 # ---------------------------------------------------------------------------
 def fetch_pt_stats(game_date, pt_measure_type, season, timeout=60):
@@ -121,6 +113,11 @@ def fetch_pt_stats(game_date, pt_measure_type, season, timeout=60):
     Fetches LeagueDashPtStats for a single date using a direct HTTP request
     with the same headers as the Excel Power Query. PerMode=Totals with
     DateFrom=DateTo isolates that day's counting totals.
+
+    proxies={"http": None, "https": None} bypasses any proxy set in environment
+    variables (including those injected by nba_api proxy patching). The NBA
+    stats site responds to direct requests from GitHub Actions runners as long
+    as the browser-mimicking headers are present.
 
     Retry behavior:
       - Read timeout  -> wait RETRY_WAIT_TIMEOUT seconds then retry
@@ -154,7 +151,7 @@ def fetch_pt_stats(game_date, pt_measure_type, season, timeout=60):
             )
 
             if resp.status_code == 500:
-                raise ValueError(f"HTTP 500")
+                raise ValueError("HTTP 500")
 
             if resp.status_code != 200:
                 raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
@@ -164,7 +161,7 @@ def fetch_pt_stats(game_date, pt_measure_type, season, timeout=60):
             col_names = data["resultSets"][0]["headers"]
             row_count = len(row_set)
 
-            log.info(f"  HTTP 200 — {row_count} rows returned")
+            log.info(f"  HTTP 200 -- {row_count} rows returned")
 
             if row_count == 0:
                 return None
@@ -315,7 +312,7 @@ def main():
     if PROXY_URL:
         log.info(f"Proxy active: {PROXY_URL.split('@')[-1]}")
     else:
-        log.warning("NBA_PROXY_URL not set. Requests will likely be blocked from cloud IPs.")
+        log.info("NBA_PROXY_URL not set. Using direct connection for pt stats.")
 
     # Build date range: last N days excluding today, oldest first
     yesterday  = date.today() - timedelta(days=1)
@@ -340,7 +337,7 @@ def main():
         all_passing_rows.extend(p_rows)
 
         block = format_table(
-            f"Passing  —  {game_date}  (top 10 by potential_ast)",
+            f"Passing  --  {game_date}  (top 10 by potential_ast)",
             sorted(p_rows, key=lambda r: r.get("potential_ast") or 0, reverse=True)[:10],
             PASSING_COLS,
         )
@@ -359,7 +356,7 @@ def main():
         all_reb_rows.extend(r_rows)
 
         block = format_table(
-            f"Rebounding  —  {game_date}  (top 10 by reb_chances)",
+            f"Rebounding  --  {game_date}  (top 10 by reb_chances)",
             sorted(r_rows, key=lambda r: r.get("reb_chances") or 0, reverse=True)[:10],
             REB_COLS,
         )
@@ -396,7 +393,7 @@ def main():
     # Write text summary
     out_path = "nba_pt_stats_test_output.txt"
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write(f"NBA Pt Stats Test  —  {args.season}  —  Last {args.days} days\n")
+        f.write(f"NBA Pt Stats Test  --  {args.season}  --  Last {args.days} days\n")
         f.write("=" * 60 + "\n")
         for section in sections:
             f.write(section)
