@@ -311,12 +311,7 @@ def _build_opponent_map(player_rows):
 # Discover game IDs for a date via ScoreboardV3
 # ---------------------------------------------------------------------------
 def fetch_game_ids_for_date(game_date):
-    """
-    Returns a list of game ID strings for all games on game_date.
-    ScoreboardV3 line score rows are ordered away-first, home-second per game.
-    We only need the game IDs, so we pull from the games dataset directly.
-    """
-    date_str = game_date.strftime("%m/%d/%Y")
+    date_str = str(game_date)  # YYYY-MM-DD -- ScoreboardV3 takes this format directly
     log.info(f"Fetching game IDs for {game_date} via ScoreboardV3...")
 
     ep = api_call(
@@ -341,7 +336,7 @@ def fetch_game_ids_for_date(game_date):
         log.info(f"  No games found on {game_date}.")
         return []
 
-    game_ids = games_df["GAME_ID"].astype(str).tolist()
+    game_ids = games_df["gameId"].astype(str).tolist()  # camelCase, V3 endpoint
     log.info(f"  Found {len(game_ids)} game(s): {game_ids}")
     return game_ids
 
