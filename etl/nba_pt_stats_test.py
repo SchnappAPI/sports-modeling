@@ -69,7 +69,7 @@ PASSING_COLS = [
     "game_date", "player_id", "player_name", "team_id", "team_abbreviation",
     "potential_ast", "ast", "ft_ast", "secondary_ast",
     "passes_made", "passes_received",
-    "ast_points_created", "ast_adj", "ast_to_pass_pct", "ast_to_pass_pct_adj",
+    "ast_adj", "ast_to_pass_pct", "ast_to_pass_pct_adj",
 ]
 
 REB_COLS = [
@@ -215,7 +215,6 @@ def process_passing(game_date, season, timeout):
             "secondary_ast":       safe_float(row.get("SECONDARY_AST")),
             "passes_made":         safe_float(row.get("PASSES_MADE")),
             "passes_received":     safe_float(row.get("PASSES_RECEIVED")),
-            "ast_points_created":  safe_float(row.get("AST_POINTS_CREATED")),
             "ast_adj":             safe_float(row.get("AST_ADJ")),
             "ast_to_pass_pct":     safe_float(row.get("AST_TO_PASS_PCT")),
             "ast_to_pass_pct_adj": safe_float(row.get("AST_TO_PASS_PCT_ADJ")),
