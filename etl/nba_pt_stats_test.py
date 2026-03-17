@@ -6,16 +6,17 @@ Fetches data for each of the last N days (excluding today), one date at a time,
 using DateFrom=DateTo=<date> and PerMode=Totals.
 
 Uses direct HTTP requests with the same headers as the Excel Power Query,
-bypassing the nba_api wrapper which does not send these headers and causes
-the NBA API to return empty results.
+bypassing the nba_api wrapper which does not send these headers.
 
 Run:
   python nba_pt_stats_test.py
 
 Arguments:
-  --season    NBA season string (default: 2025-26)
-  --days      Number of days to look back from yesterday (default: 5)
-  --timeout   API timeout in seconds (default: 60)
+  --season         NBA season string (default: 2025-26)
+  --days           Number of days to look back from yesterday (default: 5)
+  --timeout        API timeout in seconds (default: 60)
+  --between-delay  Seconds to wait between passing and rebounding calls
+                   for the same date (default: 15)
 
 Secrets required:
   NBA_PROXY_URL
@@ -44,13 +45,16 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-PROXY_URL   = os.environ.get("NBA_PROXY_URL")
-API_DELAY   = 1.5
-RETRY_WAIT  = 30
-RETRY_COUNT = 3
+PROXY_URL    = os.environ.get("NBA_PROXY_URL")
+API_DELAY    = 1.5   # seconds after a successful response
+RETRY_COUNT  = 3
 
-# Exact headers from the Excel Power Query — required by the NBA API.
-# Without these the endpoint returns empty results instead of blocking.
+# Retry waits vary by error type.
+# 500 = server-side throttle, needs a longer pause than a timeout.
+RETRY_WAIT_TIMEOUT = 30   # seconds after a read timeout
+RETRY_WAIT_500     = 60   # seconds after an HTTP 500
+
+# Headers that mirror the Excel Power Query exactly.
 NBA_HEADERS = {
     "User-Agent":          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept":              "application/json, text/plain, */*",
@@ -118,8 +122,10 @@ def fetch_pt_stats(game_date, pt_measure_type, season, timeout):
     with the same headers as the Excel Power Query. PerMode=Totals with
     DateFrom=DateTo isolates that day's counting totals.
 
-    This bypasses the nba_api wrapper which does not send the required NBA
-    headers and therefore returns empty results from this endpoint.
+    Retry behavior:
+      - Read timeout  -> wait RETRY_WAIT_TIMEOUT seconds then retry
+      - HTTP 500      -> wait RETRY_WAIT_500 seconds then retry (throttle recovery)
+      - Other error   -> wait RETRY_WAIT_TIMEOUT seconds then retry
     """
     date_str = game_date.strftime("%m/%d/%Y")
     encoded  = requests.utils.quote(date_str)
@@ -147,10 +153,11 @@ def fetch_pt_stats(game_date, pt_measure_type, season, timeout):
                 timeout=timeout,
             )
 
+            if resp.status_code == 500:
+                raise ValueError(f"HTTP 500")
+
             if resp.status_code != 200:
-                raise ValueError(
-                    f"HTTP {resp.status_code}: {resp.text[:200]}"
-                )
+                raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
 
             data      = resp.json()
             row_set   = data["resultSets"][0]["rowSet"]
@@ -167,9 +174,18 @@ def fetch_pt_stats(game_date, pt_measure_type, season, timeout):
             return df
 
         except Exception as exc:
-            log.warning(f"  {pt_measure_type} {date_str} attempt {attempt}/{RETRY_COUNT} failed: {exc}")
+            exc_str = str(exc)
+            is_500  = "500" in exc_str
+            wait    = RETRY_WAIT_500 if is_500 else RETRY_WAIT_TIMEOUT
+
+            log.warning(
+                f"  {pt_measure_type} {date_str} attempt {attempt}/{RETRY_COUNT} "
+                f"failed: {exc_str}"
+            )
+
             if attempt < RETRY_COUNT:
-                time.sleep(RETRY_WAIT)
+                log.info(f"  Waiting {wait}s before retry...")
+                time.sleep(wait)
 
     log.error(f"  {pt_measure_type} {date_str} failed after {RETRY_COUNT} attempts, skipping")
     return None
@@ -291,6 +307,10 @@ def main():
         "--timeout", type=int, default=60,
         help="API timeout in seconds (default: 60)",
     )
+    parser.add_argument(
+        "--between-delay", type=int, default=15,
+        help="Seconds to wait between passing and rebounding calls for the same date (default: 15)",
+    )
     args = parser.parse_args()
 
     if PROXY_URL:
@@ -302,9 +322,10 @@ def main():
     yesterday  = date.today() - timedelta(days=1)
     date_range = [yesterday - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
 
-    log.info(f"Season  : {args.season}")
-    log.info(f"Dates   : {date_range[0]} to {date_range[-1]}  ({len(date_range)} days)")
-    log.info(f"Timeout : {args.timeout}s")
+    log.info(f"Season        : {args.season}")
+    log.info(f"Dates         : {date_range[0]} to {date_range[-1]}  ({len(date_range)} days)")
+    log.info(f"Timeout       : {args.timeout}s")
+    log.info(f"Between delay : {args.between_delay}s")
 
     all_passing_rows = []
     all_reb_rows     = []
@@ -315,11 +336,9 @@ def main():
         log.info(f"Date: {game_date}")
         log.info(f"{'='*60}")
 
+        # Passing
         p_rows = process_passing(game_date, args.season, args.timeout)
-        r_rows = process_rebounding(game_date, args.season, args.timeout)
-
         all_passing_rows.extend(p_rows)
-        all_reb_rows.extend(r_rows)
 
         block = format_table(
             f"Passing  —  {game_date}  (top 10 by potential_ast)",
@@ -328,6 +347,17 @@ def main():
         )
         log.info(block)
         sections.append(block)
+
+        # Wait between passing and rebounding to avoid triggering the NBA API
+        # rate limiter. The Excel query never calls both back to back like this
+        # so a pause here mimics a more natural request cadence.
+        if p_rows:
+            log.info(f"  Waiting {args.between_delay}s before rebounding call...")
+            time.sleep(args.between_delay)
+
+        # Rebounding
+        r_rows = process_rebounding(game_date, args.season, args.timeout)
+        all_reb_rows.extend(r_rows)
 
         block = format_table(
             f"Rebounding  —  {game_date}  (top 10 by reb_chances)",
@@ -338,15 +368,17 @@ def main():
         sections.append(block)
 
     # Run summary
-    dates_with_data = len({r["game_date"] for r in all_passing_rows})
+    dates_with_passing = len({r["game_date"] for r in all_passing_rows})
+    dates_with_reb     = len({r["game_date"] for r in all_reb_rows})
     summary = (
         f"\n{'='*60}\n"
         f"Run Summary\n"
         f"{'='*60}\n"
-        f"  Dates processed  : {len(date_range)}\n"
-        f"  Dates with data  : {dates_with_data}\n"
-        f"  Passing rows     : {len(all_passing_rows)}\n"
-        f"  Rebounding rows  : {len(all_reb_rows)}\n"
+        f"  Dates processed         : {len(date_range)}\n"
+        f"  Dates with passing data : {dates_with_passing}\n"
+        f"  Dates with rebound data : {dates_with_reb}\n"
+        f"  Passing rows total      : {len(all_passing_rows)}\n"
+        f"  Rebounding rows total   : {len(all_reb_rows)}\n"
     )
     log.info(summary)
     sections.append(summary)
