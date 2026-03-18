@@ -13,20 +13,20 @@ number bounds (the old nba_etl.py approach) produced cumulative totals, not
 per-quarter stats.
 
 Passing and rebounding tracking stats (LeagueDashPtStats) are fetched by date
-using direct HTTP requests with browser-mimicking headers. The nba_api wrapper
-does not send these headers and gets throttled when called from cloud IPs.
+using direct HTTP requests with browser-mimicking headers. These calls do NOT
+use the Webshare proxy. The proxy is only needed for nba_api wrapper calls
+which hit stats.nba.com from datacenter IPs. The direct HTTP calls with
+browser headers work reliably from GitHub Actions without a proxy.
 
 Batch unit is DAYS, not games. --days N means: find the N oldest dates in the
 2025-26 season that have at least one game with missing box score data, fetch
 all games on those dates, then fetch pt stats for those same dates.
 
 Refresh logic
-  Box scores : compare all completed games in nba.games against game_ids
-               already present in nba.player_box_score_stats. The difference
-               is the unloaded set. Process oldest dates first.
-  Pt stats   : compare distinct dates in the batch against dates already
-               present in nba.player_passing_stats. Pull only missing dates,
-               one date at a time, oldest first.
+  Box scores : compare all completed games against game_ids already present
+               in nba.player_box_score_stats. Process oldest dates first.
+  Pt stats   : compare distinct dates against dates already present in
+               nba.player_passing_stats. Pull only missing dates, oldest first.
 
 On first run every table is empty and the full season backfill begins.
 On nightly runs only the previous day's games are new so the batch is tiny.
@@ -56,7 +56,7 @@ import math
 import os
 import time
 import logging
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 import requests
@@ -96,6 +96,8 @@ PT_STATS_BETWEEN_DELAY = 15   # seconds between passing and rebounding calls
 
 # Browser headers required for direct stats.nba.com requests.
 # The nba_api wrapper omits these and gets throttled from cloud IPs.
+# These calls bypass the proxy entirely -- proxies={"http": None, "https": None}
+# is passed explicitly so the environment variable proxy is not inherited.
 NBA_HEADERS = {
     "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept":             "application/json, text/plain, */*",
@@ -264,11 +266,6 @@ DDL_STATEMENTS = [
     )
     """,
 
-    # nba.player_passing_stats
-    # Source: LeagueDashPtStats PtMeasureType=Passing, PerMode=Totals.
-    # One row per player per game date. Upsert key: player_id + game_date.
-    # game_date here is the calendar date the games were played, not a game_id,
-    # because the endpoint returns aggregated totals across all games on that day.
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_passing_stats') AND type = 'U')
@@ -295,9 +292,6 @@ DDL_STATEMENTS = [
     )
     """,
 
-    # nba.player_rebound_chances
-    # Source: LeagueDashPtStats PtMeasureType=Rebounding, PerMode=Totals.
-    # One row per player per game date. Upsert key: player_id + game_date.
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_rebound_chances') AND type = 'U')
@@ -406,12 +400,20 @@ def safe_pct(num, den):
 
 
 # ---------------------------------------------------------------------------
-# Proxy
+# Proxy helpers
 # ---------------------------------------------------------------------------
 def get_proxies():
+    """Returns proxy dict for nba_api wrapper calls (require proxy from cloud IPs)."""
     if not PROXY_URL:
         return None
     return {"http": PROXY_URL, "https": PROXY_URL}
+
+
+# No-proxy dict for direct HTTP calls.
+# Passed explicitly so any NBA_PROXY_URL environment variable is not inherited
+# by the requests session, which would route direct calls through the proxy
+# and cause them to fail.
+NO_PROXY = {"http": None, "https": None}
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +626,7 @@ def _seed_players(rows, engine):
 # Discover completed season games via LeagueGameFinder
 # ---------------------------------------------------------------------------
 def get_all_season_game_ids(season):
-    """Returns [(game_id, game_date), ...] sorted oldest first. Excludes preseason."""
+    """Returns [(game_id, game_date), ...] sorted oldest first. Excludes preseason and today."""
     log.info(f"Fetching all game IDs for season {season}")
     ep = api_call(
         lambda: leaguegamefinder.LeagueGameFinder(
@@ -643,8 +645,8 @@ def get_all_season_game_ids(season):
     result = [
         (str(gid), pd.to_datetime(gdate).date())
         for gid, gdate in pairs
-        if not str(gid).startswith("001")                         # exclude preseason
-        and pd.to_datetime(gdate).date() < today                 # exclude today (in progress)
+        if not str(gid).startswith("001")
+        and pd.to_datetime(gdate).date() < today
     ]
     result.sort(key=lambda x: x[1])
     log.info(f"  Found {len(result)} completed games in season {season}")
@@ -655,11 +657,6 @@ def get_all_season_game_ids(season):
 # Filter to games with missing box score data
 # ---------------------------------------------------------------------------
 def get_unloaded_game_ids(all_pairs, engine):
-    """
-    Returns game IDs from all_pairs that do not yet have any rows in
-    nba.player_box_score_stats. Using player_box_score_stats (not nba.games)
-    as the loaded marker means a partial load is retried cleanly.
-    """
     with engine.connect() as conn:
         loaded_game_ids = {
             row[0] for row in
@@ -673,18 +670,13 @@ def get_unloaded_game_ids(all_pairs, engine):
 # ---------------------------------------------------------------------------
 # Dates with missing pt stats
 # ---------------------------------------------------------------------------
-def get_unloaded_pt_dates(batch_dates, engine):
-    """
-    Returns the subset of batch_dates not yet present in nba.player_passing_stats.
-    Using passing as the marker; if passing loaded then rebounding will also be
-    loaded for that date from the same run.
-    """
+def get_unloaded_pt_dates(candidate_dates, engine):
     with engine.connect() as conn:
         loaded_dates = {
             row[0] for row in
             conn.execute(text("SELECT DISTINCT game_date FROM nba.player_passing_stats"))
         }
-    missing = sorted([d for d in batch_dates if d not in loaded_dates])
+    missing = sorted([d for d in candidate_dates if d not in loaded_dates])
     log.info(f"  Pt stats: {len(loaded_dates)} dates already loaded, {len(missing)} dates to fetch")
     return missing
 
@@ -883,7 +875,6 @@ def _sum_ot_team_rows(game_id, ot_periods_data):
 def process_game(game_id, game_date, game_meta, engine):
     log.info(f"  Processing {game_id} ({game_date})")
 
-    # Seed nba.games row from scoreboard metadata (or minimal stub)
     meta = game_meta.get(game_id)
     games_row = {
         "game_id":      game_id,
@@ -902,7 +893,6 @@ def process_game(game_id, game_date, game_meta, engine):
         log.error(f"  games upsert failed for {game_id}: {exc}")
         return
 
-    # Q1 through Q4 using range_type=2 with explicit start/end range values
     all_player_rows = []
     for quarter_label, start_range, end_range in PERIOD_RANGES:
         ep = api_call(
@@ -940,7 +930,6 @@ def process_game(game_id, game_date, game_meta, engine):
 
         log.info(f"    {quarter_label}: {len(p_rows)} player, {len(t_rows)} team")
 
-    # OT periods
     ot_periods_data = []
     ot_start = OT_START_RANGE
     while True:
@@ -989,13 +978,14 @@ def process_game(game_id, game_date, game_meta, engine):
     else:
         log.info(f"    No overtime for {game_id}")
 
-    log.info(
-        f"  Done {game_id}: {len(all_player_rows)} total player-quarter rows"
-    )
+    log.info(f"  Done {game_id}: {len(all_player_rows)} total player-quarter rows")
 
 
 # ---------------------------------------------------------------------------
 # Direct HTTP fetch for LeagueDashPtStats
+# Proxy is explicitly disabled. These calls work without a proxy from GitHub
+# Actions when browser headers are sent. Routing through the Webshare proxy
+# causes them to fail.
 # ---------------------------------------------------------------------------
 def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     date_str = game_date.strftime("%m/%d/%Y")
@@ -1011,13 +1001,13 @@ def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
         f"&DateFrom={encoded}"
         f"&DateTo={encoded}"
     )
-    log.info(f"  Fetching {pt_measure_type} for {date_str} via direct request")
+    log.info(f"  Fetching {pt_measure_type} for {date_str} via direct request (no proxy)")
     for attempt in range(1, RETRY_COUNT + 1):
         try:
             resp = requests.get(
                 url,
                 headers=NBA_HEADERS,
-                proxies=get_proxies(),
+                proxies=NO_PROXY,
                 timeout=timeout,
             )
             if resp.status_code == 500:
@@ -1078,7 +1068,6 @@ def load_passing_stats(game_date, season, engine):
             "ast_to_pass_pct_adj": safe_float(row.get("AST_TO_PASS_PCT_ADJ")),
         })
     if rows:
-        # Seed any players that appear in passing stats but are not yet in nba.players
         seed_rows = [{"player_id": r["player_id"],
                       "first_name": "",
                       "last_name": r.get("player_name") or "Unknown"} for r in rows]
@@ -1155,23 +1144,19 @@ def main():
     engine = get_engine()
     ensure_tables(engine)
 
-    # Teams run every time so W/L and standings stay current
     load_teams(engine, args.season)
 
-    # Players run on first load or when forced
     if args.load_rosters or players_table_empty(engine):
         load_players(engine, args.season)
     else:
         log.info("nba.players already populated, skipping roster load.")
 
-    # Discover all completed games for the season (excludes preseason and today)
     all_pairs      = get_all_season_game_ids(args.season)
     unloaded_pairs = get_unloaded_game_ids(all_pairs, engine)
 
     if not unloaded_pairs:
         log.info("Box scores: all games up to date.")
     else:
-        # Select the oldest N unique dates and pull all games on those dates
         oldest_dates = []
         for _, gdate in unloaded_pairs:
             if gdate not in oldest_dates:
@@ -1195,12 +1180,8 @@ def main():
 
         log.info("Box score phase complete.")
 
-    # Pt stats phase: one date at a time, oldest missing dates first
     if not args.skip_pt_stats:
-        # Use the same batch dates as box scores so both stay in sync
-        # If box scores are already up to date, still check for missing pt stat dates
-        # using the full completed game date list as the candidate set
-        candidate_dates = sorted(set(gdate for _, gdate in all_pairs))
+        candidate_dates  = sorted(set(gdate for _, gdate in all_pairs))
         missing_pt_dates = get_unloaded_pt_dates(candidate_dates, engine)
         pt_batch_dates   = missing_pt_dates[:args.days]
 
@@ -1214,14 +1195,12 @@ def main():
             for i, pt_date in enumerate(pt_batch_dates):
                 passing_count = load_passing_stats(pt_date, args.season, engine)
 
-                # Pause between passing and rebounding to mimic natural cadence
                 if passing_count > 0:
                     log.info(f"  Waiting {PT_STATS_BETWEEN_DELAY}s before rebounding call...")
                     time.sleep(PT_STATS_BETWEEN_DELAY)
 
                 load_rebound_chances(pt_date, args.season, engine)
 
-                # Pause between dates
                 if i < len(pt_batch_dates) - 1:
                     log.info(f"  Waiting {PT_STATS_BETWEEN_DELAY}s before next date...")
                     time.sleep(PT_STATS_BETWEEN_DELAY)
