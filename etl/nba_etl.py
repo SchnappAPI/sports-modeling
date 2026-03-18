@@ -6,35 +6,24 @@ Runs exclusively in GitHub Actions. Never runs locally.
 
 Design
 ------
-Box scores are fetched using BoxScoreTraditionalV3 with range_type=2 and
-explicit start_range/end_range values to isolate each quarter. This is the
-correct approach confirmed by nba_daily_test.py. range_type=0 with period
-number bounds (the old nba_etl.py approach) produced cumulative totals, not
-per-quarter stats.
+Teams, players, and game discovery all use direct HTTP requests with
+browser-mimicking headers and NO proxy. These endpoints work reliably
+from GitHub Actions without a proxy when the correct headers are sent.
 
-Passing and rebounding tracking stats (LeagueDashPtStats) are fetched by date
-using direct HTTP requests with browser-mimicking headers. These calls do NOT
-use the Webshare proxy. The proxy is only needed for nba_api wrapper calls
-which hit stats.nba.com from datacenter IPs. The direct HTTP calls with
-browser headers work reliably from GitHub Actions without a proxy.
+Box scores use BoxScoreTraditionalV3 via the nba_api wrapper, which
+still requires the proxy because the wrapper does not send browser headers.
 
-Batch unit is DAYS, not games. --days N means: find the N oldest dates in the
-2025-26 season that have at least one game with missing box score data, fetch
-all games on those dates, then fetch pt stats for those same dates.
+Passing and rebounding tracking stats use direct HTTP with no proxy,
+same as teams/players/games.
 
-Refresh logic
-  Box scores : compare all completed games against game_ids already present
-               in nba.player_box_score_stats. Process oldest dates first.
-  Pt stats   : compare distinct dates against dates already present in
-               nba.player_passing_stats. Pull only missing dates, oldest first.
-
-On first run every table is empty and the full season backfill begins.
-On nightly runs only the previous day's games are new so the batch is tiny.
+Batch unit is DAYS. --days N processes the N oldest dates with missing
+box score data, then fetches pt stats for those same dates.
 
 Tables written
-  nba.teams                  TeamInfoCommon x30, every run.
-  nba.players                CommonTeamRoster x30, first run or --load-rosters.
-  nba.games                  One row per game from ScoreboardV3 metadata.
+  nba.teams                  leaguestandings direct HTTP, every run.
+  nba.players                commonteamroster direct HTTP x30, first run or --load-rosters.
+  nba.games                  leaguegamelog direct HTTP for game discovery;
+                             scoreboardv3 direct HTTP for per-game metadata.
   nba.player_box_score_stats Quarter-level player stats (Q1/Q2/Q3/Q4/OT).
   nba.team_box_score_stats   Quarter-level team stats (Q1/Q2/Q3/Q4/OT).
   nba.player_passing_stats   Daily passing tracking stats per player.
@@ -43,7 +32,7 @@ Tables written
 Args
   --days N          Dates to process per run (default: 3).
   --season S        Season string, e.g. 2025-26 (default: 2025-26).
-  --load-rosters    Force CommonTeamRoster reload even if players table is not empty.
+  --load-rosters    Force roster reload even if players table is not empty.
   --skip-pt-stats   Skip passing and rebounding stats (box scores only).
 
 Secrets required
@@ -64,12 +53,7 @@ from sqlalchemy import create_engine, text
 
 from nba_api.stats.endpoints import (
     boxscoretraditionalv3,
-    leaguegamefinder,
-    scoreboardv3,
-    teaminfocommon,
-    commonteamroster,
 )
-from nba_api.stats.static import teams as static_teams
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -92,12 +76,11 @@ RETRY_COUNT = 3
 RETRY_WAIT_TIMEOUT = 30
 RETRY_WAIT_500     = 60
 
-PT_STATS_BETWEEN_DELAY = 15   # seconds between passing and rebounding calls
+PT_STATS_BETWEEN_DELAY = 15
 
-# Browser headers required for direct stats.nba.com requests.
-# The nba_api wrapper omits these and gets throttled from cloud IPs.
-# These calls bypass the proxy entirely -- proxies={"http": None, "https": None}
-# is passed explicitly so the environment variable proxy is not inherited.
+# Browser headers for all direct HTTP calls to stats.nba.com.
+# No proxy is used for these. The proxy is only needed for nba_api
+# wrapper calls (BoxScoreTraditionalV3) which cannot send these headers.
 NBA_HEADERS = {
     "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept":             "application/json, text/plain, */*",
@@ -108,8 +91,17 @@ NBA_HEADERS = {
     "Referer":            "https://www.nba.com/",
 }
 
+# Explicit no-proxy dict. Passed to every direct requests.get call so the
+# NBA_PROXY_URL environment variable is never inherited for these calls.
+NO_PROXY = {"http": None, "https": None}
+
+# Proxy dict for nba_api wrapper calls only.
+def get_proxies():
+    if not PROXY_URL:
+        return None
+    return {"http": PROXY_URL, "https": PROXY_URL}
+
 # Quarter range boundaries in tenths of a second.
-# range_type=2 with these values correctly isolates each quarter.
 PERIOD_RANGES = [
     ("Q1", 0,     7200),
     ("Q2", 7200,  14400),
@@ -123,7 +115,6 @@ OT_PERIOD_LEN  = 3000
 # DDL
 # ---------------------------------------------------------------------------
 DDL_STATEMENTS = [
-
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.teams') AND type = 'U')
@@ -143,7 +134,6 @@ DDL_STATEMENTS = [
         CONSTRAINT uq_nba_team  UNIQUE      (nba_team)
     )
     """,
-
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.players') AND type = 'U')
@@ -166,7 +156,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.teams (nba_team_id)
     )
     """,
-
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.games') AND type = 'U')
@@ -188,7 +177,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.teams (nba_team_id)
     )
     """,
-
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_box_score_stats') AND type = 'U')
@@ -229,7 +217,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.players (nba_player_id)
     )
     """,
-
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.team_box_score_stats') AND type = 'U')
@@ -265,7 +252,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.teams (nba_team_id)
     )
     """,
-
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_passing_stats') AND type = 'U')
@@ -291,7 +277,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.players (nba_player_id)
     )
     """,
-
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_rebound_chances') AND type = 'U')
@@ -366,7 +351,6 @@ def safe_float(val):
     except (ValueError, TypeError):
         return None
 
-
 def safe_int(val):
     try:
         if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -375,13 +359,11 @@ def safe_int(val):
     except (ValueError, TypeError):
         return None
 
-
 def safe_str(val):
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
     s = str(val).strip()
     return s if s else None
-
 
 def safe_date(val):
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -391,7 +373,6 @@ def safe_date(val):
     except Exception:
         return None
 
-
 def safe_pct(num, den):
     n, d = safe_int(num), safe_int(den)
     if n is None or d is None or d == 0:
@@ -400,37 +381,42 @@ def safe_pct(num, den):
 
 
 # ---------------------------------------------------------------------------
-# Proxy helpers
+# Direct HTTP helper (no proxy, browser headers)
 # ---------------------------------------------------------------------------
-def get_proxies():
-    """Returns proxy dict for nba_api wrapper calls (require proxy from cloud IPs)."""
-    if not PROXY_URL:
-        return None
-    return {"http": PROXY_URL, "https": PROXY_URL}
-
-
-# No-proxy dict for direct HTTP calls.
-# Passed explicitly so any NBA_PROXY_URL environment variable is not inherited
-# by the requests session, which would route direct calls through the proxy
-# and cause them to fail.
-NO_PROXY = {"http": None, "https": None}
-
-
-# ---------------------------------------------------------------------------
-# API retry wrapper (nba_api calls)
-# ---------------------------------------------------------------------------
-def api_call(fn, label):
+def _direct_get(url, label, timeout=60):
+    """Single direct HTTP GET with browser headers and no proxy. Returns parsed JSON or None."""
     for attempt in range(1, RETRY_COUNT + 1):
         try:
-            result = fn()
+            resp = requests.get(url, headers=NBA_HEADERS, proxies=NO_PROXY, timeout=timeout)
+            if resp.status_code == 500:
+                raise ValueError("HTTP 500")
+            if resp.status_code != 200:
+                raise ValueError(f"HTTP {resp.status_code}")
             time.sleep(API_DELAY)
-            return result
+            return resp.json()
         except Exception as exc:
+            wait = RETRY_WAIT_500 if "500" in str(exc) else RETRY_WAIT_TIMEOUT
             log.warning(f"  {label} attempt {attempt}/{RETRY_COUNT} failed: {exc}")
             if attempt < RETRY_COUNT:
-                time.sleep(RETRY_WAIT)
+                time.sleep(wait)
     log.error(f"  {label} failed after {RETRY_COUNT} attempts, skipping")
     return None
+
+
+def _parse_result_set(data, index=0):
+    """Parse a standard NBA stats resultSets response into a DataFrame."""
+    if data is None:
+        return None
+    try:
+        rs       = data["resultSets"][index]
+        headers  = rs["headers"]
+        row_set  = rs["rowSet"]
+        if not row_set:
+            return None
+        return pd.DataFrame(row_set, columns=headers)
+    except Exception as exc:
+        log.warning(f"  resultSets parse failed: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +441,6 @@ def _clean_val(v):
         f = float(v)
         return None if (math.isnan(f) or math.isinf(f)) else f
     return v
-
 
 def upsert(df, engine, schema, table, pk_cols):
     if df is None or df.empty:
@@ -484,120 +469,108 @@ def upsert(df, engine, schema, table, pk_cols):
 
 
 # ---------------------------------------------------------------------------
-# Teams
+# Teams  (direct HTTP, no proxy)
+# Source: leaguestandings returns all 30 teams with conference/division/W/L
+# in a single call.
 # ---------------------------------------------------------------------------
 def load_teams(engine, season):
-    log.info(f"Loading nba.teams via TeamInfoCommon for season {season}")
-    all_team_stubs = static_teams.get_teams()
+    log.info(f"Loading nba.teams via leaguestandings for season {season}")
+    url  = (
+        "https://stats.nba.com/stats/leaguestandings"
+        f"?LeagueID=00&Season={season}&SeasonType=Regular+Season"
+    )
+    data = _direct_get(url, "leaguestandings")
+    df   = _parse_result_set(data)
+    if df is None or df.empty:
+        log.warning("  leaguestandings returned no rows")
+        return
+
     rows = []
-    for stub in all_team_stubs:
-        team_id   = stub["id"]
-        team_abbr = stub["abbreviation"]
-        ep = api_call(
-            lambda tid=team_id: teaminfocommon.TeamInfoCommon(
-                team_id=tid, season_nullable=season, proxy=PROXY_URL,
-            ),
-            f"TeamInfoCommon {team_abbr}",
-        )
-        if ep is None:
+    for _, row in df.iterrows():
+        tid = safe_int(row.get("TeamID"))
+        if tid is None:
             continue
-        try:
-            info_df  = ep.team_info_common.get_data_frame()
-            ranks_df = ep.team_season_ranks.get_data_frame()
-            if info_df.empty:
-                continue
-            r = info_df.iloc[0]
-            w = l = conf_rank = div_rank = None
-            if not ranks_df.empty:
-                rr        = ranks_df.iloc[0]
-                w         = safe_int(rr.get("W"))
-                l         = safe_int(rr.get("L"))
-                conf_rank = safe_int(rr.get("CONF_RANK"))
-                div_rank  = safe_int(rr.get("DIV_RANK"))
-            rows.append({
-                "nba_team_id":   safe_int(r.get("TEAM_ID")),
-                "nba_team":      safe_str(r.get("TEAM_ABBREVIATION")),
-                "nba_team_name": safe_str(r.get("TEAM_NAME")),
-                "team_city":     safe_str(r.get("TEAM_CITY")),
-                "conference":    safe_str(r.get("TEAM_CONFERENCE")),
-                "division":      safe_str(r.get("TEAM_DIVISION")),
-                "w":             w,
-                "l":             l,
-                "conf_rank":     conf_rank,
-                "div_rank":      div_rank,
-            })
-        except Exception as exc:
-            log.warning(f"  TeamInfoCommon parse failed for {team_abbr}: {exc}")
+        rows.append({
+            "nba_team_id":   tid,
+            "nba_team":      safe_str(row.get("TeamAbbreviation")),
+            "nba_team_name": safe_str(row.get("TeamName")),
+            "team_city":     safe_str(row.get("TeamCity")),
+            "conference":    safe_str(row.get("Conference")),
+            "division":      safe_str(row.get("Division")),
+            "w":             safe_int(row.get("WINS")),
+            "l":             safe_int(row.get("LOSSES")),
+            "conf_rank":     safe_int(row.get("PlayoffRank")),
+            "div_rank":      safe_int(row.get("DivisionRank")),
+        })
+
     if rows:
         upsert(pd.DataFrame(rows), engine, "nba", "teams", ["nba_team_id"])
         log.info(f"  {len(rows)} teams upserted")
     else:
-        log.warning("  No team rows produced.")
+        log.warning("  No team rows produced")
 
 
 # ---------------------------------------------------------------------------
-# Players
+# Players  (direct HTTP, no proxy)
+# Source: commonteamroster called once per team (30 calls).
+# Team IDs come from nba.teams which was just loaded.
 # ---------------------------------------------------------------------------
 def players_table_empty(engine):
     with engine.connect() as conn:
         return conn.execute(text("SELECT COUNT(1) FROM nba.players")).scalar() == 0
 
-
 def load_players(engine, season):
-    log.info(f"Loading nba.players via CommonTeamRoster for season {season}")
-    all_team_stubs = static_teams.get_teams()
-    team_abbr_map  = {}
-    try:
-        with engine.connect() as conn:
-            for row in conn.execute(text("SELECT nba_team_id, nba_team FROM nba.teams")):
-                team_abbr_map[row[0]] = row[1]
-    except Exception:
-        pass
+    log.info(f"Loading nba.players via commonteamroster for season {season}")
+
+    # Pull team IDs and abbreviations from the teams we just loaded
+    with engine.connect() as conn:
+        team_rows = list(conn.execute(
+            text("SELECT nba_team_id, nba_team FROM nba.teams")
+        ))
+
+    if not team_rows:
+        log.warning("  nba.teams is empty, cannot load players")
+        return
+
     rows = []
-    for stub in all_team_stubs:
-        team_id   = stub["id"]
-        team_abbr = stub["abbreviation"]
-        ep = api_call(
-            lambda tid=team_id: commonteamroster.CommonTeamRoster(
-                team_id=tid, season=season, proxy=PROXY_URL,
-            ),
-            f"CommonTeamRoster {team_abbr}",
+    for team_id, team_abbr in team_rows:
+        url  = (
+            "https://stats.nba.com/stats/commonteamroster"
+            f"?TeamID={team_id}&Season={season}"
         )
-        if ep is None:
+        data = _direct_get(url, f"commonteamroster {team_abbr}")
+        if data is None:
             continue
-        try:
-            roster_df = ep.common_team_roster.get_data_frame()
-            if roster_df.empty:
+        # commonteamroster returns two result sets: index 0 = roster, index 1 = coaches
+        df = _parse_result_set(data, index=0)
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            pid = safe_int(row.get("PLAYER_ID"))
+            if pid is None:
                 continue
-            for _, row in roster_df.iterrows():
-                pid = safe_int(row.get("PLAYER_ID"))
-                if pid is None:
-                    continue
-                rows.append({
-                    "nba_player_id": pid,
-                    "player_name":   safe_str(row.get("PLAYER")) or "Unknown",
-                    "position":      safe_str(row.get("POSITION")),
-                    "jersey_num":    safe_str(row.get("NUM")),
-                    "height":        safe_str(row.get("HEIGHT")),
-                    "weight":        safe_str(row.get("WEIGHT")),
-                    "birth_date":    safe_date(row.get("BIRTH_DATE")),
-                    "age":           safe_float(row.get("AGE")),
-                    "experience":    safe_str(row.get("EXP")),
-                    "school":        safe_str(row.get("SCHOOL")),
-                    "nba_team_id":   safe_int(row.get("TeamID")),
-                    "nba_team":      team_abbr_map.get(safe_int(row.get("TeamID")), team_abbr),
-                })
-        except Exception as exc:
-            log.warning(f"  CommonTeamRoster parse failed for {team_abbr}: {exc}")
+            rows.append({
+                "nba_player_id": pid,
+                "player_name":   safe_str(row.get("PLAYER")) or "Unknown",
+                "position":      safe_str(row.get("POSITION")),
+                "jersey_num":    safe_str(row.get("NUM")),
+                "height":        safe_str(row.get("HEIGHT")),
+                "weight":        safe_str(row.get("WEIGHT")),
+                "birth_date":    safe_date(row.get("BIRTH_DATE")),
+                "age":           safe_float(row.get("AGE")),
+                "experience":    safe_str(row.get("EXP")),
+                "school":        safe_str(row.get("SCHOOL")),
+                "nba_team_id":   safe_int(row.get("TeamID")),
+                "nba_team":      team_abbr,
+            })
+
     if rows:
         upsert(pd.DataFrame(rows), engine, "nba", "players", ["nba_player_id"])
         log.info(f"  {len(rows)} players upserted")
     else:
-        log.warning("  No player rows produced.")
-
+        log.warning("  No player rows produced")
 
 def _seed_players(rows, engine):
-    """INSERT-only seed for players that appear in box score data but are not yet in nba.players."""
     seed_sql = """
         MERGE nba.players AS tgt
         USING (VALUES (:nba_player_id, :player_name))
@@ -623,31 +596,39 @@ def _seed_players(rows, engine):
 
 
 # ---------------------------------------------------------------------------
-# Discover completed season games via LeagueGameFinder
+# Game discovery  (direct HTTP, no proxy)
+# Source: leaguegamelog returns all games for the season in one call.
+# Excludes preseason (game IDs starting with 001) and today.
 # ---------------------------------------------------------------------------
 def get_all_season_game_ids(season):
-    """Returns [(game_id, game_date), ...] sorted oldest first. Excludes preseason and today."""
     log.info(f"Fetching all game IDs for season {season}")
-    ep = api_call(
-        lambda: leaguegamefinder.LeagueGameFinder(
-            season_nullable=season, league_id_nullable="00", proxy=PROXY_URL,
-        ),
-        "LeagueGameFinder",
+    url  = (
+        "https://stats.nba.com/stats/leaguegamelog"
+        f"?LeagueID=00&Season={season}&SeasonType=Regular+Season"
+        "&PlayerOrTeam=T&Direction=ASC&Sorter=DATE"
     )
-    if ep is None:
+    data = _direct_get(url, "leaguegamelog")
+    df   = _parse_result_set(data)
+    if df is None or df.empty:
+        log.warning("  leaguegamelog returned no rows")
         return []
-    df = ep.get_data_frames()[0]
-    if df.empty:
-        log.warning("LeagueGameFinder returned no games")
-        return []
-    pairs = df[["GAME_ID", "GAME_DATE"]].drop_duplicates("GAME_ID").values.tolist()
+
     today = date.today()
-    result = [
-        (str(gid), pd.to_datetime(gdate).date())
-        for gid, gdate in pairs
-        if not str(gid).startswith("001")
-        and pd.to_datetime(gdate).date() < today
-    ]
+    result = []
+    seen   = set()
+    for _, row in df.iterrows():
+        gid   = str(row.get("GAME_ID", ""))
+        gdate = safe_date(row.get("GAME_DATE"))
+        if not gid or gdate is None:
+            continue
+        if gid.startswith("001"):
+            continue
+        if gdate >= today:
+            continue
+        if gid not in seen:
+            seen.add(gid)
+            result.append((gid, gdate))
+
     result.sort(key=lambda x: x[1])
     log.info(f"  Found {len(result)} completed games in season {season}")
     return result
@@ -677,56 +658,44 @@ def get_unloaded_pt_dates(candidate_dates, engine):
             conn.execute(text("SELECT DISTINCT game_date FROM nba.player_passing_stats"))
         }
     missing = sorted([d for d in candidate_dates if d not in loaded_dates])
-    log.info(f"  Pt stats: {len(loaded_dates)} dates already loaded, {len(missing)} dates to fetch")
+    log.info(f"  Pt stats: {len(loaded_dates)} dates loaded, {len(missing)} dates remaining")
     return missing
 
 
 # ---------------------------------------------------------------------------
-# ScoreboardV3 metadata
+# ScoreboardV3 metadata  (direct HTTP, no proxy)
 # ---------------------------------------------------------------------------
 def fetch_scoreboard_metadata(target_dates, season):
     metadata = {}
     for game_date in sorted(set(target_dates)):
         date_str = game_date.strftime("%Y-%m-%d")
-        sb = api_call(
-            lambda d=date_str: scoreboardv3.ScoreboardV3(
-                game_date=d, league_id="00", proxy=PROXY_URL,
-            ),
-            f"ScoreboardV3 {date_str}",
+        url  = (
+            "https://stats.nba.com/stats/scoreboardv3"
+            f"?GameDate={date_str}&LeagueID=00"
         )
-        if sb is None:
+        data = _direct_get(url, f"scoreboardv3 {date_str}")
+        if data is None:
             continue
         try:
-            headers_df = sb.game_header.get_data_frame()
-            lines_df   = sb.line_score.get_data_frame()
-            headers_df["gameId"] = headers_df["gameId"].astype(str)
-            lines_df["gameId"]   = lines_df["gameId"].astype(str)
-            for _, hdr in headers_df.iterrows():
-                gid     = str(hdr["gameId"])
-                game_ls = lines_df[lines_df["gameId"] == gid]
-                away_abbr = away_tid = home_abbr = home_tid = None
-                if len(game_ls) >= 2:
-                    away_row  = game_ls.iloc[0]
-                    home_row  = game_ls.iloc[1]
-                    away_abbr = safe_str(away_row.get("teamTricode"))
-                    away_tid  = safe_int(away_row.get("teamId"))
-                    home_abbr = safe_str(home_row.get("teamTricode"))
-                    home_tid  = safe_int(home_row.get("teamId"))
-                elif len(game_ls) == 1:
-                    home_abbr = safe_str(game_ls.iloc[0].get("teamTricode"))
-                    home_tid  = safe_int(game_ls.iloc[0].get("teamId"))
+            games = data.get("scoreboard", {}).get("games", [])
+            for g in games:
+                gid       = str(g.get("gameId", ""))
+                home      = g.get("homeTeam", {})
+                away      = g.get("awayTeam", {})
+                home_abbr = safe_str(home.get("teamTricode"))
+                away_abbr = safe_str(away.get("teamTricode"))
                 metadata[gid] = {
                     "game_date":    game_date,
-                    "game_code":    safe_str(hdr.get("gameCode")),
+                    "game_code":    safe_str(g.get("gameCode")),
                     "game_display": f"{away_abbr}@{home_abbr}" if away_abbr else None,
-                    "home_team_id": home_tid,
+                    "home_team_id": safe_int(home.get("teamId")),
                     "home_team":    home_abbr,
-                    "away_team_id": away_tid,
+                    "away_team_id": safe_int(away.get("teamId")),
                     "away_team":    away_abbr,
                     "season_year":  season[:7],
                 }
         except Exception as exc:
-            log.warning(f"  ScoreboardV3 parse failed for {date_str}: {exc}")
+            log.warning(f"  scoreboardv3 parse failed for {date_str}: {exc}")
     log.info(f"  Scoreboard metadata fetched for {len(metadata)} game(s)")
     return metadata
 
@@ -779,7 +748,6 @@ def _trad_player_rows(game_id, quarter_label, df):
         })
     return rows
 
-
 def _trad_team_rows(game_id, quarter_label, df):
     rows = []
     if df is None or df.empty:
@@ -815,7 +783,6 @@ def _trad_team_rows(game_id, quarter_label, df):
         })
     return rows
 
-
 def _sum_ot_player_rows(game_id, ot_periods_data):
     if not ot_periods_data:
         return []
@@ -841,7 +808,6 @@ def _sum_ot_player_rows(game_id, ot_periods_data):
     merged["ft_pct"]  = merged.apply(lambda r: safe_pct(r["ftm"],  r["fta"]),  axis=1)
     merged["quarter"] = "OT"
     return merged.to_dict(orient="records")
-
 
 def _sum_ot_team_rows(game_id, ot_periods_data):
     if not ot_periods_data:
@@ -870,7 +836,7 @@ def _sum_ot_team_rows(game_id, ot_periods_data):
 
 
 # ---------------------------------------------------------------------------
-# Process one game
+# Process one game  (box scores still use nba_api wrapper + proxy)
 # ---------------------------------------------------------------------------
 def process_game(game_id, game_date, game_meta, engine):
     log.info(f"  Processing {game_id} ({game_date})")
@@ -895,18 +861,26 @@ def process_game(game_id, game_date, game_meta, engine):
 
     all_player_rows = []
     for quarter_label, start_range, end_range in PERIOD_RANGES:
-        ep = api_call(
-            lambda s=start_range, e=end_range: boxscoretraditionalv3.BoxScoreTraditionalV3(
-                game_id=game_id,
-                start_period=0,
-                end_period=0,
-                range_type=2,
-                start_range=s,
-                end_range=e,
-                proxy=PROXY_URL,
-            ),
-            f"BoxScoreTraditionalV3 {game_id} {quarter_label}",
-        )
+        for attempt in range(1, RETRY_COUNT + 1):
+            try:
+                ep = boxscoretraditionalv3.BoxScoreTraditionalV3(
+                    game_id=game_id,
+                    start_period=0,
+                    end_period=0,
+                    range_type=2,
+                    start_range=start_range,
+                    end_range=end_range,
+                    proxy=PROXY_URL,
+                )
+                time.sleep(API_DELAY)
+                break
+            except Exception as exc:
+                log.warning(f"  BoxScoreTraditionalV3 {game_id} {quarter_label} attempt {attempt}/{RETRY_COUNT} failed: {exc}")
+                if attempt < RETRY_COUNT:
+                    time.sleep(RETRY_WAIT)
+                else:
+                    ep = None
+
         if ep is None:
             continue
         try:
@@ -927,7 +901,6 @@ def process_game(game_id, game_date, game_meta, engine):
         if t_rows:
             upsert(pd.DataFrame(t_rows), engine,
                    "nba", "team_box_score_stats", ["game_id", "team_id", "quarter"])
-
         log.info(f"    {quarter_label}: {len(p_rows)} player, {len(t_rows)} team")
 
     ot_periods_data = []
@@ -950,10 +923,7 @@ def process_game(game_id, game_date, game_meta, engine):
             break
         if ot_p_df is None or ot_p_df.empty:
             break
-        has_data = (
-            ot_p_df["minutes"].notna().any()
-            if "minutes" in ot_p_df.columns else False
-        )
+        has_data = ot_p_df["minutes"].notna().any() if "minutes" in ot_p_df.columns else False
         if not has_data:
             break
         time.sleep(API_DELAY)
@@ -971,10 +941,7 @@ def process_game(game_id, game_date, game_meta, engine):
         if ot_t_rows:
             upsert(pd.DataFrame(ot_t_rows), engine,
                    "nba", "team_box_score_stats", ["game_id", "team_id", "quarter"])
-        log.info(
-            f"    OT ({len(ot_periods_data)} period(s) summed): "
-            f"{len(ot_p_rows)} player, {len(ot_t_rows)} team"
-        )
+        log.info(f"    OT ({len(ot_periods_data)} period(s)): {len(ot_p_rows)} player, {len(ot_t_rows)} team")
     else:
         log.info(f"    No overtime for {game_id}")
 
@@ -982,65 +949,28 @@ def process_game(game_id, game_date, game_meta, engine):
 
 
 # ---------------------------------------------------------------------------
-# Direct HTTP fetch for LeagueDashPtStats
-# Proxy is explicitly disabled. These calls work without a proxy from GitHub
-# Actions when browser headers are sent. Routing through the Webshare proxy
-# causes them to fail.
+# Pt stats  (direct HTTP, no proxy)
 # ---------------------------------------------------------------------------
 def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     date_str = game_date.strftime("%m/%d/%Y")
     encoded  = requests.utils.quote(date_str)
     url = (
         "https://stats.nba.com/stats/leaguedashptstats"
-        f"?Season={season}"
-        "&SeasonType=Regular+Season"
+        f"?Season={season}&SeasonType=Regular+Season"
         "&PlayerOrTeam=Player"
         f"&PtMeasureType={pt_measure_type}"
-        "&PerMode=Totals"
-        "&LastNGames=0&Month=0&OpponentTeamID=0"
-        f"&DateFrom={encoded}"
-        f"&DateTo={encoded}"
+        "&PerMode=Totals&LastNGames=0&Month=0&OpponentTeamID=0"
+        f"&DateFrom={encoded}&DateTo={encoded}"
     )
-    log.info(f"  Fetching {pt_measure_type} for {date_str} via direct request (no proxy)")
-    for attempt in range(1, RETRY_COUNT + 1):
-        try:
-            resp = requests.get(
-                url,
-                headers=NBA_HEADERS,
-                proxies=NO_PROXY,
-                timeout=timeout,
-            )
-            if resp.status_code == 500:
-                raise ValueError("HTTP 500")
-            if resp.status_code != 200:
-                raise ValueError(f"HTTP {resp.status_code}: {resp.text[:200]}")
-            data      = resp.json()
-            row_set   = data["resultSets"][0]["rowSet"]
-            col_names = data["resultSets"][0]["headers"]
-            row_count = len(row_set)
-            log.info(f"  HTTP 200 -- {row_count} rows returned")
-            if row_count == 0:
-                log.warning(f"  No {pt_measure_type} rows for {date_str} (off day or no games)")
-                return None
-            df = pd.DataFrame(row_set, columns=col_names)
-            time.sleep(API_DELAY)
-            return df
-        except Exception as exc:
-            exc_str = str(exc)
-            wait    = RETRY_WAIT_500 if "500" in exc_str else RETRY_WAIT_TIMEOUT
-            log.warning(
-                f"  {pt_measure_type} {date_str} attempt {attempt}/{RETRY_COUNT} failed: {exc_str}"
-            )
-            if attempt < RETRY_COUNT:
-                log.info(f"  Waiting {wait}s before retry...")
-                time.sleep(wait)
-    log.error(f"  {pt_measure_type} {date_str} failed after {RETRY_COUNT} attempts, skipping")
-    return None
+    log.info(f"  Fetching {pt_measure_type} for {date_str} (no proxy)")
+    data = _direct_get(url, f"{pt_measure_type} {date_str}", timeout=timeout)
+    df   = _parse_result_set(data)
+    if df is None or df.empty:
+        log.warning(f"  No {pt_measure_type} rows for {date_str}")
+        return None
+    log.info(f"  {len(df)} rows returned")
+    return df
 
-
-# ---------------------------------------------------------------------------
-# Passing stats for a single date
-# ---------------------------------------------------------------------------
 def load_passing_stats(game_date, season, engine):
     df = _fetch_pt_stats_direct(game_date, "Passing", season)
     if df is None or df.empty:
@@ -1068,19 +998,12 @@ def load_passing_stats(game_date, season, engine):
             "ast_to_pass_pct_adj": safe_float(row.get("AST_TO_PASS_PCT_ADJ")),
         })
     if rows:
-        seed_rows = [{"player_id": r["player_id"],
-                      "first_name": "",
-                      "last_name": r.get("player_name") or "Unknown"} for r in rows]
-        _seed_players(seed_rows, engine)
-        upsert(pd.DataFrame(rows), engine, "nba", "player_passing_stats",
-               ["player_id", "game_date"])
+        _seed_players([{"player_id": r["player_id"], "first_name": "",
+                        "last_name": r.get("player_name") or "Unknown"} for r in rows], engine)
+        upsert(pd.DataFrame(rows), engine, "nba", "player_passing_stats", ["player_id", "game_date"])
         log.info(f"  Passing stats: {len(rows)} rows upserted for {game_date}")
     return len(rows)
 
-
-# ---------------------------------------------------------------------------
-# Rebound chances for a single date
-# ---------------------------------------------------------------------------
 def load_rebound_chances(game_date, season, engine):
     df = _fetch_pt_stats_direct(game_date, "Rebounding", season)
     if df is None or df.empty:
@@ -1103,12 +1026,9 @@ def load_rebound_chances(game_date, season, engine):
             "reb_chances":       safe_float(row.get("REB_CHANCES")),
         })
     if rows:
-        seed_rows = [{"player_id": r["player_id"],
-                      "first_name": "",
-                      "last_name": r.get("player_name") or "Unknown"} for r in rows]
-        _seed_players(seed_rows, engine)
-        upsert(pd.DataFrame(rows), engine, "nba", "player_rebound_chances",
-               ["player_id", "game_date"])
+        _seed_players([{"player_id": r["player_id"], "first_name": "",
+                        "last_name": r.get("player_name") or "Unknown"} for r in rows], engine)
+        upsert(pd.DataFrame(rows), engine, "nba", "player_rebound_chances", ["player_id", "game_date"])
         log.info(f"  Rebound chances: {len(rows)} rows upserted for {game_date}")
     return len(rows)
 
@@ -1117,29 +1037,17 @@ def load_rebound_chances(game_date, season, engine):
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="NBA ETL for the sports modeling database")
-    parser.add_argument(
-        "--days", type=int, default=3,
-        help="Number of unique game dates to process per run (default: 3)",
-    )
-    parser.add_argument(
-        "--season", type=str, default="2025-26",
-        help="NBA season in YYYY-YY format (default: 2025-26)",
-    )
-    parser.add_argument(
-        "--load-rosters", action="store_true",
-        help="Force CommonTeamRoster reload even if nba.players is not empty",
-    )
-    parser.add_argument(
-        "--skip-pt-stats", action="store_true",
-        help="Skip passing and rebounding stats (box scores only)",
-    )
+    parser = argparse.ArgumentParser(description="NBA ETL")
+    parser.add_argument("--days",         type=int, default=3)
+    parser.add_argument("--season",       type=str, default="2025-26")
+    parser.add_argument("--load-rosters", action="store_true")
+    parser.add_argument("--skip-pt-stats",action="store_true")
     args = parser.parse_args()
 
     if PROXY_URL:
         log.info(f"Proxy active: {PROXY_URL.split('@')[-1]}")
     else:
-        log.warning("NBA_PROXY_URL not set.")
+        log.warning("NBA_PROXY_URL not set (only needed for box score calls).")
 
     engine = get_engine()
     ensure_tables(engine)
@@ -1164,12 +1072,10 @@ def main():
             if len(oldest_dates) == args.days:
                 break
 
-        batch_pairs = [(gid, gdate) for gid, gdate in unloaded_pairs
-                       if gdate in oldest_dates]
-
+        batch_pairs = [(gid, gdate) for gid, gdate in unloaded_pairs if gdate in oldest_dates]
         log.info(
             f"Batch: {len(oldest_dates)} date(s), {len(batch_pairs)} game(s). "
-            f"{len(unloaded_pairs) - len(batch_pairs)} games will remain after this run."
+            f"{len(unloaded_pairs) - len(batch_pairs)} games remain after this run."
         )
 
         target_dates = list(set(gdate for _, gdate in batch_pairs))
@@ -1188,26 +1094,20 @@ def main():
         if not pt_batch_dates:
             log.info("Pt stats: all dates up to date.")
         else:
-            log.info(
-                f"Pt stats: fetching {len(pt_batch_dates)} date(s), "
-                f"{len(missing_pt_dates) - len(pt_batch_dates)} will remain after this run."
-            )
+            log.info(f"Pt stats: fetching {len(pt_batch_dates)} date(s), "
+                     f"{len(missing_pt_dates) - len(pt_batch_dates)} remain after this run.")
             for i, pt_date in enumerate(pt_batch_dates):
                 passing_count = load_passing_stats(pt_date, args.season, engine)
-
                 if passing_count > 0:
                     log.info(f"  Waiting {PT_STATS_BETWEEN_DELAY}s before rebounding call...")
                     time.sleep(PT_STATS_BETWEEN_DELAY)
-
                 load_rebound_chances(pt_date, args.season, engine)
-
                 if i < len(pt_batch_dates) - 1:
                     log.info(f"  Waiting {PT_STATS_BETWEEN_DELAY}s before next date...")
                     time.sleep(PT_STATS_BETWEEN_DELAY)
-
             log.info("Pt stats phase complete.")
     else:
-        log.info("Skipping pt stats (--skip-pt-stats flag set).")
+        log.info("Skipping pt stats.")
 
     log.info("NBA ETL complete.")
 
