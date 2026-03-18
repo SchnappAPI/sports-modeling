@@ -6,26 +6,23 @@ Runs exclusively in GitHub Actions. Never runs locally.
 
 Design
 ------
-Teams are seeded from a hardcoded dict. The 30 NBA teams, their IDs,
-abbreviations, conferences, and divisions are static. No HTTP call needed.
+Teams: hardcoded static dict, zero HTTP calls.
+Players: direct HTTP to commonteamroster (no proxy, 30 calls).
+Game discovery: LeagueGameFinder via nba_api wrapper (proxy required).
+Scoreboard metadata: ScoreboardV3 via nba_api wrapper (proxy required).
+Box scores: BoxScoreTraditionalV3 via nba_api wrapper (proxy required).
+Pt stats: direct HTTP to leaguedashptstats (no proxy).
 
-Players use direct HTTP to commonteamroster (30 calls, no proxy).
-Game discovery uses direct HTTP to leaguegamelog (1 call, no proxy).
-ScoreboardV3 uses direct HTTP (1 call per batch date, no proxy).
-Pt stats use direct HTTP to leaguedashptstats (no proxy).
-
-Box scores use BoxScoreTraditionalV3 via the nba_api wrapper, which
-requires the Webshare proxy because the wrapper cannot send browser headers
-and gets blocked from cloud IPs without it.
-
-Batch unit is DAYS. --days N processes the N oldest dates with missing
-box score data, then fetches pt stats for those same dates.
+The proxy is required for nba_api wrapper calls because the wrapper does
+not send browser headers and gets blocked from GitHub Actions cloud IPs.
+Direct HTTP calls with browser headers work without a proxy for endpoints
+that do not aggressively block cloud IPs (commonteamroster, leaguedashptstats).
+leaguegamelog and scoreboardv3 do block cloud IPs without the proxy.
 
 Tables written
   nba.teams                  Hardcoded seed, every run.
   nba.players                commonteamroster direct HTTP x30, first run or --load-rosters.
-  nba.games                  leaguegamelog direct HTTP for discovery;
-                             scoreboardv3 direct HTTP for per-game metadata.
+  nba.games                  LeagueGameFinder + ScoreboardV3 via proxy.
   nba.player_box_score_stats Quarter-level player stats (Q1/Q2/Q3/Q4/OT).
   nba.team_box_score_stats   Quarter-level team stats (Q1/Q2/Q3/Q4/OT).
   nba.player_passing_stats   Daily passing tracking stats per player.
@@ -53,7 +50,11 @@ import pandas as pd
 import requests
 from sqlalchemy import create_engine, text
 
-from nba_api.stats.endpoints import boxscoretraditionalv3
+from nba_api.stats.endpoints import (
+    boxscoretraditionalv3,
+    leaguegamefinder,
+    scoreboardv3,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -76,6 +77,7 @@ RETRY_WAIT_TIMEOUT     = 30
 RETRY_WAIT_500         = 60
 PT_STATS_BETWEEN_DELAY = 15
 
+# Browser headers for direct HTTP calls (no proxy).
 NBA_HEADERS = {
     "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept":             "application/json, text/plain, */*",
@@ -103,42 +105,39 @@ OT_START_RANGE = 28800
 OT_PERIOD_LEN  = 3000
 
 # ---------------------------------------------------------------------------
-# Static team data
-# nba_team_id, nba_team, nba_team_name, team_city, conference, division
-# These never change. W/L/ranks are left NULL and updated if standings
-# API is available, but the seed itself never depends on HTTP.
+# Static team data (never changes)
 # ---------------------------------------------------------------------------
 STATIC_TEAMS = [
     (1610612737, "ATL", "Hawks",          "Atlanta",       "East", "Southeast"),
-    (1610612738, "BOS", "Celtics",         "Boston",        "East", "Atlantic"),
-    (1610612739, "CLE", "Cavaliers",       "Cleveland",     "East", "Central"),
-    (1610612740, "NOP", "Pelicans",        "New Orleans",   "West", "Southwest"),
-    (1610612741, "CHI", "Bulls",           "Chicago",       "East", "Central"),
-    (1610612742, "DAL", "Mavericks",       "Dallas",        "West", "Southwest"),
-    (1610612743, "DEN", "Nuggets",         "Denver",        "West", "Northwest"),
-    (1610612744, "GSW", "Warriors",        "Golden State",  "West", "Pacific"),
-    (1610612745, "HOU", "Rockets",         "Houston",       "West", "Southwest"),
-    (1610612746, "LAC", "Clippers",        "LA",            "West", "Pacific"),
-    (1610612747, "LAL", "Lakers",          "Los Angeles",   "West", "Pacific"),
-    (1610612748, "MIA", "Heat",            "Miami",         "East", "Southeast"),
-    (1610612749, "MIL", "Bucks",           "Milwaukee",     "East", "Central"),
-    (1610612750, "MIN", "Timberwolves",    "Minnesota",     "West", "Northwest"),
-    (1610612751, "BKN", "Nets",            "Brooklyn",      "East", "Atlantic"),
-    (1610612752, "NYK", "Knicks",          "New York",      "East", "Atlantic"),
-    (1610612753, "ORL", "Magic",           "Orlando",       "East", "Southeast"),
-    (1610612754, "IND", "Pacers",          "Indiana",       "East", "Central"),
-    (1610612755, "PHI", "76ers",           "Philadelphia",  "East", "Atlantic"),
-    (1610612756, "PHX", "Suns",            "Phoenix",       "West", "Pacific"),
-    (1610612757, "POR", "Trail Blazers",   "Portland",      "West", "Northwest"),
-    (1610612758, "SAC", "Kings",           "Sacramento",    "West", "Pacific"),
-    (1610612759, "SAS", "Spurs",           "San Antonio",   "West", "Southwest"),
-    (1610612760, "OKC", "Thunder",         "Oklahoma City", "West", "Northwest"),
-    (1610612761, "TOR", "Raptors",         "Toronto",       "East", "Atlantic"),
-    (1610612762, "UTA", "Jazz",            "Utah",          "West", "Northwest"),
-    (1610612763, "MEM", "Grizzlies",       "Memphis",       "West", "Southwest"),
-    (1610612764, "WAS", "Wizards",         "Washington",    "East", "Southeast"),
-    (1610612765, "DET", "Pistons",         "Detroit",       "East", "Central"),
-    (1610612766, "CHA", "Hornets",         "Charlotte",     "East", "Southeast"),
+    (1610612738, "BOS", "Celtics",        "Boston",        "East", "Atlantic"),
+    (1610612739, "CLE", "Cavaliers",      "Cleveland",     "East", "Central"),
+    (1610612740, "NOP", "Pelicans",       "New Orleans",   "West", "Southwest"),
+    (1610612741, "CHI", "Bulls",          "Chicago",       "East", "Central"),
+    (1610612742, "DAL", "Mavericks",      "Dallas",        "West", "Southwest"),
+    (1610612743, "DEN", "Nuggets",        "Denver",        "West", "Northwest"),
+    (1610612744, "GSW", "Warriors",       "Golden State",  "West", "Pacific"),
+    (1610612745, "HOU", "Rockets",        "Houston",       "West", "Southwest"),
+    (1610612746, "LAC", "Clippers",       "LA",            "West", "Pacific"),
+    (1610612747, "LAL", "Lakers",         "Los Angeles",   "West", "Pacific"),
+    (1610612748, "MIA", "Heat",           "Miami",         "East", "Southeast"),
+    (1610612749, "MIL", "Bucks",          "Milwaukee",     "East", "Central"),
+    (1610612750, "MIN", "Timberwolves",   "Minnesota",     "West", "Northwest"),
+    (1610612751, "BKN", "Nets",           "Brooklyn",      "East", "Atlantic"),
+    (1610612752, "NYK", "Knicks",         "New York",      "East", "Atlantic"),
+    (1610612753, "ORL", "Magic",          "Orlando",       "East", "Southeast"),
+    (1610612754, "IND", "Pacers",         "Indiana",       "East", "Central"),
+    (1610612755, "PHI", "76ers",          "Philadelphia",  "East", "Atlantic"),
+    (1610612756, "PHX", "Suns",           "Phoenix",       "West", "Pacific"),
+    (1610612757, "POR", "Trail Blazers",  "Portland",      "West", "Northwest"),
+    (1610612758, "SAC", "Kings",          "Sacramento",    "West", "Pacific"),
+    (1610612759, "SAS", "Spurs",          "San Antonio",   "West", "Southwest"),
+    (1610612760, "OKC", "Thunder",        "Oklahoma City", "West", "Northwest"),
+    (1610612761, "TOR", "Raptors",        "Toronto",       "East", "Atlantic"),
+    (1610612762, "UTA", "Jazz",           "Utah",          "West", "Northwest"),
+    (1610612763, "MEM", "Grizzlies",      "Memphis",       "West", "Southwest"),
+    (1610612764, "WAS", "Wizards",        "Washington",    "East", "Southeast"),
+    (1610612765, "DET", "Pistons",        "Detroit",       "East", "Central"),
+    (1610612766, "CHA", "Hornets",        "Charlotte",     "East", "Southeast"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -411,6 +410,23 @@ def safe_pct(num, den):
 
 
 # ---------------------------------------------------------------------------
+# nba_api retry wrapper (proxy calls)
+# ---------------------------------------------------------------------------
+def api_call(fn, label):
+    for attempt in range(1, RETRY_COUNT + 1):
+        try:
+            result = fn()
+            time.sleep(API_DELAY)
+            return result
+        except Exception as exc:
+            log.warning(f"  {label} attempt {attempt}/{RETRY_COUNT} failed: {exc}")
+            if attempt < RETRY_COUNT:
+                time.sleep(RETRY_WAIT)
+    log.error(f"  {label} failed after {RETRY_COUNT} attempts")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Direct HTTP helper (no proxy, browser headers)
 # ---------------------------------------------------------------------------
 def _direct_get(url, label, timeout=60):
@@ -496,23 +512,14 @@ def upsert(df, engine, schema, table, pk_cols):
 
 
 # ---------------------------------------------------------------------------
-# Teams  (hardcoded, no HTTP)
+# Teams (hardcoded, no HTTP)
 # ---------------------------------------------------------------------------
 def load_teams(engine):
     log.info("Loading nba.teams from static data")
     rows = [
-        {
-            "nba_team_id":   tid,
-            "nba_team":      abbr,
-            "nba_team_name": name,
-            "team_city":     city,
-            "conference":    conf,
-            "division":      div,
-            "w":             None,
-            "l":             None,
-            "conf_rank":     None,
-            "div_rank":      None,
-        }
+        {"nba_team_id": tid, "nba_team": abbr, "nba_team_name": name,
+         "team_city": city, "conference": conf, "division": div,
+         "w": None, "l": None, "conf_rank": None, "div_rank": None}
         for tid, abbr, name, city, conf, div in STATIC_TEAMS
     ]
     upsert(pd.DataFrame(rows), engine, "nba", "teams", ["nba_team_id"])
@@ -520,7 +527,7 @@ def load_teams(engine):
 
 
 # ---------------------------------------------------------------------------
-# Players  (direct HTTP, no proxy)
+# Players (direct HTTP, no proxy)
 # ---------------------------------------------------------------------------
 def players_table_empty(engine):
     with engine.connect() as conn:
@@ -592,33 +599,30 @@ def _seed_players(rows, engine):
 
 
 # ---------------------------------------------------------------------------
-# Game discovery  (direct HTTP, no proxy)
+# Game discovery (LeagueGameFinder via proxy)
 # ---------------------------------------------------------------------------
 def get_all_season_game_ids(season):
-    log.info(f"Fetching all game IDs for season {season}")
-    url = (
-        "https://stats.nba.com/stats/leaguegamelog"
-        f"?LeagueID=00&Season={season}&SeasonType=Regular+Season"
-        "&PlayerOrTeam=T&Direction=ASC&Sorter=DATE"
+    log.info(f"Fetching all game IDs for season {season} via LeagueGameFinder")
+    ep = api_call(
+        lambda: leaguegamefinder.LeagueGameFinder(
+            season_nullable=season, league_id_nullable="00", proxy=PROXY_URL,
+        ),
+        "LeagueGameFinder",
     )
-    data = _direct_get(url, "leaguegamelog")
-    df   = _parse_result_set(data)
-    if df is None or df.empty:
-        log.warning("  leaguegamelog returned no rows")
+    if ep is None:
+        return []
+    df = ep.get_data_frames()[0]
+    if df.empty:
+        log.warning("  LeagueGameFinder returned no games")
         return []
     today  = date.today()
-    result = []
-    seen   = set()
-    for _, row in df.iterrows():
-        gid   = str(row.get("GAME_ID", ""))
-        gdate = safe_date(row.get("GAME_DATE"))
-        if not gid or gdate is None:
-            continue
-        if gid.startswith("001") or gdate >= today:
-            continue
-        if gid not in seen:
-            seen.add(gid)
-            result.append((gid, gdate))
+    pairs  = df[["GAME_ID", "GAME_DATE"]].drop_duplicates("GAME_ID").values.tolist()
+    result = [
+        (str(gid), pd.to_datetime(gdate).date())
+        for gid, gdate in pairs
+        if not str(gid).startswith("001")
+        and pd.to_datetime(gdate).date() < today
+    ]
     result.sort(key=lambda x: x[1])
     log.info(f"  Found {len(result)} completed games in season {season}")
     return result
@@ -653,35 +657,51 @@ def get_unloaded_pt_dates(candidate_dates, engine):
 
 
 # ---------------------------------------------------------------------------
-# ScoreboardV3 metadata  (direct HTTP, no proxy)
+# ScoreboardV3 metadata (via proxy)
 # ---------------------------------------------------------------------------
 def fetch_scoreboard_metadata(target_dates, season):
     metadata = {}
     for game_date in sorted(set(target_dates)):
         date_str = game_date.strftime("%Y-%m-%d")
-        url  = f"https://stats.nba.com/stats/scoreboardv3?GameDate={date_str}&LeagueID=00"
-        data = _direct_get(url, f"scoreboardv3 {date_str}")
-        if data is None:
+        sb = api_call(
+            lambda d=date_str: scoreboardv3.ScoreboardV3(
+                game_date=d, league_id="00", proxy=PROXY_URL,
+            ),
+            f"ScoreboardV3 {date_str}",
+        )
+        if sb is None:
             continue
         try:
-            for g in data.get("scoreboard", {}).get("games", []):
-                gid       = str(g.get("gameId", ""))
-                home      = g.get("homeTeam", {})
-                away      = g.get("awayTeam", {})
-                home_abbr = safe_str(home.get("teamTricode"))
-                away_abbr = safe_str(away.get("teamTricode"))
+            headers_df = sb.game_header.get_data_frame()
+            lines_df   = sb.line_score.get_data_frame()
+            headers_df["gameId"] = headers_df["gameId"].astype(str)
+            lines_df["gameId"]   = lines_df["gameId"].astype(str)
+            for _, hdr in headers_df.iterrows():
+                gid     = str(hdr["gameId"])
+                game_ls = lines_df[lines_df["gameId"] == gid]
+                away_abbr = away_tid = home_abbr = home_tid = None
+                if len(game_ls) >= 2:
+                    away_row  = game_ls.iloc[0]
+                    home_row  = game_ls.iloc[1]
+                    away_abbr = safe_str(away_row.get("teamTricode"))
+                    away_tid  = safe_int(away_row.get("teamId"))
+                    home_abbr = safe_str(home_row.get("teamTricode"))
+                    home_tid  = safe_int(home_row.get("teamId"))
+                elif len(game_ls) == 1:
+                    home_abbr = safe_str(game_ls.iloc[0].get("teamTricode"))
+                    home_tid  = safe_int(game_ls.iloc[0].get("teamId"))
                 metadata[gid] = {
                     "game_date":    game_date,
-                    "game_code":    safe_str(g.get("gameCode")),
+                    "game_code":    safe_str(hdr.get("gameCode")),
                     "game_display": f"{away_abbr}@{home_abbr}" if away_abbr else None,
-                    "home_team_id": safe_int(home.get("teamId")),
+                    "home_team_id": home_tid,
                     "home_team":    home_abbr,
-                    "away_team_id": safe_int(away.get("teamId")),
+                    "away_team_id": away_tid,
                     "away_team":    away_abbr,
                     "season_year":  season[:7],
                 }
         except Exception as exc:
-            log.warning(f"  scoreboardv3 parse failed for {date_str}: {exc}")
+            log.warning(f"  ScoreboardV3 parse failed for {date_str}: {exc}")
     log.info(f"  Scoreboard metadata fetched for {len(metadata)} game(s)")
     return metadata
 
@@ -822,7 +842,7 @@ def _sum_ot_team_rows(game_id, ot_periods_data):
 
 
 # ---------------------------------------------------------------------------
-# Process one game  (proxy required for BoxScoreTraditionalV3)
+# Process one game (proxy required)
 # ---------------------------------------------------------------------------
 def process_game(game_id, game_date, game_meta, engine):
     log.info(f"  Processing {game_id} ({game_date})")
@@ -847,24 +867,16 @@ def process_game(game_id, game_date, game_meta, engine):
 
     all_player_rows = []
     for quarter_label, start_range, end_range in PERIOD_RANGES:
-        ep = None
-        for attempt in range(1, RETRY_COUNT + 1):
-            try:
-                ep = boxscoretraditionalv3.BoxScoreTraditionalV3(
-                    game_id=game_id,
-                    start_period=0, end_period=0,
-                    range_type=2,
-                    start_range=start_range, end_range=end_range,
-                    proxy=PROXY_URL,
-                )
-                time.sleep(API_DELAY)
-                break
-            except Exception as exc:
-                log.warning(f"  BoxScore {game_id} {quarter_label} attempt {attempt}/{RETRY_COUNT}: {exc}")
-                if attempt < RETRY_COUNT:
-                    time.sleep(RETRY_WAIT)
-                else:
-                    ep = None
+        ep = api_call(
+            lambda s=start_range, e=end_range: boxscoretraditionalv3.BoxScoreTraditionalV3(
+                game_id=game_id,
+                start_period=0, end_period=0,
+                range_type=2,
+                start_range=s, end_range=e,
+                proxy=PROXY_URL,
+            ),
+            f"BoxScore {game_id} {quarter_label}",
+        )
         if ep is None:
             continue
         try:
@@ -928,7 +940,7 @@ def process_game(game_id, game_date, game_meta, engine):
 
 
 # ---------------------------------------------------------------------------
-# Pt stats  (direct HTTP, no proxy)
+# Pt stats (direct HTTP, no proxy)
 # ---------------------------------------------------------------------------
 def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     date_str = game_date.strftime("%m/%d/%Y")
@@ -1026,7 +1038,7 @@ def main():
     if PROXY_URL:
         log.info(f"Proxy active: {PROXY_URL.split('@')[-1]}")
     else:
-        log.warning("NBA_PROXY_URL not set (only needed for box score calls).")
+        log.warning("NBA_PROXY_URL not set. Game discovery and box scores will fail.")
 
     engine = get_engine()
     ensure_tables(engine)
