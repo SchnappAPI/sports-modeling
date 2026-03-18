@@ -11,13 +11,12 @@ Players: direct HTTP to commonteamroster (no proxy, 30 calls).
 Game discovery: LeagueGameFinder via nba_api wrapper (proxy required).
 Scoreboard metadata: ScoreboardV3 via nba_api wrapper (proxy required).
 Box scores: BoxScoreTraditionalV3 via nba_api wrapper (proxy required).
-Pt stats: direct HTTP to leaguedashptstats (no proxy).
+Pt stats: direct HTTP to leaguedashptstats via proxy (proxy required).
 
-The proxy is required for nba_api wrapper calls because the wrapper does
-not send browser headers and gets blocked from GitHub Actions cloud IPs.
-Direct HTTP calls with browser headers work without a proxy for endpoints
-that do not aggressively block cloud IPs (commonteamroster, leaguedashptstats).
-leaguegamelog and scoreboardv3 do block cloud IPs without the proxy.
+All stats.nba.com calls from GitHub Actions cloud IPs require the Webshare
+rotating residential proxy. Direct calls without a proxy time out or get
+blocked regardless of browser headers. The only exception is commonteamroster
+which has been observed to work without a proxy.
 
 Tables written
   nba.teams                  Hardcoded seed, every run.
@@ -77,7 +76,6 @@ RETRY_WAIT_TIMEOUT     = 30
 RETRY_WAIT_500         = 60
 PT_STATS_BETWEEN_DELAY = 15
 
-# Browser headers for direct HTTP calls (no proxy).
 NBA_HEADERS = {
     "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept":             "application/json, text/plain, */*",
@@ -427,12 +425,12 @@ def api_call(fn, label):
 
 
 # ---------------------------------------------------------------------------
-# Direct HTTP helper (no proxy, browser headers)
+# Direct HTTP helper (browser headers, proxy passed explicitly)
 # ---------------------------------------------------------------------------
-def _direct_get(url, label, timeout=60):
+def _direct_get(url, label, proxies=None, timeout=60):
     for attempt in range(1, RETRY_COUNT + 1):
         try:
-            resp = requests.get(url, headers=NBA_HEADERS, proxies=NO_PROXY, timeout=timeout)
+            resp = requests.get(url, headers=NBA_HEADERS, proxies=proxies, timeout=timeout)
             if resp.status_code == 500:
                 raise ValueError("HTTP 500")
             if resp.status_code != 200:
@@ -543,7 +541,7 @@ def load_players(engine, season):
     rows = []
     for team_id, team_abbr in team_rows:
         url  = f"https://stats.nba.com/stats/commonteamroster?TeamID={team_id}&Season={season}"
-        data = _direct_get(url, f"commonteamroster {team_abbr}")
+        data = _direct_get(url, f"commonteamroster {team_abbr}", proxies=NO_PROXY)
         if data is None:
             continue
         df = _parse_result_set(data, index=0)
@@ -940,7 +938,9 @@ def process_game(game_id, game_date, game_meta, engine):
 
 
 # ---------------------------------------------------------------------------
-# Pt stats (direct HTTP, no proxy)
+# Pt stats (direct HTTP via proxy)
+# leaguedashptstats times out from GitHub Actions cloud IPs without a proxy.
+# Browser headers alone are not sufficient for this endpoint.
 # ---------------------------------------------------------------------------
 def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     date_str = game_date.strftime("%m/%d/%Y")
@@ -953,8 +953,9 @@ def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
         "&PerMode=Totals&LastNGames=0&Month=0&OpponentTeamID=0"
         f"&DateFrom={encoded}&DateTo={encoded}"
     )
-    log.info(f"  Fetching {pt_measure_type} for {date_str} (no proxy)")
-    data = _direct_get(url, f"{pt_measure_type} {date_str}", timeout=timeout)
+    log.info(f"  Fetching {pt_measure_type} for {date_str} (via proxy)")
+    data = _direct_get(url, f"{pt_measure_type} {date_str}",
+                       proxies=get_proxies(), timeout=timeout)
     df   = _parse_result_set(data)
     if df is None or df.empty:
         log.warning(f"  No {pt_measure_type} rows for {date_str}")
@@ -1038,7 +1039,7 @@ def main():
     if PROXY_URL:
         log.info(f"Proxy active: {PROXY_URL.split('@')[-1]}")
     else:
-        log.warning("NBA_PROXY_URL not set. Game discovery and box scores will fail.")
+        log.warning("NBA_PROXY_URL not set. All stats.nba.com calls will fail.")
 
     engine = get_engine()
     ensure_tables(engine)
