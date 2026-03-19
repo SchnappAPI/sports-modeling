@@ -1,4 +1,4 @@
-name: NBA Nightly ETL
+name: New NBA ETL
 
 on:
   schedule:
