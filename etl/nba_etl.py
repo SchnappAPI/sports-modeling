@@ -7,9 +7,9 @@ Runs exclusively in GitHub Actions. Never runs locally.
 Design
 ------
 Teams:           Hardcoded static dict, zero HTTP calls.
-Players:         Direct HTTP to commonallplayers (no proxy).
-Schedule:        Direct HTTP to scheduleleaguev2 (no proxy).
-Box scores:      Direct HTTP to playergamelogs (no proxy).
+Players:         Direct HTTP to commonallplayers via proxy.
+Schedule:        Direct HTTP to scheduleleaguev2 via proxy.
+Box scores:      Direct HTTP to playergamelogs via proxy.
                  5 calls per run (one per period: 1Q/2Q/3Q/4Q/OT).
                  DateFrom = earliest missing date, DateTo = empty.
                  Response covers all games since DateFrom; rows are
@@ -17,20 +17,26 @@ Box scores:      Direct HTTP to playergamelogs (no proxy).
 Pt stats:        Direct HTTP to leaguedashptstats via proxy.
                  One passing call + one rebounding call per missing date.
                  DateFrom = DateTo = that date (single-day filter).
-Daily lineups:   Direct HTTP to NBA daily lineups JSON (no proxy).
+Daily lineups:   Direct HTTP to NBA daily lineups JSON via proxy.
+
+All stats.nba.com calls are routed through the Webshare rotating residential
+proxy (NBA_PROXY_URL secret). GitHub Actions datacenter IPs are throttled or
+silently dropped by stats.nba.com regardless of headers. The proxy makes
+requests appear to originate from residential IPs, matching what Excel/Power
+Query does when running from a local machine.
 
 Tables written
   nba.teams                  Hardcoded seed, every run.
-  nba.players                commonallplayers direct HTTP, first run or --load-rosters.
-  nba.schedule               scheduleleaguev2 direct HTTP, full reload every run.
+  nba.players                commonallplayers, first run or --load-rosters.
+  nba.schedule               scheduleleaguev2, full reload every run.
   nba.games                  Derived from schedule (completed games only).
-  nba.player_box_score_stats Quarter-level player stats (1Q/2Q/3Q/4Q/OT) via playergamelogs.
-  nba.player_passing_stats   Daily potential_ast per player via leaguedashptstats.
-  nba.player_rebound_chances Daily reb_chances per player via leaguedashptstats.
-  nba.daily_lineups          Per-game lineup status, incremental for unfinished games only.
+  nba.player_box_score_stats Quarter-level player stats (1Q/2Q/3Q/4Q/OT).
+  nba.player_passing_stats   Daily potential_ast per player.
+  nba.player_rebound_chances Daily reb_chances per player.
+  nba.daily_lineups          Per-game lineup status, incremental.
 
 Args
-  --days N          Game dates to process per run for box scores (default: 3).
+  --days N          Game dates to process per run (default: 3).
   --season S        Season string, e.g. 2025-26 (default: 2025-26).
   --load-rosters    Force player reload even if players table is not empty.
   --skip-pt-stats   Skip passing and rebounding stats.
@@ -82,8 +88,6 @@ NBA_HEADERS = {
     "Origin":             "https://www.nba.com",
     "Referer":            "https://www.nba.com/",
 }
-
-NO_PROXY = {"http": None, "https": None}
 
 def get_proxies():
     if not PROXY_URL:
@@ -503,7 +507,7 @@ def _parse_result_set(data, index=0):
 
 
 # ---------------------------------------------------------------------------
-# Teams (hardcoded)
+# Teams (hardcoded, no HTTP)
 # ---------------------------------------------------------------------------
 def load_teams(engine):
     log.info("Loading nba.teams from static data")
@@ -522,7 +526,7 @@ def load_teams(engine):
 
 
 # ---------------------------------------------------------------------------
-# Players (commonallplayers, direct HTTP, no proxy)
+# Players (commonallplayers via proxy)
 # ---------------------------------------------------------------------------
 def players_table_empty(engine):
     with engine.connect() as conn:
@@ -534,7 +538,7 @@ def load_players(engine, season):
         "https://stats.nba.com/stats/commonallplayers"
         f"?IsOnlyCurrentSeason=1&LeagueID=00&Season={season}"
     )
-    data = _direct_get(url, "commonallplayers", proxies=NO_PROXY)
+    data = _direct_get(url, "commonallplayers", proxies=get_proxies(), timeout=120)
     df   = _parse_result_set(data, index=0)
     if df is None or df.empty:
         log.warning("  commonallplayers returned no data")
@@ -565,13 +569,13 @@ def load_players(engine, season):
 
 
 # ---------------------------------------------------------------------------
-# Schedule (scheduleleaguev2, direct HTTP, no proxy)
+# Schedule (scheduleleaguev2 via proxy)
 # Loads nba.schedule (full reload) and nba.games (completed games only).
 # ---------------------------------------------------------------------------
 def load_schedule(engine, season):
     log.info(f"Loading nba.schedule for season {season}")
     url  = f"https://stats.nba.com/stats/scheduleleaguev2?Season={season}&LeagueID=00"
-    data = _direct_get(url, "scheduleleaguev2", proxies=NO_PROXY, timeout=60)
+    data = _direct_get(url, "scheduleleaguev2", proxies=get_proxies(), timeout=120)
     if data is None:
         log.error("  scheduleleaguev2 failed, cannot continue")
         return []
@@ -650,7 +654,7 @@ def load_schedule(engine, season):
 
 
 # ---------------------------------------------------------------------------
-# Box scores via playergamelogs (direct HTTP, no proxy)
+# Box scores via playergamelogs (via proxy)
 #
 # Strategy: 5 API calls per run, one per period (1Q/2Q/3Q/4Q/OT).
 # DateFrom = earliest missing date, DateTo = empty (open-ended).
@@ -658,7 +662,7 @@ def load_schedule(engine, season):
 # Rows are filtered to batch_dates before upserting, so only the intended
 # window is written and the incremental state key (game_date) stays correct.
 # ---------------------------------------------------------------------------
-def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season, timeout=60):
+def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season, timeout=90):
     date_str = date_from.strftime("%m/%d/%Y")
     params = {
         "Season":       season,
@@ -666,7 +670,7 @@ def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_fr
         "PlayerOrTeam": "P",
         "MeasureType":  "Base",
         "DateFrom":     date_str,
-        "DateTo":       "",   # open-ended: returns all games from date_from onward
+        "DateTo":       "",
     }
     if game_segment:
         params["GameSegment"] = game_segment
@@ -679,7 +683,7 @@ def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_fr
         "https://stats.nba.com/stats/playergamelogs",
         label,
         params=params,
-        proxies=NO_PROXY,
+        proxies=get_proxies(),
         timeout=timeout,
     )
     df = _parse_result_set(data, index=0)
@@ -713,7 +717,6 @@ def fetch_box_scores_for_batch(batch_dates, season):
             row_date = safe_date(row.get("GAME_DATE"))
             if pid is None or gid is None or row_date is None:
                 continue
-            # Only keep rows that fall within the batch window
             if row_date not in batch_date_set:
                 continue
             rows_by_date[row_date].append({
@@ -788,7 +791,7 @@ def get_unloaded_pt_dates(completed_pairs, engine):
 
 
 # ---------------------------------------------------------------------------
-# Pt stats (direct HTTP via proxy)
+# Pt stats (via proxy)
 # One passing call + one rebounding call per missing date.
 # DateFrom = DateTo = that date (single-day cumulative totals).
 # ---------------------------------------------------------------------------
@@ -867,7 +870,7 @@ def load_rebound_chances(game_date, season, engine):
 
 
 # ---------------------------------------------------------------------------
-# Daily lineups (NBA daily lineups JSON, direct HTTP, no proxy)
+# Daily lineups (via proxy)
 # Incremental: completed games loaded once; unfinished games re-fetched every run.
 # ---------------------------------------------------------------------------
 def get_lineup_games_to_fetch(schedule_rows_today, engine):
@@ -892,7 +895,7 @@ def get_lineup_games_to_fetch(schedule_rows_today, engine):
 def fetch_lineups_for_game_date(game_date):
     date_key = game_date.strftime("%Y%m%d")
     url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_key}.json"
-    data     = _direct_get(url, f"daily_lineups {date_key}", proxies=NO_PROXY, timeout=30)
+    data     = _direct_get(url, f"daily_lineups {date_key}", proxies=get_proxies(), timeout=30)
     if data is None:
         return []
     rows = []
@@ -968,7 +971,7 @@ def main():
     if PROXY_URL:
         log.info(f"Proxy active: {PROXY_URL.split('@')[-1]}")
     else:
-        log.warning("NBA_PROXY_URL not set. leaguedashptstats calls will fail.")
+        log.warning("NBA_PROXY_URL not set. All stats.nba.com calls will fail from datacenter IPs.")
 
     engine = get_engine()
     ensure_tables(engine)
@@ -984,7 +987,6 @@ def main():
 
     # ------------------------------------------------------------------
     # Box scores: 5 API calls total regardless of batch size.
-    # DateFrom = earliest missing date. Rows filtered to batch_dates.
     # ------------------------------------------------------------------
     if not completed_pairs:
         log.info("Box scores: no completed games found.")
