@@ -11,19 +11,18 @@ Players:         Direct HTTP to commonallplayers via proxy.
 Schedule:        Direct HTTP to scheduleleaguev2 via proxy.
 Box scores:      Direct HTTP to playergamelogs via proxy.
                  5 calls per run (one per period: 1Q/2Q/3Q/4Q/OT).
-                 DateFrom = Nth oldest missing date (N = --days).
+                 DateFrom = earliest missing date, DateTo = empty.
                  ALL rows returned are upserted regardless of date.
-                 MERGE guarantees idempotency on re-runs.
+                 --days does NOT apply to box scores.
 Pt stats:        Direct HTTP to leaguedashptstats via proxy.
                  One passing call + one rebounding call per missing date.
                  DateFrom = DateTo = that date (single-day filter).
+                 --days controls how many dates are processed per run.
 Daily lineups:   Direct HTTP to NBA daily lineups JSON via proxy.
 
 All stats.nba.com calls are routed through the Webshare rotating residential
 proxy (NBA_PROXY_URL secret). GitHub Actions datacenter IPs are throttled or
-silently dropped by stats.nba.com regardless of headers. The proxy makes
-requests appear to originate from residential IPs, matching what Excel/Power
-Query does when running from a local machine.
+silently dropped by stats.nba.com regardless of headers.
 
 Tables written
   nba.teams                  Hardcoded seed, every run.
@@ -36,9 +35,10 @@ Tables written
   nba.daily_lineups          Per-game lineup status, incremental.
 
 Args
-  --days N          Controls DateFrom anchor for box scores. The Nth oldest
-                    missing date is used as DateFrom; all rows returned by
-                    the API since that date are upserted (default: 3).
+  --days N          Number of missing dates to process per run for pt stats
+                    (passing and rebounding). Does not affect box scores,
+                    which always fetch from the earliest missing date forward.
+                    Default: 3.
   --season S        Season string, e.g. 2025-26 (default: 2025-26).
   --load-rosters    Force player reload even if players table is not empty.
   --skip-pt-stats   Skip passing and rebounding stats.
@@ -97,7 +97,6 @@ def get_proxies():
         return None
     return {"http": PROXY_URL, "https": PROXY_URL}
 
-# playergamelogs period config
 PERIOD_CONFIG = [
     ("1",  None,       "1Q"),
     ("2",  None,       "2Q"),
@@ -491,18 +490,13 @@ def _parse_result_set(data, index=0):
 
 
 # ---------------------------------------------------------------------------
-# Teams (hardcoded, no HTTP)
+# Teams
 # ---------------------------------------------------------------------------
 def load_teams(engine):
     log.info("Loading nba.teams from static data")
     rows = [
-        {
-            "team_id":      tid,
-            "team_name":    name,
-            "team_tricode": tricode,
-            "conference":   conf,
-            "division":     div,
-        }
+        {"team_id": tid, "team_name": name, "team_tricode": tricode,
+         "conference": conf, "division": div}
         for tid, tricode, name, conf, div in STATIC_TEAMS
     ]
     upsert(pd.DataFrame(rows), engine, "nba", "teams", ["team_id"])
@@ -510,7 +504,7 @@ def load_teams(engine):
 
 
 # ---------------------------------------------------------------------------
-# Players (commonallplayers via proxy)
+# Players
 # ---------------------------------------------------------------------------
 def players_table_empty(engine):
     with engine.connect() as conn:
@@ -553,7 +547,7 @@ def load_players(engine, season):
 
 
 # ---------------------------------------------------------------------------
-# Schedule (scheduleleaguev2 via proxy)
+# Schedule
 # ---------------------------------------------------------------------------
 def load_schedule(engine, season):
     log.info(f"Loading nba.schedule for season {season}")
@@ -577,7 +571,6 @@ def load_schedule(engine, season):
         for g in gd_block.get("games", []):
             if g.get("gameLabel") == "Preseason":
                 continue
-
             label = g.get("gameLabel") or ""
             week  = g.get("weekName") or ""
             if label == "Emirates NBA Cup":
@@ -616,9 +609,7 @@ def load_schedule(engine, season):
             }
             if row["game_id"] is None:
                 continue
-
             schedule_rows.append(row)
-
             if game_date < today and safe_int(g.get("gameStatus")) == 3:
                 games_rows.append(row)
 
@@ -629,18 +620,15 @@ def load_schedule(engine, season):
         upsert(pd.DataFrame(games_rows), engine, "nba", "games", ["game_id"])
         log.info(f"  {len(games_rows)} completed games upserted into nba.games")
 
-    completed = sorted(
+    return sorted(
         [(r["game_id"], r["game_date"]) for r in games_rows],
         key=lambda x: x[1],
     )
-    return completed
 
 
 # ---------------------------------------------------------------------------
-# Box scores via playergamelogs (via proxy)
-#
-# 5 API calls per run, one per period. DateFrom = Nth oldest missing date.
-# ALL rows returned are upserted. MERGE handles idempotency.
+# Box scores: always fetch from earliest missing date, no batch limit.
+# --days does NOT apply here.
 # ---------------------------------------------------------------------------
 def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season, timeout=90):
     date_str = date_from.strftime("%m/%d/%Y")
@@ -661,10 +649,7 @@ def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_fr
     label = f"playergamelogs {period_label} from {date_str}"
     data  = _direct_get(
         "https://stats.nba.com/stats/playergamelogs",
-        label,
-        params=params,
-        proxies=get_proxies(),
-        timeout=timeout,
+        label, params=params, proxies=get_proxies(), timeout=timeout,
     )
     df = _parse_result_set(data, index=0)
     if df is None or df.empty:
@@ -675,12 +660,7 @@ def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_fr
 
 
 def fetch_and_upsert_box_scores(date_from, season, engine):
-    """
-    Make 5 period calls with DateFrom = date_from, DateTo = empty.
-    Group all returned rows by game_date and upsert each date in full.
-    """
     rows_by_date = defaultdict(list)
-
     for period_value, game_segment, period_label in PERIOD_CONFIG:
         df = _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season)
         if df is None:
@@ -732,21 +712,14 @@ def fetch_and_upsert_box_scores(date_from, season, engine):
     total_rows = 0
     for game_date in sorted(rows_by_date):
         date_rows = rows_by_date[game_date]
-        upsert(
-            pd.DataFrame(date_rows), engine,
-            "nba", "player_box_score_stats",
-            ["game_id", "player_id", "period"],
-        )
+        upsert(pd.DataFrame(date_rows), engine, "nba", "player_box_score_stats",
+               ["game_id", "player_id", "period"])
         log.info(f"  {len(date_rows)} rows upserted for {game_date}")
         total_rows += len(date_rows)
-
     log.info(f"  Box scores total: {total_rows} rows across {len(rows_by_date)} date(s)")
 
 
-# ---------------------------------------------------------------------------
-# Earliest missing box score date anchor
-# ---------------------------------------------------------------------------
-def get_earliest_missing_box_date(completed_pairs, engine, days):
+def get_earliest_missing_box_date(completed_pairs, engine):
     with engine.connect() as conn:
         loaded = {
             str(row[0]) for row in
@@ -755,16 +728,11 @@ def get_earliest_missing_box_date(completed_pairs, engine, days):
     all_dates = sorted(set(gdate for _, gdate in completed_pairs))
     missing   = [d for d in all_dates if str(d) not in loaded]
     log.info(f"  Box scores: {len(loaded)} dates loaded, {len(missing)} remaining")
-    if not missing:
-        return None
-    # Anchor to the Nth oldest missing date so --days controls how far back
-    # DateFrom is set. The API returns everything from there forward.
-    anchor_index = min(days - 1, len(missing) - 1)
-    return missing[anchor_index]
+    return missing[0] if missing else None
 
 
 # ---------------------------------------------------------------------------
-# Dates with missing pt stats
+# Pt stats: --days controls how many missing dates are processed per run.
 # ---------------------------------------------------------------------------
 def get_unloaded_pt_dates(completed_pairs, engine):
     with engine.connect() as conn:
@@ -778,9 +746,6 @@ def get_unloaded_pt_dates(completed_pairs, engine):
     return missing
 
 
-# ---------------------------------------------------------------------------
-# Pt stats (via proxy)
-# ---------------------------------------------------------------------------
 def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     date_str = game_date.strftime("%m/%d/%Y")
     params = {
@@ -799,9 +764,7 @@ def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     data = _direct_get(
         "https://stats.nba.com/stats/leaguedashptstats",
         f"{pt_measure_type} {date_str}",
-        params=params,
-        proxies=get_proxies(),
-        timeout=timeout,
+        params=params, proxies=get_proxies(), timeout=timeout,
     )
     df = _parse_result_set(data)
     if df is None or df.empty:
@@ -856,7 +819,7 @@ def load_rebound_chances(game_date, season, engine):
 
 
 # ---------------------------------------------------------------------------
-# Daily lineups (via proxy)
+# Daily lineups
 # ---------------------------------------------------------------------------
 def get_lineup_games_to_fetch(schedule_rows_today, engine):
     with engine.connect() as conn:
@@ -894,12 +857,7 @@ def fetch_lineups_for_game_date(game_date):
             for p in team.get("players", []):
                 pos    = safe_str(p.get("position"))
                 roster = safe_str(p.get("rosterStatus"))
-                if pos:
-                    starter = "Starter"
-                elif roster == "Active":
-                    starter = "Bench"
-                else:
-                    starter = "Inactive"
+                starter = "Starter" if pos else ("Bench" if roster == "Active" else "Inactive")
                 rows.append({
                     "game_id":        game_id,
                     "game_date":      game_date,
@@ -930,14 +888,9 @@ def load_daily_lineups(schedule_today, engine):
         if filtered:
             with engine.begin() as conn:
                 for gid in game_ids_for_date:
-                    conn.execute(
-                        text("DELETE FROM nba.daily_lineups WHERE game_id = :gid"),
-                        {"gid": gid},
-                    )
-            upsert(
-                pd.DataFrame(filtered), engine, "nba", "daily_lineups",
-                ["game_id", "team_tricode", "player_name"],
-            )
+                    conn.execute(text("DELETE FROM nba.daily_lineups WHERE game_id = :gid"), {"gid": gid})
+            upsert(pd.DataFrame(filtered), engine, "nba", "daily_lineups",
+                   ["game_id", "team_tricode", "player_name"])
             log.info(f"  Lineups {game_date}: {len(filtered)} rows upserted")
 
 
@@ -946,7 +899,8 @@ def load_daily_lineups(schedule_today, engine):
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="NBA ETL")
-    parser.add_argument("--days",          type=int, default=3)
+    parser.add_argument("--days",          type=int, default=3,
+                        help="Dates per run for pt stats only. Does not affect box scores.")
     parser.add_argument("--season",        type=str, default="2025-26")
     parser.add_argument("--load-rosters",  action="store_true")
     parser.add_argument("--skip-pt-stats", action="store_true")
@@ -960,7 +914,6 @@ def main():
 
     engine = get_engine()
     ensure_tables(engine)
-
     load_teams(engine)
 
     if args.load_rosters or players_table_empty(engine):
@@ -970,15 +923,11 @@ def main():
 
     completed_pairs = load_schedule(engine, args.season)
 
-    # ------------------------------------------------------------------
-    # Box scores: 5 API calls total.
-    # DateFrom = Nth oldest missing date (N controlled by --days).
-    # Everything returned since DateFrom is upserted.
-    # ------------------------------------------------------------------
+    # Box scores: no batch limit, always fetch from earliest missing date.
     if not completed_pairs:
         log.info("Box scores: no completed games found.")
     else:
-        date_from = get_earliest_missing_box_date(completed_pairs, engine, args.days)
+        date_from = get_earliest_missing_box_date(completed_pairs, engine)
         if date_from is None:
             log.info("Box scores: all dates up to date.")
         else:
@@ -986,20 +935,15 @@ def main():
             fetch_and_upsert_box_scores(date_from, args.season, engine)
             log.info("Box score phase complete.")
 
-    # ------------------------------------------------------------------
-    # Pt stats: one passing + one rebounding call per missing date.
-    # ------------------------------------------------------------------
+    # Pt stats: --days controls how many dates per run.
     if not args.skip_pt_stats:
         missing_pt = get_unloaded_pt_dates(completed_pairs, engine)
-        pt_batch   = missing_pt[:args.days]
+        pt_batch   = missing_pt[:args.days] if args.days else missing_pt
         if not pt_batch:
             log.info("Pt stats: all dates up to date.")
         else:
             remain = len(missing_pt) - len(pt_batch)
-            log.info(
-                f"Pt stats: fetching {len(pt_batch)} date(s), "
-                f"{remain} remain after this run."
-            )
+            log.info(f"Pt stats: fetching {len(pt_batch)} date(s), {remain} remain after this run.")
             for i, pt_date in enumerate(pt_batch):
                 passing_count = load_passing_stats(pt_date, args.season, engine)
                 if passing_count > 0:
@@ -1013,20 +957,14 @@ def main():
     else:
         log.info("Skipping pt stats.")
 
-    # ------------------------------------------------------------------
-    # Daily lineups
-    # ------------------------------------------------------------------
+    # Daily lineups.
     if not args.skip_lineups:
         today = date.today()
         with engine.connect() as conn:
             sched_rows = [
                 dict(row._mapping)
                 for row in conn.execute(
-                    text(
-                        "SELECT game_id, game_date, game_status "
-                        "FROM nba.schedule "
-                        "WHERE game_date <= :today"
-                    ),
+                    text("SELECT game_id, game_date, game_status FROM nba.schedule WHERE game_date <= :today"),
                     {"today": today},
                 )
             ]
