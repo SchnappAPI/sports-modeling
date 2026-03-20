@@ -1,0 +1,75 @@
+name: NBA Supplemental ETL
+
+# Loads nba.schedule, nba.daily_lineups, nba.player_game_logs,
+# and nba.player_rebound_chances_v2 from the M-query-equivalent Python script.
+# No proxy required -- all endpoints work from GitHub Actions datacenter IPs.
+
+on:
+  schedule:
+    - cron: '30 9 * * *'   # UTC 09:30 = 3:30 AM CST / 4:30 AM CDT
+                            # Runs 30 min after main nba_etl.yml to avoid contention
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Dates to process per incremental table'
+        required: false
+        default: '10'
+      skip_schedule:
+        description: 'Skip schedule reload (true/false)'
+        required: false
+        default: 'false'
+      skip_lineups:
+        description: 'Skip lineup ingestion (true/false)'
+        required: false
+        default: 'false'
+      skip_gamelogs:
+        description: 'Skip player game logs (true/false)'
+        required: false
+        default: 'false'
+      skip_rebounding:
+        description: 'Skip rebound chances v2 (true/false)'
+        required: false
+        default: 'false'
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Microsoft ODBC Driver 18
+        run: |
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --batch --yes --dearmor \
+            -o /usr/share/keyrings/microsoft-prod.gpg
+          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
+      - name: Install Python dependencies
+        run: pip install -r etl/requirements.txt
+
+      - name: Build CLI flags
+        id: flags
+        run: |
+          FLAGS="--days ${{ github.event.inputs.days || '10' }}"
+          [ "${{ github.event.inputs.skip_schedule }}"   = "true" ] && FLAGS="$FLAGS --skip-schedule"
+          [ "${{ github.event.inputs.skip_lineups }}"    = "true" ] && FLAGS="$FLAGS --skip-lineups"
+          [ "${{ github.event.inputs.skip_gamelogs }}"   = "true" ] && FLAGS="$FLAGS --skip-gamelogs"
+          [ "${{ github.event.inputs.skip_rebounding }}" = "true" ] && FLAGS="$FLAGS --skip-rebounding"
+          echo "flags=$FLAGS" >> $GITHUB_OUTPUT
+
+      - name: Run NBA supplemental ETL
+        run: python etl/nba_supplemental_etl.py ${{ steps.flags.outputs.flags }}
