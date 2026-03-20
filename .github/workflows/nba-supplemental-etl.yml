@@ -1,5 +1,0 @@
-# This workflow has been retired.
-# All functionality (players, schedule, lineups, pt stats, box scores)
-# is now handled by nba-etl.yml running nba_etl.py.
-# This file is kept as a placeholder to avoid broken references.
-# It has no triggers and will never run.
