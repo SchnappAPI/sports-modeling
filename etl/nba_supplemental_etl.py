@@ -86,7 +86,55 @@ PERIODS = [
 
 # ---------------------------------------------------------------------------
 # DDL
+# Note on ensure_tables strategy:
+#   nba.schedule is a truncate-and-reload table with no persistent data.
+#   It is dropped and recreated on every schema verification so that column
+#   type changes take effect immediately without a separate migration step.
+#   All other tables are created with IF NOT EXISTS and their data is preserved.
 # ---------------------------------------------------------------------------
+# nba.schedule is managed via DROP/CREATE (see ensure_tables), not IF NOT EXISTS.
+SCHEDULE_DDL = """
+CREATE TABLE nba.schedule (
+    game_id              VARCHAR(15)   NOT NULL,
+    game_date            DATE          NOT NULL,
+    game_code            VARCHAR(30)   NULL,
+    game_status          SMALLINT      NULL,
+    game_status_text     VARCHAR(50)   NULL,
+    game_date_time_est   DATETIME2     NULL,
+    game_date_time_utc   DATETIME2     NULL,
+    day_name             VARCHAR(15)   NULL,
+    month_num            SMALLINT      NULL,
+    week_number          SMALLINT      NULL,
+    week_name            VARCHAR(30)   NULL,
+    game_label           VARCHAR(60)   NULL,
+    game_sub_label       VARCHAR(60)   NULL,
+    arena_name           VARCHAR(60)   NULL,
+    arena_city           VARCHAR(60)   NULL,
+    arena_state          VARCHAR(60)   NULL,
+    if_necessary         BIT           NULL,
+    series_game_number   VARCHAR(10)   NULL,
+    series_text          VARCHAR(60)   NULL,
+    home_team_id         INT           NULL,
+    home_team_city       VARCHAR(40)   NULL,
+    home_team_name       VARCHAR(40)   NULL,
+    home_team_tricode    VARCHAR(10)   NULL,
+    home_wins            SMALLINT      NULL,
+    home_losses          SMALLINT      NULL,
+    home_score           SMALLINT      NULL,
+    home_seed            SMALLINT      NULL,
+    away_team_id         INT           NULL,
+    away_team_city       VARCHAR(40)   NULL,
+    away_team_name       VARCHAR(40)   NULL,
+    away_team_tricode    VARCHAR(10)   NULL,
+    away_wins            SMALLINT      NULL,
+    away_losses          SMALLINT      NULL,
+    away_score           SMALLINT      NULL,
+    away_seed            SMALLINT      NULL,
+    created_at           DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+    CONSTRAINT pk_nba_schedule PRIMARY KEY (game_id)
+)
+"""
+
 DDL = [
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
@@ -96,7 +144,7 @@ DDL = [
         player_name          VARCHAR(100)  NOT NULL,
         team_id              BIGINT        NULL,
         team_name            VARCHAR(60)   NULL,
-        team_abbreviation    CHAR(3)       NULL,
+        team_abbreviation    VARCHAR(10)   NULL,
         roster_status        TINYINT       NULL,
         from_year            SMALLINT      NULL,
         to_year              SMALLINT      NULL,
@@ -106,55 +154,12 @@ DDL = [
     """,
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
-                   WHERE object_id = OBJECT_ID(N'nba.schedule') AND type = 'U')
-    CREATE TABLE nba.schedule (
-        game_id              VARCHAR(15)   NOT NULL,
-        game_date            DATE          NOT NULL,
-        game_code            VARCHAR(30)   NULL,
-        game_status          TINYINT       NULL,
-        game_status_text     VARCHAR(30)   NULL,
-        game_date_time_est   DATETIME2     NULL,
-        game_date_time_utc   DATETIME2     NULL,
-        day_name             VARCHAR(15)   NULL,
-        month_num            SMALLINT      NULL,
-        week_number          SMALLINT      NULL,
-        week_name            VARCHAR(30)   NULL,
-        game_label           VARCHAR(60)   NULL,
-        game_sub_label       VARCHAR(60)   NULL,
-        arena_name           VARCHAR(60)   NULL,
-        arena_city           VARCHAR(40)   NULL,
-        arena_state          VARCHAR(30)   NULL,
-        if_necessary         BIT           NULL,
-        series_game_number   VARCHAR(5)    NULL,
-        series_text          VARCHAR(40)   NULL,
-        home_team_id         INT           NULL,
-        home_team_city       VARCHAR(30)   NULL,
-        home_team_name       VARCHAR(30)   NULL,
-        home_team_tricode    CHAR(3)       NULL,
-        home_wins            SMALLINT      NULL,
-        home_losses          SMALLINT      NULL,
-        home_score           SMALLINT      NULL,
-        home_seed            SMALLINT      NULL,
-        away_team_id         INT           NULL,
-        away_team_city       VARCHAR(30)   NULL,
-        away_team_name       VARCHAR(30)   NULL,
-        away_team_tricode    CHAR(3)       NULL,
-        away_wins            SMALLINT      NULL,
-        away_losses          SMALLINT      NULL,
-        away_score           SMALLINT      NULL,
-        away_seed            SMALLINT      NULL,
-        created_at           DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
-        CONSTRAINT pk_nba_schedule PRIMARY KEY (game_id)
-    )
-    """,
-    """
-    IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.daily_lineups') AND type = 'U')
     CREATE TABLE nba.daily_lineups (
         game_id              VARCHAR(15)   NOT NULL,
         game_date            DATE          NOT NULL,
         home_away            VARCHAR(5)    NOT NULL,
-        team_abbreviation    CHAR(3)       NOT NULL,
+        team_abbreviation    VARCHAR(10)   NOT NULL,
         player_name          VARCHAR(100)  NOT NULL,
         position             VARCHAR(10)   NULL,
         lineup_status        VARCHAR(20)   NULL,
@@ -168,11 +173,11 @@ DDL = [
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_game_logs') AND type = 'U')
     CREATE TABLE nba.player_game_logs (
-        season_year          CHAR(7)       NULL,
+        season_year          VARCHAR(10)   NULL,
         player_id            BIGINT        NOT NULL,
         player_name          VARCHAR(100)  NULL,
         team_id              BIGINT        NULL,
-        team_tricode         CHAR(3)       NULL,
+        team_tricode         VARCHAR(10)   NULL,
         game_id              VARCHAR(15)   NOT NULL,
         game_date            DATE          NOT NULL,
         matchup              VARCHAR(20)   NULL,
@@ -215,7 +220,7 @@ DDL = [
         player_id            BIGINT        NOT NULL,
         player_name          VARCHAR(100)  NULL,
         team_id              INT           NULL,
-        team_tricode         CHAR(3)       NULL,
+        team_tricode         VARCHAR(10)   NULL,
         oreb                 SMALLINT      NULL,
         oreb_contest         SMALLINT      NULL,
         oreb_uncontest       SMALLINT      NULL,
@@ -255,7 +260,7 @@ DDL = [
         player_id            BIGINT        NOT NULL,
         player_name          VARCHAR(100)  NULL,
         team_id              INT           NULL,
-        team_tricode         CHAR(3)       NULL,
+        team_tricode         VARCHAR(10)   NULL,
         passes_made          SMALLINT      NULL,
         passes_received      SMALLINT      NULL,
         ft_ast               SMALLINT      NULL,
@@ -317,8 +322,20 @@ def get_engine():
 
 def ensure_tables(engine):
     with engine.begin() as conn:
+        # nba.schedule: drop and recreate every run.
+        # It is a truncate-and-reload table so there is no data to preserve.
+        # Dropping ensures column definitions are always current.
+        conn.execute(text("""
+            IF EXISTS (SELECT 1 FROM sys.objects
+                       WHERE object_id = OBJECT_ID(N'nba.schedule') AND type = 'U')
+            DROP TABLE nba.schedule
+        """))
+        conn.execute(text(SCHEDULE_DDL))
+
+        # All other tables: create if not exists, preserving existing data.
         for stmt in DDL:
             conn.execute(text(stmt))
+
         for stmt in DDL_INDEXES:
             conn.execute(text(stmt))
     log.info("Schema verified.")
@@ -368,16 +385,14 @@ def safe_bool(val):
 def safe_datetime(val):
     """
     Returns a timezone-naive Python datetime for pyodbc / DATETIME2 compatibility.
-    pyodbc with fast_executemany=True serializes tz-aware timestamps as strings
-    with the UTC offset appended (e.g. '2025-10-02 12:00:00+00:00'), which is
-    longer than what SQL Server accepts for DATETIME2, causing right-truncation.
-    Stripping tzinfo produces a plain naive datetime that pyodbc writes cleanly.
+    pyodbc with fast_executemany=True serializes tz-aware Timestamps as strings
+    with the UTC offset appended, which SQL Server rejects for DATETIME2.
+    Converting to UTC then stripping tzinfo gives pyodbc a plain naive datetime.
     """
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
     try:
         dt = pd.to_datetime(val)
-        # Convert to UTC then strip tzinfo to get a naive UTC datetime
         if dt.tzinfo is not None:
             dt = dt.tz_convert("UTC").tz_localize(None)
         return dt.to_pydatetime()
@@ -627,8 +642,7 @@ def load_schedule(engine, season):
         log.warning("  No schedule rows produced")
         return
 
-    with engine.begin() as conn:
-        conn.execute(text("DELETE FROM nba.schedule"))
+    # Table was already cleared by DROP/CREATE in ensure_tables; just insert.
     upsert(pd.DataFrame(rows), engine, "nba", "schedule", ["game_id"])
     log.info(f"  {len(rows)} schedule rows loaded")
 
