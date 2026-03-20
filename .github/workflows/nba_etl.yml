@@ -1,4 +1,4 @@
-name: NBA Nightly ETL
+name: NBA ETL
 
 on:
   # Nightly scheduled run
