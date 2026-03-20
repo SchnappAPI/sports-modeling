@@ -12,11 +12,13 @@ Schedule:        Direct HTTP to scheduleleaguev2 via proxy.
 Box scores:      Direct HTTP to playergamelogs via proxy.
                  5 calls per run (one per period: 1Q/2Q/3Q/4Q/OT).
                  DateFrom = earliest missing date, DateTo = empty.
+                 SeasonType filter removed; all game types returned.
                  ALL rows returned are upserted regardless of date.
                  --days does NOT apply to box scores.
 Pt stats:        Direct HTTP to leaguedashptstats via proxy.
                  One passing call + one rebounding call per missing date.
                  DateFrom = DateTo = that date (single-day filter).
+                 SeasonType filter removed; all game types returned.
                  --days controls how many dates are processed per run.
 Daily lineups:   Direct HTTP to NBA daily lineups JSON via proxy.
 
@@ -380,7 +382,7 @@ def safe_int(val):
         if val is None or (isinstance(val, float) and pd.isna(val)):
             return None
         return int(val)
-    except (ValueError, TypeError):\
+    except (ValueError, TypeError):
         return None
 
 def safe_str(val):
@@ -627,14 +629,14 @@ def load_schedule(engine, season):
 
 
 # ---------------------------------------------------------------------------
-# Box scores: always fetch from earliest missing date, no batch limit.
-# --days does NOT apply here.
+# Box scores via playergamelogs (via proxy)
+# SeasonType omitted so all game types (Regular Season, IST, PlayIn,
+# Playoffs) are returned in a single call per period.
 # ---------------------------------------------------------------------------
 def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season, timeout=90):
     date_str = date_from.strftime("%m/%d/%Y")
     params = {
         "Season":       season,
-        "SeasonType":   "Regular Season",
         "PlayerOrTeam": "P",
         "MeasureType":  "Base",
         "DateFrom":     date_str,
@@ -732,7 +734,9 @@ def get_earliest_missing_box_date(completed_pairs, engine):
 
 
 # ---------------------------------------------------------------------------
-# Pt stats: --days controls how many missing dates are processed per run.
+# Pt stats via leaguedashptstats (via proxy)
+# SeasonType omitted so IST and other non-Regular Season game dates
+# are included when queried by DateFrom/DateTo.
 # ---------------------------------------------------------------------------
 def get_unloaded_pt_dates(completed_pairs, engine):
     with engine.connect() as conn:
@@ -750,7 +754,6 @@ def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     date_str = game_date.strftime("%m/%d/%Y")
     params = {
         "Season":         season,
-        "SeasonType":     "Regular Season",
         "PlayerOrTeam":   "Player",
         "PtMeasureType":  pt_measure_type,
         "PerMode":        "Totals",
