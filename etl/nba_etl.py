@@ -9,8 +9,14 @@ Design
 Teams:           Hardcoded static dict, zero HTTP calls.
 Players:         Direct HTTP to commonallplayers (no proxy).
 Schedule:        Direct HTTP to scheduleleaguev2 (no proxy).
-Box scores:      Direct HTTP to playergamelogs (no proxy, per-period calls).
+Box scores:      Direct HTTP to playergamelogs (no proxy).
+                 5 calls per run (one per period: 1Q/2Q/3Q/4Q/OT).
+                 DateFrom = earliest missing date, DateTo = empty.
+                 Response covers all games since DateFrom; rows are
+                 filtered to the batch date window before upserting.
 Pt stats:        Direct HTTP to leaguedashptstats via proxy.
+                 One passing call + one rebounding call per missing date.
+                 DateFrom = DateTo = that date (single-day filter).
 Daily lineups:   Direct HTTP to NBA daily lineups JSON (no proxy).
 
 Tables written
@@ -19,7 +25,6 @@ Tables written
   nba.schedule               scheduleleaguev2 direct HTTP, full reload every run.
   nba.games                  Derived from schedule (completed games only).
   nba.player_box_score_stats Quarter-level player stats (1Q/2Q/3Q/4Q/OT) via playergamelogs.
-  nba.team_box_score_stats   Not written by this version (playergamelogs is player-only).
   nba.player_passing_stats   Daily potential_ast per player via leaguedashptstats.
   nba.player_rebound_chances Daily reb_chances per player via leaguedashptstats.
   nba.daily_lineups          Per-game lineup status, incremental for unfinished games only.
@@ -89,47 +94,47 @@ def get_proxies():
 # Each tuple: (period_value, game_segment, period_label)
 # OT uses GameSegment=Overtime with Period="" per the working Power Query pattern.
 PERIOD_CONFIG = [
-    ("1",  None,         "1Q"),
-    ("2",  None,         "2Q"),
-    ("3",  None,         "3Q"),
-    ("4",  None,         "4Q"),
-    ("",   "Overtime",   "OT"),
+    ("1",  None,       "1Q"),
+    ("2",  None,       "2Q"),
+    ("3",  None,       "3Q"),
+    ("4",  None,       "4Q"),
+    ("",   "Overtime", "OT"),
 ]
 
 # ---------------------------------------------------------------------------
 # Static team data
 # ---------------------------------------------------------------------------
 STATIC_TEAMS = [
-    (1610612737, "ATL", "Hawks",          "East", "Southeast"),
-    (1610612738, "BOS", "Celtics",         "East", "Atlantic"),
-    (1610612739, "CLE", "Cavaliers",       "East", "Central"),
-    (1610612740, "NOP", "Pelicans",        "West", "Southwest"),
-    (1610612741, "CHI", "Bulls",           "East", "Central"),
-    (1610612742, "DAL", "Mavericks",       "West", "Southwest"),
-    (1610612743, "DEN", "Nuggets",         "West", "Northwest"),
-    (1610612744, "GSW", "Warriors",        "West", "Pacific"),
-    (1610612745, "HOU", "Rockets",         "West", "Southwest"),
-    (1610612746, "LAC", "Clippers",        "West", "Pacific"),
-    (1610612747, "LAL", "Lakers",          "West", "Pacific"),
-    (1610612748, "MIA", "Heat",            "East", "Southeast"),
-    (1610612749, "MIL", "Bucks",           "East", "Central"),
-    (1610612750, "MIN", "Timberwolves",    "West", "Northwest"),
-    (1610612751, "BKN", "Nets",            "East", "Atlantic"),
-    (1610612752, "NYK", "Knicks",          "East", "Atlantic"),
-    (1610612753, "ORL", "Magic",           "East", "Southeast"),
-    (1610612754, "IND", "Pacers",          "East", "Central"),
-    (1610612755, "PHI", "76ers",           "East", "Atlantic"),
-    (1610612756, "PHX", "Suns",            "West", "Pacific"),
-    (1610612757, "POR", "Trail Blazers",   "West", "Northwest"),
-    (1610612758, "SAC", "Kings",           "West", "Pacific"),
-    (1610612759, "SAS", "Spurs",           "West", "Southwest"),
-    (1610612760, "OKC", "Thunder",         "West", "Northwest"),
-    (1610612761, "TOR", "Raptors",         "East", "Atlantic"),
-    (1610612762, "UTA", "Jazz",            "West", "Northwest"),
-    (1610612763, "MEM", "Grizzlies",       "West", "Southwest"),
-    (1610612764, "WAS", "Wizards",         "East", "Southeast"),
-    (1610612765, "DET", "Pistons",         "East", "Central"),
-    (1610612766, "CHA", "Hornets",         "East", "Southeast"),
+    (1610612737, "ATL", "Hawks",         "East", "Southeast"),
+    (1610612738, "BOS", "Celtics",        "East", "Atlantic"),
+    (1610612739, "CLE", "Cavaliers",      "East", "Central"),
+    (1610612740, "NOP", "Pelicans",       "West", "Southwest"),
+    (1610612741, "CHI", "Bulls",          "East", "Central"),
+    (1610612742, "DAL", "Mavericks",      "West", "Southwest"),
+    (1610612743, "DEN", "Nuggets",        "West", "Northwest"),
+    (1610612744, "GSW", "Warriors",       "West", "Pacific"),
+    (1610612745, "HOU", "Rockets",        "West", "Southwest"),
+    (1610612746, "LAC", "Clippers",       "West", "Pacific"),
+    (1610612747, "LAL", "Lakers",         "West", "Pacific"),
+    (1610612748, "MIA", "Heat",           "East", "Southeast"),
+    (1610612749, "MIL", "Bucks",          "East", "Central"),
+    (1610612750, "MIN", "Timberwolves",   "West", "Northwest"),
+    (1610612751, "BKN", "Nets",           "East", "Atlantic"),
+    (1610612752, "NYK", "Knicks",         "East", "Atlantic"),
+    (1610612753, "ORL", "Magic",          "East", "Southeast"),
+    (1610612754, "IND", "Pacers",         "East", "Central"),
+    (1610612755, "PHI", "76ers",          "East", "Atlantic"),
+    (1610612756, "PHX", "Suns",           "West", "Pacific"),
+    (1610612757, "POR", "Trail Blazers",  "West", "Northwest"),
+    (1610612758, "SAC", "Kings",          "West", "Pacific"),
+    (1610612759, "SAS", "Spurs",          "West", "Southwest"),
+    (1610612760, "OKC", "Thunder",        "West", "Northwest"),
+    (1610612761, "TOR", "Raptors",        "East", "Atlantic"),
+    (1610612762, "UTA", "Jazz",           "West", "Northwest"),
+    (1610612763, "MEM", "Grizzlies",      "West", "Southwest"),
+    (1610612764, "WAS", "Wizards",        "East", "Southeast"),
+    (1610612765, "DET", "Pistons",        "East", "Central"),
+    (1610612766, "CHA", "Hornets",        "East", "Southeast"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -147,14 +152,14 @@ DDL_STATEMENTS = [
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.teams') AND type = 'U')
     CREATE TABLE nba.teams (
-        team_id     BIGINT       NOT NULL,
-        team_name   VARCHAR(60)  NOT NULL,
+        team_id      BIGINT      NOT NULL,
+        team_name    VARCHAR(60) NOT NULL,
         team_tricode CHAR(3)     NOT NULL,
-        conference  VARCHAR(10)  NULL,
-        division    VARCHAR(20)  NULL,
-        created_at  DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
-        CONSTRAINT pk_nba_teams      PRIMARY KEY (team_id),
-        CONSTRAINT uq_nba_tricode    UNIQUE      (team_tricode)
+        conference   VARCHAR(10) NULL,
+        division     VARCHAR(20) NULL,
+        created_at   DATETIME2   NOT NULL DEFAULT GETUTCDATE(),
+        CONSTRAINT pk_nba_teams   PRIMARY KEY (team_id),
+        CONSTRAINT uq_nba_tricode UNIQUE      (team_tricode)
     )
     """,
 
@@ -163,15 +168,15 @@ DDL_STATEMENTS = [
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.players') AND type = 'U')
     CREATE TABLE nba.players (
-        player_id     BIGINT        NOT NULL,
-        player_name   VARCHAR(100)  NOT NULL,
-        team_id       BIGINT        NULL,
-        team_name     VARCHAR(60)   NULL,
-        team_tricode  CHAR(3)       NULL,
-        roster_status TINYINT       NULL,
-        from_year     SMALLINT      NULL,
-        to_year       SMALLINT      NULL,
-        created_at    DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+        player_id     BIGINT       NOT NULL,
+        player_name   VARCHAR(100) NOT NULL,
+        team_id       BIGINT       NULL,
+        team_name     VARCHAR(60)  NULL,
+        team_tricode  CHAR(3)      NULL,
+        roster_status TINYINT      NULL,
+        from_year     SMALLINT     NULL,
+        to_year       SMALLINT     NULL,
+        created_at    DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
         CONSTRAINT pk_nba_players      PRIMARY KEY (player_id),
         CONSTRAINT fk_nba_players_team FOREIGN KEY (team_id)
             REFERENCES nba.teams (team_id)
@@ -183,19 +188,19 @@ DDL_STATEMENTS = [
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.schedule') AND type = 'U')
     CREATE TABLE nba.schedule (
-        game_id           VARCHAR(15)  NOT NULL,
-        game_date         DATE         NOT NULL,
-        season_type       VARCHAR(20)  NULL,
-        game_code         VARCHAR(30)  NULL,
-        game_status       TINYINT      NULL,
-        game_status_text  VARCHAR(30)  NULL,
-        home_team_id      BIGINT       NULL,
-        home_team_tricode CHAR(3)      NULL,
-        home_score        SMALLINT     NULL,
-        away_team_id      BIGINT       NULL,
-        away_team_tricode CHAR(3)      NULL,
-        away_score        SMALLINT     NULL,
-        created_at        DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
+        game_id           VARCHAR(15) NOT NULL,
+        game_date         DATE        NOT NULL,
+        season_type       VARCHAR(20) NULL,
+        game_code         VARCHAR(30) NULL,
+        game_status       TINYINT     NULL,
+        game_status_text  VARCHAR(30) NULL,
+        home_team_id      BIGINT      NULL,
+        home_team_tricode CHAR(3)     NULL,
+        home_score        SMALLINT    NULL,
+        away_team_id      BIGINT      NULL,
+        away_team_tricode CHAR(3)     NULL,
+        away_score        SMALLINT    NULL,
+        created_at        DATETIME2   NOT NULL DEFAULT GETUTCDATE(),
         CONSTRAINT pk_nba_schedule PRIMARY KEY (game_id)
     )
     """,
@@ -205,19 +210,19 @@ DDL_STATEMENTS = [
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.games') AND type = 'U')
     CREATE TABLE nba.games (
-        game_id           VARCHAR(15)  NOT NULL,
-        game_date         DATE         NOT NULL,
-        season_type       VARCHAR(20)  NULL,
-        game_code         VARCHAR(30)  NULL,
-        game_status       TINYINT      NULL,
-        game_status_text  VARCHAR(30)  NULL,
-        home_team_id      BIGINT       NULL,
-        home_team_tricode CHAR(3)      NULL,
-        home_score        SMALLINT     NULL,
-        away_team_id      BIGINT       NULL,
-        away_team_tricode CHAR(3)      NULL,
-        away_score        SMALLINT     NULL,
-        created_at        DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
+        game_id           VARCHAR(15) NOT NULL,
+        game_date         DATE        NOT NULL,
+        season_type       VARCHAR(20) NULL,
+        game_code         VARCHAR(30) NULL,
+        game_status       TINYINT     NULL,
+        game_status_text  VARCHAR(30) NULL,
+        home_team_id      BIGINT      NULL,
+        home_team_tricode CHAR(3)     NULL,
+        home_score        SMALLINT    NULL,
+        away_team_id      BIGINT      NULL,
+        away_team_tricode CHAR(3)     NULL,
+        away_score        SMALLINT    NULL,
+        created_at        DATETIME2   NOT NULL DEFAULT GETUTCDATE(),
         CONSTRAINT pk_nba_games      PRIMARY KEY (game_id),
         CONSTRAINT fk_nba_games_home FOREIGN KEY (home_team_id)
             REFERENCES nba.teams (team_id),
@@ -231,42 +236,42 @@ DDL_STATEMENTS = [
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_box_score_stats') AND type = 'U')
     CREATE TABLE nba.player_box_score_stats (
-        game_id         VARCHAR(15)   NOT NULL,
-        player_id       BIGINT        NOT NULL,
-        period          VARCHAR(5)    NOT NULL,
-        season_year     VARCHAR(10)   NULL,
-        player_name     VARCHAR(100)  NULL,
-        team_id         BIGINT        NULL,
-        team_tricode    CHAR(3)       NULL,
-        game_date       DATE          NULL,
-        matchup         VARCHAR(20)   NULL,
-        minutes         DECIMAL(6,2)  NULL,
-        minutes_sec     VARCHAR(10)   NULL,
-        fgm             SMALLINT      NULL,
-        fga             SMALLINT      NULL,
-        fg_pct          DECIMAL(6,4)  NULL,
-        fg3m            SMALLINT      NULL,
-        fg3a            SMALLINT      NULL,
-        fg3_pct         DECIMAL(6,4)  NULL,
-        ftm             SMALLINT      NULL,
-        fta             SMALLINT      NULL,
-        ft_pct          DECIMAL(6,4)  NULL,
-        oreb            SMALLINT      NULL,
-        dreb            SMALLINT      NULL,
-        reb             SMALLINT      NULL,
-        ast             SMALLINT      NULL,
-        tov             SMALLINT      NULL,
-        stl             SMALLINT      NULL,
-        blk             SMALLINT      NULL,
-        blka            SMALLINT      NULL,
-        pf              SMALLINT      NULL,
-        pfd             SMALLINT      NULL,
-        pts             SMALLINT      NULL,
-        plus_minus      SMALLINT      NULL,
-        dd2             SMALLINT      NULL,
-        td3             SMALLINT      NULL,
-        available_flag  SMALLINT      NULL,
-        created_at      DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+        game_id        VARCHAR(15)  NOT NULL,
+        player_id      BIGINT       NOT NULL,
+        period         VARCHAR(5)   NOT NULL,
+        season_year    VARCHAR(10)  NULL,
+        player_name    VARCHAR(100) NULL,
+        team_id        BIGINT       NULL,
+        team_tricode   CHAR(3)      NULL,
+        game_date      DATE         NULL,
+        matchup        VARCHAR(20)  NULL,
+        minutes        DECIMAL(6,2) NULL,
+        minutes_sec    VARCHAR(10)  NULL,
+        fgm            SMALLINT     NULL,
+        fga            SMALLINT     NULL,
+        fg_pct         DECIMAL(6,4) NULL,
+        fg3m           SMALLINT     NULL,
+        fg3a           SMALLINT     NULL,
+        fg3_pct        DECIMAL(6,4) NULL,
+        ftm            SMALLINT     NULL,
+        fta            SMALLINT     NULL,
+        ft_pct         DECIMAL(6,4) NULL,
+        oreb           SMALLINT     NULL,
+        dreb           SMALLINT     NULL,
+        reb            SMALLINT     NULL,
+        ast            SMALLINT     NULL,
+        tov            SMALLINT     NULL,
+        stl            SMALLINT     NULL,
+        blk            SMALLINT     NULL,
+        blka           SMALLINT     NULL,
+        pf             SMALLINT     NULL,
+        pfd            SMALLINT     NULL,
+        pts            SMALLINT     NULL,
+        plus_minus     SMALLINT     NULL,
+        dd2            SMALLINT     NULL,
+        td3            SMALLINT     NULL,
+        available_flag SMALLINT     NULL,
+        created_at     DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
         CONSTRAINT pk_nba_pbss        PRIMARY KEY (game_id, player_id, period),
         CONSTRAINT fk_nba_pbss_game   FOREIGN KEY (game_id)
             REFERENCES nba.games (game_id),
@@ -280,13 +285,13 @@ DDL_STATEMENTS = [
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_passing_stats') AND type = 'U')
     CREATE TABLE nba.player_passing_stats (
-        player_id     BIGINT        NOT NULL,
-        game_date     DATE          NOT NULL,
-        player_name   VARCHAR(100)  NULL,
-        team_id       BIGINT        NULL,
-        team_tricode  CHAR(3)       NULL,
-        potential_ast DECIMAL(8,1)  NULL,
-        created_at    DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+        player_id     BIGINT       NOT NULL,
+        game_date     DATE         NOT NULL,
+        player_name   VARCHAR(100) NULL,
+        team_id       BIGINT       NULL,
+        team_tricode  CHAR(3)      NULL,
+        potential_ast DECIMAL(8,1) NULL,
+        created_at    DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
         CONSTRAINT pk_nba_pps        PRIMARY KEY (player_id, game_date),
         CONSTRAINT fk_nba_pps_player FOREIGN KEY (player_id)
             REFERENCES nba.players (player_id)
@@ -298,13 +303,13 @@ DDL_STATEMENTS = [
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_rebound_chances') AND type = 'U')
     CREATE TABLE nba.player_rebound_chances (
-        player_id    BIGINT        NOT NULL,
-        game_date    DATE          NOT NULL,
-        player_name  VARCHAR(100)  NULL,
-        team_id      BIGINT        NULL,
-        team_tricode CHAR(3)       NULL,
-        reb_chances  DECIMAL(8,1)  NULL,
-        created_at   DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+        player_id    BIGINT       NOT NULL,
+        game_date    DATE         NOT NULL,
+        player_name  VARCHAR(100) NULL,
+        team_id      BIGINT       NULL,
+        team_tricode CHAR(3)      NULL,
+        reb_chances  DECIMAL(8,1) NULL,
+        created_at   DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
         CONSTRAINT pk_nba_prc        PRIMARY KEY (player_id, game_date),
         CONSTRAINT fk_nba_prc_player FOREIGN KEY (player_id)
             REFERENCES nba.players (player_id)
@@ -504,11 +509,11 @@ def load_teams(engine):
     log.info("Loading nba.teams from static data")
     rows = [
         {
-            "team_id":     tid,
-            "team_name":   name,
+            "team_id":      tid,
+            "team_name":    name,
             "team_tricode": tricode,
-            "conference":  conf,
-            "division":    div,
+            "conference":   conf,
+            "division":     div,
         }
         for tid, tricode, name, conf, div in STATIC_TEAMS
     ]
@@ -526,7 +531,7 @@ def players_table_empty(engine):
 def load_players(engine, season):
     log.info(f"Loading nba.players via commonallplayers for season {season}")
     url  = (
-        f"https://stats.nba.com/stats/commonallplayers"
+        "https://stats.nba.com/stats/commonallplayers"
         f"?IsOnlyCurrentSeason=1&LeagueID=00&Season={season}"
     )
     data = _direct_get(url, "commonallplayers", proxies=NO_PROXY)
@@ -540,7 +545,6 @@ def load_players(engine, season):
         if pid is None:
             continue
         tid = safe_int(row.get("TEAM_ID"))
-        # team_id 0 means no team; store as NULL
         if tid == 0:
             tid = None
         rows.append({
@@ -572,7 +576,7 @@ def load_schedule(engine, season):
         log.error("  scheduleleaguev2 failed, cannot continue")
         return []
 
-    today      = date.today()
+    today         = date.today()
     schedule_rows = []
     games_rows    = []
 
@@ -587,13 +591,12 @@ def load_schedule(engine, season):
             if g.get("gameLabel") == "Preseason":
                 continue
 
-            # Map season type using the same logic as the Power Query
             label = g.get("gameLabel") or ""
             week  = g.get("weekName") or ""
             if label == "Emirates NBA Cup":
                 season_type = "IST"
             elif week == "All-Star":
-                continue  # skip All-Star per Power Query
+                continue
             elif label == "SoFi Play-In Tournament":
                 season_type = "PlayIn"
             elif label == "NBA Finals":
@@ -601,12 +604,10 @@ def load_schedule(engine, season):
             else:
                 season_type = "Regular Season"
 
-            home = g.get("homeTeam", {})
-            away = g.get("awayTeam", {})
-
-            home_id  = safe_int(home.get("teamId"))
-            away_id  = safe_int(away.get("teamId"))
-            # teamId 0 means TBD
+            home    = g.get("homeTeam", {})
+            away    = g.get("awayTeam", {})
+            home_id = safe_int(home.get("teamId"))
+            away_id = safe_int(away.get("teamId"))
             if home_id == 0:
                 home_id = None
             if away_id == 0:
@@ -631,7 +632,6 @@ def load_schedule(engine, season):
 
             schedule_rows.append(row)
 
-            # games table: completed games only (status 3), date < today
             if game_date < today and safe_int(g.get("gameStatus")) == 3:
                 games_rows.append(row)
 
@@ -642,7 +642,6 @@ def load_schedule(engine, season):
         upsert(pd.DataFrame(games_rows), engine, "nba", "games", ["game_id"])
         log.info(f"  {len(games_rows)} completed games upserted into nba.games")
 
-    # Return (game_id, game_date) pairs for completed games, sorted oldest first
     completed = sorted(
         [(r["game_id"], r["game_date"]) for r in games_rows],
         key=lambda x: x[1],
@@ -652,9 +651,14 @@ def load_schedule(engine, season):
 
 # ---------------------------------------------------------------------------
 # Box scores via playergamelogs (direct HTTP, no proxy)
-# One call per period per date. Returns all players for all games on that date.
+#
+# Strategy: 5 API calls per run, one per period (1Q/2Q/3Q/4Q/OT).
+# DateFrom = earliest missing date, DateTo = empty (open-ended).
+# The response contains all games from DateFrom onward for that period.
+# Rows are filtered to batch_dates before upserting, so only the intended
+# window is written and the incremental state key (game_date) stays correct.
 # ---------------------------------------------------------------------------
-def _fetch_playergamelogs(period_value, game_segment, period_label, date_from, season, timeout=60):
+def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season, timeout=60):
     date_str = date_from.strftime("%m/%d/%Y")
     params = {
         "Season":       season,
@@ -662,7 +666,7 @@ def _fetch_playergamelogs(period_value, game_segment, period_label, date_from, s
         "PlayerOrTeam": "P",
         "MeasureType":  "Base",
         "DateFrom":     date_str,
-        "DateTo":       "",
+        "DateTo":       "",   # open-ended: returns all games from date_from onward
     }
     if game_segment:
         params["GameSegment"] = game_segment
@@ -670,7 +674,7 @@ def _fetch_playergamelogs(period_value, game_segment, period_label, date_from, s
     else:
         params["Period"] = period_value
 
-    label = f"playergamelogs {period_label} {date_str}"
+    label = f"playergamelogs {period_label} from {date_str}"
     data  = _direct_get(
         "https://stats.nba.com/stats/playergamelogs",
         label,
@@ -682,64 +686,75 @@ def _fetch_playergamelogs(period_value, game_segment, period_label, date_from, s
     if df is None or df.empty:
         log.info(f"  {label}: no rows returned")
         return None
-    log.info(f"  {label}: {len(df)} rows")
+    log.info(f"  {label}: {len(df)} total rows")
     return df
 
 
-def fetch_box_scores_for_date(game_date, season):
-    """Fetch all periods for a single game date. Returns list of row dicts."""
-    all_rows = []
+def fetch_box_scores_for_batch(batch_dates, season):
+    """
+    Fetch all 5 period calls once using the earliest batch date as DateFrom.
+    Returns a dict of {game_date: [row_dicts]} containing only rows whose
+    GAME_DATE falls within batch_dates.
+    """
+    if not batch_dates:
+        return {}
+
+    batch_date_set = set(batch_dates)
+    date_from      = min(batch_dates)
+    rows_by_date   = {d: [] for d in batch_dates}
+
     for period_value, game_segment, period_label in PERIOD_CONFIG:
-        df = _fetch_playergamelogs(period_value, game_segment, period_label, game_date, season)
+        df = _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season)
         if df is None:
             continue
         for _, row in df.iterrows():
-            pid = safe_int(row.get("PLAYER_ID"))
-            gid = safe_str(row.get("GAME_ID"))
-            if pid is None or gid is None:
+            pid      = safe_int(row.get("PLAYER_ID"))
+            gid      = safe_str(row.get("GAME_ID"))
+            row_date = safe_date(row.get("GAME_DATE"))
+            if pid is None or gid is None or row_date is None:
                 continue
-            # Parse MIN: playergamelogs returns decimal minutes
-            min_val = safe_float(row.get("MIN"))
-            # MIN_SEC may not exist on this endpoint; store raw if present
-            min_sec = safe_str(row.get("MIN_SEC"))
-            all_rows.append({
-                "game_id":       gid,
-                "player_id":     pid,
-                "period":        period_label,
-                "season_year":   safe_str(row.get("SEASON_YEAR")),
-                "player_name":   safe_str(row.get("PLAYER_NAME")),
-                "team_id":       safe_int(row.get("TEAM_ID")),
-                "team_tricode":  safe_str(row.get("TEAM_ABBREVIATION")),
-                "game_date":     safe_date(row.get("GAME_DATE")),
-                "matchup":       safe_str(row.get("MATCHUP")),
-                "minutes":       min_val,
-                "minutes_sec":   min_sec,
-                "fgm":           safe_int(row.get("FGM")),
-                "fga":           safe_int(row.get("FGA")),
-                "fg_pct":        safe_float(row.get("FG_PCT")),
-                "fg3m":          safe_int(row.get("FG3M")),
-                "fg3a":          safe_int(row.get("FG3A")),
-                "fg3_pct":       safe_float(row.get("FG3_PCT")),
-                "ftm":           safe_int(row.get("FTM")),
-                "fta":           safe_int(row.get("FTA")),
-                "ft_pct":        safe_float(row.get("FT_PCT")),
-                "oreb":          safe_int(row.get("OREB")),
-                "dreb":          safe_int(row.get("DREB")),
-                "reb":           safe_int(row.get("REB")),
-                "ast":           safe_int(row.get("AST")),
-                "tov":           safe_int(row.get("TOV")),
-                "stl":           safe_int(row.get("STL")),
-                "blk":           safe_int(row.get("BLK")),
-                "blka":          safe_int(row.get("BLKA")),
-                "pf":            safe_int(row.get("PF")),
-                "pfd":           safe_int(row.get("PFD")),
-                "pts":           safe_int(row.get("PTS")),
-                "plus_minus":    safe_int(row.get("PLUS_MINUS")),
-                "dd2":           safe_int(row.get("DD2")),
-                "td3":           safe_int(row.get("TD3")),
+            # Only keep rows that fall within the batch window
+            if row_date not in batch_date_set:
+                continue
+            rows_by_date[row_date].append({
+                "game_id":        gid,
+                "player_id":      pid,
+                "period":         period_label,
+                "season_year":    safe_str(row.get("SEASON_YEAR")),
+                "player_name":    safe_str(row.get("PLAYER_NAME")),
+                "team_id":        safe_int(row.get("TEAM_ID")),
+                "team_tricode":   safe_str(row.get("TEAM_ABBREVIATION")),
+                "game_date":      row_date,
+                "matchup":        safe_str(row.get("MATCHUP")),
+                "minutes":        safe_float(row.get("MIN")),
+                "minutes_sec":    safe_str(row.get("MIN_SEC")),
+                "fgm":            safe_int(row.get("FGM")),
+                "fga":            safe_int(row.get("FGA")),
+                "fg_pct":         safe_float(row.get("FG_PCT")),
+                "fg3m":           safe_int(row.get("FG3M")),
+                "fg3a":           safe_int(row.get("FG3A")),
+                "fg3_pct":        safe_float(row.get("FG3_PCT")),
+                "ftm":            safe_int(row.get("FTM")),
+                "fta":            safe_int(row.get("FTA")),
+                "ft_pct":         safe_float(row.get("FT_PCT")),
+                "oreb":           safe_int(row.get("OREB")),
+                "dreb":           safe_int(row.get("DREB")),
+                "reb":            safe_int(row.get("REB")),
+                "ast":            safe_int(row.get("AST")),
+                "tov":            safe_int(row.get("TOV")),
+                "stl":            safe_int(row.get("STL")),
+                "blk":            safe_int(row.get("BLK")),
+                "blka":           safe_int(row.get("BLKA")),
+                "pf":             safe_int(row.get("PF")),
+                "pfd":            safe_int(row.get("PFD")),
+                "pts":            safe_int(row.get("PTS")),
+                "plus_minus":     safe_int(row.get("PLUS_MINUS")),
+                "dd2":            safe_int(row.get("DD2")),
+                "td3":            safe_int(row.get("TD3")),
                 "available_flag": safe_int(row.get("AVAILABLE_FLAG")),
             })
-    return all_rows
+
+    return rows_by_date
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +766,6 @@ def get_unloaded_box_dates(completed_pairs, engine):
             str(row[0]) for row in
             conn.execute(text("SELECT DISTINCT game_date FROM nba.player_box_score_stats"))
         }
-    # Collect unique dates from completed pairs
     all_dates = sorted(set(gdate for _, gdate in completed_pairs))
     missing   = [d for d in all_dates if str(d) not in loaded]
     log.info(f"  Box scores: {len(loaded)} dates loaded, {len(missing)} remaining")
@@ -775,20 +789,22 @@ def get_unloaded_pt_dates(completed_pairs, engine):
 
 # ---------------------------------------------------------------------------
 # Pt stats (direct HTTP via proxy)
+# One passing call + one rebounding call per missing date.
+# DateFrom = DateTo = that date (single-day cumulative totals).
 # ---------------------------------------------------------------------------
 def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     date_str = game_date.strftime("%m/%d/%Y")
     params = {
-        "Season":        season,
-        "SeasonType":    "Regular Season",
-        "PlayerOrTeam":  "Player",
-        "PtMeasureType": pt_measure_type,
-        "PerMode":       "Totals",
-        "LastNGames":    "0",
-        "Month":         "0",
+        "Season":         season,
+        "SeasonType":     "Regular Season",
+        "PlayerOrTeam":   "Player",
+        "PtMeasureType":  pt_measure_type,
+        "PerMode":        "Totals",
+        "LastNGames":     "0",
+        "Month":          "0",
         "OpponentTeamID": "0",
-        "DateFrom":      date_str,
-        "DateTo":        date_str,
+        "DateFrom":       date_str,
+        "DateTo":         date_str,
     }
     log.info(f"  Fetching {pt_measure_type} for {date_str} (via proxy)")
     data = _direct_get(
@@ -852,55 +868,40 @@ def load_rebound_chances(game_date, season, engine):
 
 # ---------------------------------------------------------------------------
 # Daily lineups (NBA daily lineups JSON, direct HTTP, no proxy)
-# Incremental: only load dates where game_status < 3 (not yet final).
-# Once a game is final it will never appear in the unfinished set again.
+# Incremental: completed games loaded once; unfinished games re-fetched every run.
 # ---------------------------------------------------------------------------
-def get_lineup_dates_to_fetch(schedule_rows_today, engine):
-    """
-    Returns game_ids for games that are today or in the future (status != 3)
-    AND game_ids for past dates not yet in nba.daily_lineups.
-    Combined: anything not yet finalized or not yet loaded.
-    """
+def get_lineup_games_to_fetch(schedule_rows_today, engine):
     with engine.connect() as conn:
         loaded_games = {
             str(row[0]) for row in
             conn.execute(text("SELECT DISTINCT game_id FROM nba.daily_lineups"))
         }
-    # schedule_rows_today is a list of dicts from nba.schedule where game_date <= today
     to_fetch = []
     for r in schedule_rows_today:
         gid    = r["game_id"]
         status = r.get("game_status")
-        # Always re-fetch if not yet final (status < 3)
         if status != 3:
             to_fetch.append(r)
-        # Fetch if final but not yet in lineups table
         elif gid not in loaded_games:
             to_fetch.append(r)
-    # Sort by game_date ascending so we process oldest first
     to_fetch.sort(key=lambda r: r["game_date"])
     log.info(f"  Daily lineups: {len(to_fetch)} games to fetch")
     return to_fetch
 
 
 def fetch_lineups_for_game_date(game_date):
-    """
-    Fetches the NBA daily lineups JSON for a given date.
-    Returns a list of row dicts or empty list on failure.
-    """
     date_key = game_date.strftime("%Y%m%d")
     url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_key}.json"
     data     = _direct_get(url, f"daily_lineups {date_key}", proxies=NO_PROXY, timeout=30)
     if data is None:
         return []
-
     rows = []
     for g in data.get("games", []):
         game_id = safe_str(g.get("gameId"))
         if game_id is None:
             continue
         for side, home_away in (("homeTeam", "Home"), ("awayTeam", "Away")):
-            team  = g.get(side, {})
+            team    = g.get(side, {})
             tricode = safe_str(team.get("teamAbbreviation"))
             for p in team.get("players", []):
                 pos    = safe_str(p.get("position"))
@@ -912,39 +913,33 @@ def fetch_lineups_for_game_date(game_date):
                 else:
                     starter = "Inactive"
                 rows.append({
-                    "game_id":       game_id,
-                    "game_date":     game_date,
-                    "home_away":     home_away,
-                    "team_tricode":  tricode,
-                    "player_name":   safe_str(p.get("playerName")),
-                    "position":      pos,
-                    "lineup_status": safe_str(p.get("lineupStatus")),
-                    "roster_status": roster,
+                    "game_id":        game_id,
+                    "game_date":      game_date,
+                    "home_away":      home_away,
+                    "team_tricode":   tricode,
+                    "player_name":    safe_str(p.get("playerName")),
+                    "position":       pos,
+                    "lineup_status":  safe_str(p.get("lineupStatus")),
+                    "roster_status":  roster,
                     "starter_status": starter,
                 })
     return rows
 
 
 def load_daily_lineups(schedule_today, engine):
-    """Load daily lineups for unfinished and not-yet-loaded games."""
-    to_fetch = get_lineup_dates_to_fetch(schedule_today, engine)
+    from itertools import groupby
+    to_fetch = get_lineup_games_to_fetch(schedule_today, engine)
     if not to_fetch:
         log.info("  Daily lineups: nothing to fetch.")
         return
-
-    # Group by game_date to batch per-date fetches
-    from itertools import groupby
     for game_date, group in groupby(to_fetch, key=lambda r: r["game_date"]):
         game_ids_for_date = [r["game_id"] for r in group]
         all_rows = fetch_lineups_for_game_date(game_date)
         if not all_rows:
             log.warning(f"  No lineup data for {game_date}")
             continue
-        # Filter to only the game_ids we care about for this date
         filtered = [r for r in all_rows if r["game_id"] in game_ids_for_date]
         if filtered:
-            # Delete existing rows for these game_ids before upserting
-            # (lineup status changes for unfinished games)
             with engine.begin() as conn:
                 for gid in game_ids_for_date:
                     conn.execute(
@@ -978,19 +973,19 @@ def main():
     engine = get_engine()
     ensure_tables(engine)
 
-    # Teams
     load_teams(engine)
 
-    # Players
     if args.load_rosters or players_table_empty(engine):
         load_players(engine, args.season)
     else:
         log.info("nba.players already populated, skipping roster load.")
 
-    # Schedule (full reload every run; also populates nba.games)
     completed_pairs = load_schedule(engine, args.season)
 
-    # Box scores
+    # ------------------------------------------------------------------
+    # Box scores: 5 API calls total regardless of batch size.
+    # DateFrom = earliest missing date. Rows filtered to batch_dates.
+    # ------------------------------------------------------------------
     if not completed_pairs:
         log.info("Box scores: no completed games found.")
     else:
@@ -1001,24 +996,27 @@ def main():
         else:
             remain = len(missing_dates) - len(batch_dates)
             log.info(
-                f"Box scores: processing {len(batch_dates)} date(s). "
+                f"Box scores: {len(batch_dates)} date(s) in batch "
+                f"({batch_dates[0]} to {batch_dates[-1]}), "
                 f"{remain} date(s) remain after this run."
             )
+            rows_by_date = fetch_box_scores_for_batch(batch_dates, args.season)
             for box_date in batch_dates:
-                log.info(f"  Fetching box scores for {box_date}")
-                rows = fetch_box_scores_for_date(box_date, args.season)
-                if not rows:
+                date_rows = rows_by_date.get(box_date, [])
+                if not date_rows:
                     log.warning(f"  No box score rows for {box_date}, skipping.")
                     continue
                 upsert(
-                    pd.DataFrame(rows), engine,
+                    pd.DataFrame(date_rows), engine,
                     "nba", "player_box_score_stats",
                     ["game_id", "player_id", "period"],
                 )
-                log.info(f"  {len(rows)} rows upserted for {box_date}")
+                log.info(f"  {len(date_rows)} rows upserted for {box_date}")
             log.info("Box score phase complete.")
 
-    # Pt stats
+    # ------------------------------------------------------------------
+    # Pt stats: one passing + one rebounding call per missing date.
+    # ------------------------------------------------------------------
     if not args.skip_pt_stats:
         missing_pt = get_unloaded_pt_dates(completed_pairs, engine)
         pt_batch   = missing_pt[:args.days]
@@ -1027,8 +1025,8 @@ def main():
         else:
             remain = len(missing_pt) - len(pt_batch)
             log.info(
-                f"Pt stats: fetching {len(pt_batch)} date(s). "
-                f"{remain} date(s) remain after this run."
+                f"Pt stats: fetching {len(pt_batch)} date(s), "
+                f"{remain} remain after this run."
             )
             for i, pt_date in enumerate(pt_batch):
                 passing_count = load_passing_stats(pt_date, args.season, engine)
@@ -1043,9 +1041,10 @@ def main():
     else:
         log.info("Skipping pt stats.")
 
+    # ------------------------------------------------------------------
     # Daily lineups
+    # ------------------------------------------------------------------
     if not args.skip_lineups:
-        # Pull today's schedule from nba.schedule for lineup logic
         today = date.today()
         with engine.connect() as conn:
             sched_rows = [
