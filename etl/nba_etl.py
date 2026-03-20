@@ -80,7 +80,7 @@ RETRY_WAIT             = 30
 RETRY_COUNT            = 3
 RETRY_WAIT_TIMEOUT     = 30
 RETRY_WAIT_500         = 60
-PT_STATS_BETWEEN_DELAY = 15
+PT_STATS_BETWEEN_DELAY = 5
 
 NBA_HEADERS = {
     "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -380,7 +380,7 @@ def safe_int(val):
         if val is None or (isinstance(val, float) and pd.isna(val)):
             return None
         return int(val)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError):\
         return None
 
 def safe_str(val):
