@@ -1,4 +1,4 @@
-name: NBA ETL
+name: NBA Nightly ETL
 
 on:
   # Nightly scheduled run
@@ -19,6 +19,7 @@ env:
   AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
   AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
   AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+  NBA_PROXY_URL:      ${{ secrets.NBA_PROXY_URL }}
 
 jobs:
   nba-etl:
@@ -63,13 +64,12 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r etl/requirements.txt
 
       # --------------------------------------------------
       # 5. RUN NBA ETL
       # --------------------------------------------------
       - name: Run NBA ETL
         run: |
-          python etl/nba/nba_etl.py \
-            --batch-size ${{ github.event.inputs.batch_size || 10 }}
-``
+          python etl/nba_etl.py \
+            --days ${{ github.event.inputs.batch_size || 10 }}
