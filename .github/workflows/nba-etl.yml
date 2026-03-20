@@ -9,10 +9,22 @@ on:
   # Manual trigger with inputs
   workflow_dispatch:
     inputs:
-      batch_size:
-        description: "Number of game dates to process (backfill / catch-up)"
+      days:
+        description: "Number of game dates to process per table"
         required: false
         default: "10"
+      load_rosters:
+        description: "Force player roster reload (true/false)"
+        required: false
+        default: "false"
+      skip_pt_stats:
+        description: "Skip passing and rebounding stats (true/false)"
+        required: false
+        default: "false"
+      skip_lineups:
+        description: "Skip daily lineups (true/false)"
+        required: false
+        default: "false"
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -41,7 +53,7 @@ jobs:
           python-version: '3.11'
 
       # --------------------------------------------------
-      # 3. INSTALL MICROSOFT ODBC DRIVER 18 (CI-SAFE)
+      # 3. INSTALL MICROSOFT ODBC DRIVER 18
       # --------------------------------------------------
       - name: Install Microsoft ODBC Driver 18
         run: |
@@ -67,9 +79,19 @@ jobs:
           pip install -r etl/requirements.txt
 
       # --------------------------------------------------
-      # 5. RUN NBA ETL
+      # 5. BUILD CLI FLAGS
+      # --------------------------------------------------
+      - name: Build CLI flags
+        id: flags
+        run: |
+          FLAGS="--days ${{ github.event.inputs.days || '10' }}"
+          [ "${{ github.event.inputs.load_rosters }}" = "true" ] && FLAGS="$FLAGS --load-rosters"
+          [ "${{ github.event.inputs.skip_pt_stats }}" = "true" ] && FLAGS="$FLAGS --skip-pt-stats"
+          [ "${{ github.event.inputs.skip_lineups }}"  = "true" ] && FLAGS="$FLAGS --skip-lineups"
+          echo "flags=$FLAGS" >> $GITHUB_OUTPUT
+
+      # --------------------------------------------------
+      # 6. RUN NBA ETL
       # --------------------------------------------------
       - name: Run NBA ETL
-        run: |
-          python etl/nba_etl.py \
-            --days ${{ github.event.inputs.batch_size || 10 }}
+        run: python etl/nba_etl.py ${{ steps.flags.outputs.flags }}
