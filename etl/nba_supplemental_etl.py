@@ -1,37 +1,69 @@
 """
 nba_supplemental_etl.py
 
-Loads four NBA tables sourced from the Power Query M queries in nba_M_queries.docx.
-Translated faithfully to Python / GitHub Actions pattern.
+Direct translation of the Power Query M queries in nba_M_queries.docx.
+Every endpoint, field name, parameter, and column is taken from the M source.
+No redesign. No substitutions.
 
 Tables written
-  nba.schedule            Full season schedule from scheduleleaguev2.
-                          Truncate-and-reload every run (mirrors M query behavior).
-  nba.daily_lineups       Starter / bench / inactive status per player per game.
-                          Incremental by game_date.
-  nba.player_game_logs    Per-period player stats from playergamelogs endpoint.
-                          Incremental by game_date. Covers Q1/Q2/Q3/Q4/OT.
-  nba.player_rebound_chances_v2
-                          Full rebound chances detail from leaguedashptstats.
-                          Incremental by game_date. Superset of the columns in
-                          nba.player_rebound_chances (which is written by nba_etl.py).
+  nba.all_players             commonallplayers, active roster only.
+                              Source: PLAYER M query.
+                              Truncate-and-reload every run.
+  nba.schedule                scheduleleaguev2, full season.
+                              Source: SCHEDULE M query.
+                              Truncate-and-reload every run.
+  nba.daily_lineups           00_daily_lineups_{YYYYMMDD}.json
+                              Source: DailyLineups / fnGetLineups M queries.
+                              Incremental by game_date.
+  nba.player_game_logs        playergamelogs per period (1Q/2Q/3Q/4Q/OT).
+                              Source: BoxScores / fnGetBoxScore M queries.
+                              Incremental by game_date. DateTo left empty,
+                              MinDate strategy mirrors M batch logic exactly.
+  nba.player_rebound_chances  leaguedashptstats PtMeasureType=Rebounding.
+                              Source: RebChances M query.
+                              Incremental by game_date.
+  nba.player_passing_stats    leaguedashptstats PtMeasureType=Passing.
+                              Source: PotentialAst M query.
+                              Incremental by game_date.
 
-Design notes
-  schedule      - Direct HTTP, no proxy. scheduleleaguev2 works from datacenter IPs.
-  lineups       - Direct HTTP, no proxy. Static JSON file endpoint.
-  player_game_logs - Direct HTTP, no proxy. playergamelogs works from datacenter IPs.
-  rebound_chances_v2 - Direct HTTP, no proxy. leaguedashptstats is called directly
-                       with browser headers and explicit proxies=None to bypass any
-                       proxy env vars. Validated to work without residential proxy
-                       when headers are set correctly.
+M query translation notes
+  PLAYER       endpoint: stats.nba.com/stats/commonallplayers
+               fields: PERSON_ID, DISPLAY_FIRST_LAST, TEAM_ID, TEAM_NAME,
+                       TEAM_ABBREVIATION, ROSTERSTATUS, FROM_YEAR, TO_YEAR
+               filter: ROSTERSTATUS = 1 (active only)
+
+  SCHEDULE     endpoint: stats.nba.com/stats/scheduleleaguev2
+               drills into leagueSchedule.gameDates[].games[]
+               home/away nested under homeTeam{} / awayTeam{}
+
+  fnGetLineups endpoint: stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
+               gameDate arg is YYYYMMDD string
+               starterStatus logic: position not null/empty -> Starter,
+               rosterStatus == Active -> Bench, else Inactive
+
+  fnGetBoxScore endpoint: stats.nba.com/stats/playergamelogs
+               period labels in M: 1Q, 2Q, 3Q, 4Q, OT
+               OT params: GameSegment=Overtime, Period=""
+               DateTo always empty (M leaves it blank)
+               batch strategy: MinDate of batch, fetch everything >= MinDate
+               per period, filter down to batch dates in Python
+
+  RebChances   endpoint: stats.nba.com/stats/leaguedashptstats
+               PtMeasureType=Rebounding, DateFrom=DateTo=single date
+
+  PotentialAst endpoint: stats.nba.com/stats/leaguedashptstats
+               PtMeasureType=Passing, DateFrom=DateTo=single date
 
 Args
-  --days N       Game dates to process per incremental run (default 10).
-  --season S     Season string, e.g. 2025-26 (default 2025-26).
-  --skip-schedule    Skip schedule reload.
-  --skip-lineups     Skip lineup ingestion.
-  --skip-gamelogs    Skip player game log ingestion.
-  --skip-rebounding  Skip rebound chances ingestion.
+  --days N          Game dates to process per incremental run (default 10,
+                    matches M BatchSize). BoxScores use HalfBatch = days // 2
+                    matching M HalfBatch logic.
+  --season S        Season string e.g. 2025-26 (default 2025-26).
+  --skip-players    Skip all_players reload.
+  --skip-schedule   Skip schedule reload.
+  --skip-lineups    Skip lineup ingestion.
+  --skip-gamelogs   Skip player game log ingestion.
+  --skip-pt-stats   Skip rebounding and passing stats ingestion.
 
 Secrets required
   AZURE_SQL_SERVER, AZURE_SQL_DATABASE, AZURE_SQL_USERNAME, AZURE_SQL_PASSWORD
@@ -42,7 +74,7 @@ import math
 import os
 import time
 import logging
-from datetime import date, datetime
+from datetime import date
 
 import pandas as pd
 import requests
@@ -61,17 +93,16 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SEASON_DEFAULT = "2025-26"
-BATCH_DEFAULT  = 10          # matches M query BatchSize
+SEASON_DEFAULT   = "2025-26"
+BATCH_DEFAULT    = 10        # M BatchSize = 10
+API_DELAY        = 1.5
+RETRY_COUNT      = 3
+RETRY_WAIT       = 30
+PT_BETWEEN_DELAY = 15        # between leaguedashptstats calls
 
-API_DELAY      = 1.5         # seconds between calls
-RETRY_COUNT    = 3
-RETRY_WAIT     = 30          # seconds on transient failure
-PT_BETWEEN_DELAY = 15        # seconds between leaguedashptstats calls
-
-# Explicit no-proxy dict.  Prevents inheriting NBA_PROXY_URL env var which would
-# cause leaguedashptstats and playergamelogs to route through the residential proxy
-# unnecessarily (these endpoints work fine from datacenter IPs with browser headers).
+# Explicit no-proxy: prevents NBA_PROXY_URL env var from routing these calls
+# through the residential proxy. All endpoints in this script work from
+# datacenter IPs with the browser headers below.
 NO_PROXY = {"http": None, "https": None}
 
 NBA_HEADERS = {
@@ -84,12 +115,14 @@ NBA_HEADERS = {
     "Referer":             "https://www.nba.com/",
 }
 
+# Period labels exactly as M uses them: 1Q 2Q 3Q 4Q OT
+# period_value is the Period= param; period_label is what gets stored.
 PERIODS = [
-    ("1", "Q1"),
-    ("2", "Q2"),
-    ("3", "Q3"),
-    ("4", "Q4"),
-    ("OT", "OT"),   # OT: GameSegment=Overtime, Period="" in the API call
+    ("1", "1Q"),
+    ("2", "2Q"),
+    ("3", "3Q"),
+    ("4", "4Q"),
+    ("",  "OT"),   # OT: Period="" + GameSegment="Overtime"
 ]
 
 # ---------------------------------------------------------------------------
@@ -97,10 +130,33 @@ PERIODS = [
 # ---------------------------------------------------------------------------
 DDL = [
     # ------------------------------------------------------------------
+    # nba.all_players
+    # Source: commonallplayers, active players only (ROSTERSTATUS=1).
+    # Matches M PLAYER query field list exactly.
+    # Truncate-and-reload every run (M rebuilds from scratch each refresh).
+    # Separate from nba.players which uses commonteamroster in nba_etl.py.
+    # ------------------------------------------------------------------
+    """
+    IF NOT EXISTS (SELECT 1 FROM sys.objects
+                   WHERE object_id = OBJECT_ID(N'nba.all_players') AND type = 'U')
+    CREATE TABLE nba.all_players (
+        player_id            BIGINT        NOT NULL,
+        player_name          VARCHAR(100)  NOT NULL,
+        team_id              BIGINT        NULL,
+        team_name            VARCHAR(60)   NULL,
+        team_abbreviation    CHAR(3)       NULL,
+        roster_status        TINYINT       NULL,
+        from_year            SMALLINT      NULL,
+        to_year              SMALLINT      NULL,
+        created_at           DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+        CONSTRAINT pk_nba_all_players PRIMARY KEY (player_id)
+    )
+    """,
+    # ------------------------------------------------------------------
     # nba.schedule
-    # Full season schedule.  Truncated and reloaded every run.
-    # gameId is the natural key.  No FK to nba.games intentionally --
-    # schedule may include future games not yet in nba.games.
+    # Source: scheduleleaguev2 -> leagueSchedule.gameDates[].games[].
+    # Matches M SCHEDULE query field list exactly.
+    # Truncate-and-reload every run.
     # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
@@ -125,7 +181,7 @@ DDL = [
         if_necessary         BIT           NULL,
         series_game_number   VARCHAR(5)    NULL,
         series_text          VARCHAR(40)   NULL,
-        home_team_id         BIGINT        NULL,
+        home_team_id         INT           NULL,
         home_team_city       VARCHAR(30)   NULL,
         home_team_name       VARCHAR(30)   NULL,
         home_team_tricode    CHAR(3)       NULL,
@@ -133,7 +189,7 @@ DDL = [
         home_losses          SMALLINT      NULL,
         home_score           SMALLINT      NULL,
         home_seed            SMALLINT      NULL,
-        away_team_id         BIGINT        NULL,
+        away_team_id         INT           NULL,
         away_team_city       VARCHAR(30)   NULL,
         away_team_name       VARCHAR(30)   NULL,
         away_team_tricode    CHAR(3)       NULL,
@@ -147,7 +203,8 @@ DDL = [
     """,
     # ------------------------------------------------------------------
     # nba.daily_lineups
-    # Starter / bench / inactive status per player per game date.
+    # Source: 00_daily_lineups_{YYYYMMDD}.json -> games[].homeTeam/awayTeam.players[].
+    # Matches M fnGetLineups / DailyLineups field list exactly.
     # Incremental by game_date.
     # ------------------------------------------------------------------
     """
@@ -169,8 +226,9 @@ DDL = [
     """,
     # ------------------------------------------------------------------
     # nba.player_game_logs
-    # Per-period player stats from playergamelogs.
-    # Incremental by game_date.  Period values: Q1 Q2 Q3 Q4 OT.
+    # Source: playergamelogs per period.
+    # Period values: 1Q 2Q 3Q 4Q OT (matches M fnGetBoxScore periodLabel exactly).
+    # Incremental by game_date.
     # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
@@ -216,18 +274,19 @@ DDL = [
     )
     """,
     # ------------------------------------------------------------------
-    # nba.player_rebound_chances_v2
-    # Full rebound chances detail.  Superset of nba.player_rebound_chances.
+    # nba.player_rebound_chances
+    # Source: leaguedashptstats PtMeasureType=Rebounding.
+    # Matches M RebChances field list exactly.
     # Incremental by game_date.
     # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
-                   WHERE object_id = OBJECT_ID(N'nba.player_rebound_chances_v2') AND type = 'U')
-    CREATE TABLE nba.player_rebound_chances_v2 (
-        player_id            BIGINT        NOT NULL,
+                   WHERE object_id = OBJECT_ID(N'nba.player_rebound_chances') AND type = 'U')
+    CREATE TABLE nba.player_rebound_chances (
         game_date            DATE          NOT NULL,
+        player_id            BIGINT        NOT NULL,
         player_name          VARCHAR(100)  NULL,
-        team_id              BIGINT        NULL,
+        team_id              INT           NULL,
         team_tricode         CHAR(3)       NULL,
         oreb                 SMALLINT      NULL,
         oreb_contest         SMALLINT      NULL,
@@ -257,7 +316,35 @@ DDL = [
         reb_chance_pct_adj   DECIMAL(6,4)  NULL,
         avg_reb_dist         DECIMAL(6,2)  NULL,
         created_at           DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
-        CONSTRAINT pk_nba_prc2 PRIMARY KEY (player_id, game_date)
+        CONSTRAINT pk_nba_prc PRIMARY KEY (player_id, game_date)
+    )
+    """,
+    # ------------------------------------------------------------------
+    # nba.player_passing_stats
+    # Source: leaguedashptstats PtMeasureType=Passing.
+    # Matches M PotentialAst field list exactly.
+    # Incremental by game_date.
+    # ------------------------------------------------------------------
+    """
+    IF NOT EXISTS (SELECT 1 FROM sys.objects
+                   WHERE object_id = OBJECT_ID(N'nba.player_passing_stats') AND type = 'U')
+    CREATE TABLE nba.player_passing_stats (
+        game_date            DATE          NOT NULL,
+        player_id            BIGINT        NOT NULL,
+        player_name          VARCHAR(100)  NULL,
+        team_id              INT           NULL,
+        team_tricode         CHAR(3)       NULL,
+        passes_made          SMALLINT      NULL,
+        passes_received      SMALLINT      NULL,
+        ft_ast               SMALLINT      NULL,
+        secondary_ast        SMALLINT      NULL,
+        potential_ast        SMALLINT      NULL,
+        ast_pts_created      SMALLINT      NULL,
+        ast_adj              SMALLINT      NULL,
+        ast_to_pass_pct      DECIMAL(6,4)  NULL,
+        ast_to_pass_pct_adj  DECIMAL(6,4)  NULL,
+        created_at           DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+        CONSTRAINT pk_nba_pps PRIMARY KEY (player_id, game_date)
     )
     """,
 ]
@@ -269,8 +356,10 @@ DDL_INDEXES = [
     "CREATE NONCLUSTERED INDEX ix_nba_daily_lineups_game_date ON nba.daily_lineups (game_date)",
     "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_nba_pgl_game_date') "
     "CREATE NONCLUSTERED INDEX ix_nba_pgl_game_date ON nba.player_game_logs (game_date)",
-    "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_nba_prc2_game_date') "
-    "CREATE NONCLUSTERED INDEX ix_nba_prc2_game_date ON nba.player_rebound_chances_v2 (game_date)",
+    "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_nba_prc_game_date') "
+    "CREATE NONCLUSTERED INDEX ix_nba_prc_game_date ON nba.player_rebound_chances (game_date)",
+    "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ix_nba_pps_game_date') "
+    "CREATE NONCLUSTERED INDEX ix_nba_pps_game_date ON nba.player_passing_stats (game_date)",
 ]
 
 
@@ -314,7 +403,7 @@ def ensure_tables(engine):
 
 
 # ---------------------------------------------------------------------------
-# Safe type helpers (mirrors nba_etl.py conventions)
+# Type helpers
 # ---------------------------------------------------------------------------
 def safe_int(val):
     try:
@@ -373,7 +462,7 @@ def safe_date(val):
 
 
 # ---------------------------------------------------------------------------
-# MERGE upsert (same pattern as nba_etl.py)
+# Upsert
 # ---------------------------------------------------------------------------
 def _clean_val(v):
     import numpy as np
@@ -399,11 +488,11 @@ def _clean_val(v):
 def upsert(df, engine, schema, table, pk_cols):
     if df is None or df.empty:
         return
-    records  = [{col: _clean_val(val) for col, val in row.items()}
-                for row in df.to_dict(orient="records")]
-    non_pk   = [c for c in df.columns if c not in pk_cols]
-    col_list = ", ".join(df.columns)
-    val_list = ", ".join(f":{c}" for c in df.columns)
+    records   = [{col: _clean_val(val) for col, val in row.items()}
+                 for row in df.to_dict(orient="records")]
+    non_pk    = [c for c in df.columns if c not in pk_cols]
+    col_list  = ", ".join(df.columns)
+    val_list  = ", ".join(f":{c}" for c in df.columns)
     on_clause = " AND ".join(f"tgt.{c} = src.{c}" for c in pk_cols)
     update_set = (
         ", ".join(f"tgt.{c} = src.{c}" for c in non_pk)
@@ -422,10 +511,9 @@ def upsert(df, engine, schema, table, pk_cols):
 
 
 # ---------------------------------------------------------------------------
-# HTTP helper
+# HTTP
 # ---------------------------------------------------------------------------
 def _get(url, label, params=None, timeout=60):
-    """Direct HTTP GET with browser headers and explicit no-proxy."""
     for attempt in range(1, RETRY_COUNT + 1):
         try:
             resp = requests.get(
@@ -465,9 +553,6 @@ def _parse_result_set(data, index=0):
         return None
 
 
-# ---------------------------------------------------------------------------
-# Existing key helpers
-# ---------------------------------------------------------------------------
 def get_existing_dates(engine, schema, table, col="game_date"):
     try:
         with engine.connect() as conn:
@@ -480,16 +565,13 @@ def get_existing_dates(engine, schema, table, col="game_date"):
 
 
 # ---------------------------------------------------------------------------
-# Desired game dates from schedule
+# Game date list  (M: gameList query)
+# Returns sorted list of date objects strictly before today.
 # ---------------------------------------------------------------------------
 def get_season_game_dates(season):
-    """
-    Fetches scheduleleaguev2 and returns a sorted list of distinct game dates
-    (as date objects) that are strictly before today.
-    Mirrors the M gameDates / gameList queries.
-    """
     url  = "https://stats.nba.com/stats/scheduleleaguev2"
-    data = _get(url, "scheduleleaguev2", params={"Season": season, "LeagueID": "00"})
+    data = _get(url, "scheduleleaguev2 (game dates)",
+                params={"Season": season, "LeagueID": "00"})
     if data is None:
         return []
     today = date.today()
@@ -498,6 +580,7 @@ def get_season_game_dates(season):
         raw = gd_entry.get("gameDate")
         if not raw:
             continue
+        # M parses "10/02/2025" -> date. pd.to_datetime handles both formats.
         d = safe_date(raw[:10])
         if d and d < today:
             dates.append(d)
@@ -505,90 +588,135 @@ def get_season_game_dates(season):
 
 
 # ===========================================================================
-# SCHEDULE  (nba.schedule)
+# ALL PLAYERS  (M: PLAYER query)
+# Endpoint: commonallplayers
+# Fields: PERSON_ID, DISPLAY_FIRST_LAST, TEAM_ID, TEAM_NAME,
+#         TEAM_ABBREVIATION, ROSTERSTATUS, FROM_YEAR, TO_YEAR
+# Filter: ROSTERSTATUS = 1
+# Behavior: truncate-and-reload (M rebuilt from scratch each refresh)
+# ===========================================================================
+def load_all_players(engine, season):
+    log.info(f"Loading nba.all_players from commonallplayers season={season}")
+    url  = "https://stats.nba.com/stats/commonallplayers"
+    data = _get(url, "commonallplayers",
+                params={"IsOnlyCurrentSeason": "1", "LeagueID": "00",
+                        "Season": season})
+    if data is None:
+        log.error("  commonallplayers failed -- all_players not loaded")
+        return
+
+    df = _parse_result_set(data)
+    if df is None or df.empty:
+        log.warning("  commonallplayers returned no rows")
+        return
+
+    rows = []
+    for _, row in df.iterrows():
+        # M filter: rosterStatus = 1
+        if safe_int(row.get("ROSTERSTATUS")) != 1:
+            continue
+        rows.append({
+            "player_id":          safe_int(row["PERSON_ID"]),
+            "player_name":        safe_str(row["DISPLAY_FIRST_LAST"]),
+            "team_id":            safe_int(row["TEAM_ID"]),
+            "team_name":          safe_str(row["TEAM_NAME"]),
+            "team_abbreviation":  safe_str(row["TEAM_ABBREVIATION"]),
+            "roster_status":      safe_int(row["ROSTERSTATUS"]),
+            "from_year":          safe_int(row["FROM_YEAR"]),
+            "to_year":            safe_int(row["TO_YEAR"]),
+        })
+
+    if not rows:
+        log.warning("  No active players returned")
+        return
+
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM nba.all_players"))
+    df_out = pd.DataFrame(rows)
+    upsert(df_out, engine, "nba", "all_players", ["player_id"])
+    log.info(f"  {len(df_out)} active players loaded")
+
+
+# ===========================================================================
+# SCHEDULE  (M: SCHEDULE query)
+# Endpoint: scheduleleaguev2
+# Drills: leagueSchedule.gameDates[].games[]
+# Behavior: truncate-and-reload
 # ===========================================================================
 def load_schedule(engine, season):
-    """
-    Truncates nba.schedule and reloads the full season.
-    Mirrors the M SCHEDULE query which rebuilt from scratch on each refresh.
-    """
     log.info(f"Loading nba.schedule for season {season}")
     url  = "https://stats.nba.com/stats/scheduleleaguev2"
-    data = _get(url, "scheduleleaguev2", params={"Season": season, "LeagueID": "00"})
+    data = _get(url, "scheduleleaguev2 (schedule)",
+                params={"Season": season, "LeagueID": "00"})
     if data is None:
         log.error("  scheduleleaguev2 failed -- schedule not loaded")
         return
 
     rows = []
     for gd_entry in data.get("leagueSchedule", {}).get("gameDates", []):
-        raw_date = gd_entry.get("gameDate")
+        raw_date  = gd_entry.get("gameDate")
         game_date = safe_date(raw_date[:10]) if raw_date else None
         for g in gd_entry.get("games", []):
             home = g.get("homeTeam", {})
             away = g.get("awayTeam", {})
             rows.append({
-                "game_id":              safe_str(g.get("gameId")),
-                "game_date":            game_date,
-                "game_code":            safe_str(g.get("gameCode")),
-                "game_status":          safe_int(g.get("gameStatus")),
-                "game_status_text":     safe_str(g.get("gameStatusText")),
-                "game_date_time_est":   safe_datetime(g.get("gameDateTimeEst")),
-                "game_date_time_utc":   safe_datetime(g.get("gameDateTimeUTC")),
-                "day_name":             safe_str(g.get("day")),
-                "month_num":            safe_int(g.get("monthNum")),
-                "week_number":          safe_int(g.get("weekNumber")),
-                "week_name":            safe_str(g.get("weekName")),
-                "game_label":           safe_str(g.get("gameLabel")),
-                "game_sub_label":       safe_str(g.get("gameSubLabel")),
-                "arena_name":           safe_str(g.get("arenaName")),
-                "arena_city":           safe_str(g.get("arenaCity")),
-                "arena_state":          safe_str(g.get("arenaState")),
-                "if_necessary":         safe_bool(g.get("ifNecessary")),
-                "series_game_number":   safe_str(g.get("seriesGameNumber")),
-                "series_text":          safe_str(g.get("seriesText")),
-                "home_team_id":         safe_int(home.get("teamId")),
-                "home_team_city":       safe_str(home.get("teamCity")),
-                "home_team_name":       safe_str(home.get("teamName")),
-                "home_team_tricode":    safe_str(home.get("teamTricode")),
-                "home_wins":            safe_int(home.get("wins")),
-                "home_losses":          safe_int(home.get("losses")),
-                "home_score":           safe_int(home.get("score")),
-                "home_seed":            safe_int(home.get("seed")),
-                "away_team_id":         safe_int(away.get("teamId")),
-                "away_team_city":       safe_str(away.get("teamCity")),
-                "away_team_name":       safe_str(away.get("teamName")),
-                "away_team_tricode":    safe_str(away.get("teamTricode")),
-                "away_wins":            safe_int(away.get("wins")),
-                "away_losses":          safe_int(away.get("losses")),
-                "away_score":           safe_int(away.get("score")),
-                "away_seed":            safe_int(away.get("seed")),
+                "game_id":            safe_str(g.get("gameId")),
+                "game_date":          game_date,
+                "game_code":          safe_str(g.get("gameCode")),
+                "game_status":        safe_int(g.get("gameStatus")),
+                "game_status_text":   safe_str(g.get("gameStatusText")),
+                "game_date_time_est": safe_datetime(g.get("gameDateTimeEst")),
+                "game_date_time_utc": safe_datetime(g.get("gameDateTimeUTC")),
+                "day_name":           safe_str(g.get("day")),
+                "month_num":          safe_int(g.get("monthNum")),
+                "week_number":        safe_int(g.get("weekNumber")),
+                "week_name":          safe_str(g.get("weekName")),
+                "game_label":         safe_str(g.get("gameLabel")),
+                "game_sub_label":     safe_str(g.get("gameSubLabel")),
+                "arena_name":         safe_str(g.get("arenaName")),
+                "arena_city":         safe_str(g.get("arenaCity")),
+                "arena_state":        safe_str(g.get("arenaState")),
+                "if_necessary":       safe_bool(g.get("ifNecessary")),
+                "series_game_number": safe_str(g.get("seriesGameNumber")),
+                "series_text":        safe_str(g.get("seriesText")),
+                "home_team_id":       safe_int(home.get("teamId")),
+                "home_team_city":     safe_str(home.get("teamCity")),
+                "home_team_name":     safe_str(home.get("teamName")),
+                "home_team_tricode":  safe_str(home.get("teamTricode")),
+                "home_wins":          safe_int(home.get("wins")),
+                "home_losses":        safe_int(home.get("losses")),
+                "home_score":         safe_int(home.get("score")),
+                "home_seed":          safe_int(home.get("seed")),
+                "away_team_id":       safe_int(away.get("teamId")),
+                "away_team_city":     safe_str(away.get("teamCity")),
+                "away_team_name":     safe_str(away.get("teamName")),
+                "away_team_tricode":  safe_str(away.get("teamTricode")),
+                "away_wins":          safe_int(away.get("wins")),
+                "away_losses":        safe_int(away.get("losses")),
+                "away_score":         safe_int(away.get("score")),
+                "away_seed":          safe_int(away.get("seed")),
             })
 
     if not rows:
         log.warning("  No schedule rows produced")
         return
 
-    # Truncate then reload -- same pattern as reference tables in mlb_etl.py.
-    # DELETE used instead of TRUNCATE because TRUNCATE is blocked when FK
-    # constraints reference the table (even if child tables are empty).
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM nba.schedule"))
-    log.info(f"  Cleared existing schedule rows")
-
-    df = pd.DataFrame(rows)
-    upsert(df, engine, "nba", "schedule", ["game_id"])
-    log.info(f"  {len(df)} schedule rows loaded")
+    upsert(pd.DataFrame(rows), engine, "nba", "schedule", ["game_id"])
+    log.info(f"  {len(rows)} schedule rows loaded")
 
 
 # ===========================================================================
-# LINEUPS  (nba.daily_lineups)
+# DAILY LINEUPS  (M: DailyLineups / fnGetLineups)
+# Endpoint: stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
+# gameDate arg: YYYYMMDD string (matches M fnGetLineups signature)
+# Incremental by game_date.
 # ===========================================================================
 def _fetch_lineups_for_date(game_date):
     """
-    Fetches the daily lineup JSON for a single date.
-    URL format mirrors the M fnGetLineups query:
-      https://stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
-    Returns a list of row dicts or an empty list on failure.
+    game_date: date object. Converted to YYYYMMDD string to build the URL,
+    matching M's fnGetLineups(gameDate as text) signature exactly.
     """
     date_str = game_date.strftime("%Y%m%d")
     url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_str}.json"
@@ -602,15 +730,15 @@ def _fetch_lineups_for_date(game_date):
         if game_id is None:
             continue
         for side, team_key in [("Home", "homeTeam"), ("Away", "awayTeam")]:
-            team = g.get(team_key, {})
+            team      = g.get(team_key, {})
             team_abbr = safe_str(team.get("teamAbbreviation"))
             for p in team.get("players", []):
                 position      = safe_str(p.get("position"))
                 roster_status = safe_str(p.get("rosterStatus"))
-                # Mirror M starterStatus logic exactly:
-                #   if position is not null and not empty -> Starter
-                #   elif rosterStatus == "Active"         -> Bench
-                #   else                                  -> Inactive
+                # M starterStatus logic (translated exactly):
+                #   if position <> null and position <> "" -> "Starter"
+                #   else if rosterStatus = "Active"        -> "Bench"
+                #   else                                   -> "Inactive"
                 if position:
                     starter_status = "Starter"
                 elif roster_status == "Active":
@@ -633,10 +761,10 @@ def _fetch_lineups_for_date(game_date):
 
 def load_lineups(engine, season, days):
     log.info("Loading nba.daily_lineups")
-    all_dates     = get_season_game_dates(season)
-    existing      = get_existing_dates(engine, "nba", "daily_lineups")
-    missing       = sorted([d for d in all_dates if d not in existing])
-    batch         = missing[:days]
+    all_dates = get_season_game_dates(season)
+    existing  = get_existing_dates(engine, "nba", "daily_lineups")
+    missing   = sorted([d for d in all_dates if d not in existing])
+    batch     = missing[:days]
 
     if not batch:
         log.info("  daily_lineups: all dates loaded.")
@@ -647,36 +775,41 @@ def load_lineups(engine, season, days):
     for d in batch:
         rows = _fetch_lineups_for_date(d)
         if not rows:
-            log.info(f"  {d}: no data (game may not have lineup file yet)")
+            log.info(f"  {d}: no lineup file (may not exist for this date)")
             continue
         df = pd.DataFrame(rows)
-        upsert(df, engine, "nba", "daily_lineups", ["game_id", "player_name", "home_away"])
+        upsert(df, engine, "nba", "daily_lineups",
+               ["game_id", "player_name", "home_away"])
         total_rows += len(df)
-        log.info(f"  {d}: {len(df)} lineup rows")
+        log.info(f"  {d}: {len(df)} rows")
 
     log.info(f"  daily_lineups complete: {total_rows} rows across {len(batch)} dates")
 
 
 # ===========================================================================
-# PLAYER GAME LOGS  (nba.player_game_logs)
+# PLAYER GAME LOGS  (M: BoxScores / fnGetBoxScore)
+# Endpoint: playergamelogs
+# Period labels: 1Q 2Q 3Q 4Q OT  (exactly as M stores them)
+# OT params: GameSegment=Overtime, Period=""
+# DateTo: empty string  (M leaves DateTo blank -- returns all games >= DateFrom)
+# Batch strategy: take MinDate of the batch, fetch all >= MinDate per period,
+#   then filter down to only batch dates. Mirrors M HalfBatch / MinDate logic.
+# Incremental by game_date.
 # ===========================================================================
-def _fetch_game_logs_for_date(game_date, season, period_val, period_label):
+def _fetch_game_logs_for_period(min_date, season, period_val, period_label):
     """
-    Calls playergamelogs for a single date and period.
-    Mirrors the M fnGetBoxScore query exactly:
-      - For OT: GameSegment=Overtime, Period="" (blank)
-      - For Q1-Q4: Period=1/2/3/4, no GameSegment
-      - DateFrom=DateTo=game_date (one date per call)
-      - DateTo is always empty in M, but we use DateFrom=DateTo for clean isolation
+    Fetches playergamelogs for all games on or after min_date for one period.
+    DateTo is intentionally left empty, mirroring M fnGetBoxScore exactly.
+    Returns list of row dicts.
     """
-    fmt_date = game_date.strftime("%m/%d/%Y")
+    fmt_date = min_date.strftime("%m/%d/%Y")
     params = {
-        "Season":        season,
-        "SeasonType":    "Regular Season",
-        "PlayerOrTeam":  "P",
-        "MeasureType":   "Base",
-        "DateFrom":      fmt_date,
-        "DateTo":        fmt_date,
+        "Season":       season,
+        "SeasonType":   "Regular Season",
+        "PlayerOrTeam": "P",
+        "MeasureType":  "Base",
+        "DateFrom":     fmt_date,
+        "DateTo":       "",          # M leaves DateTo empty
     }
     if period_label == "OT":
         params["GameSegment"] = "Overtime"
@@ -686,7 +819,7 @@ def _fetch_game_logs_for_date(game_date, season, period_val, period_label):
 
     data = _get(
         "https://stats.nba.com/stats/playergamelogs",
-        f"playergamelogs {game_date} {period_label}",
+        f"playergamelogs {min_date} {period_label}",
         params=params,
         timeout=60,
     )
@@ -697,40 +830,40 @@ def _fetch_game_logs_for_date(game_date, season, period_val, period_label):
     rows = []
     for _, row in df.iterrows():
         rows.append({
-            "season_year":   safe_str(row.get("SEASON_YEAR")),
-            "player_id":     safe_int(row.get("PLAYER_ID")),
-            "player_name":   safe_str(row.get("PLAYER_NAME")),
-            "team_id":       safe_int(row.get("TEAM_ID")),
-            "team_tricode":  safe_str(row.get("TEAM_ABBREVIATION")),
-            "game_id":       safe_str(row.get("GAME_ID")),
-            "game_date":     safe_date(row.get("GAME_DATE")),
-            "matchup":       safe_str(row.get("MATCHUP")),
-            "period":        period_label,
-            "minutes":       safe_float(row.get("MIN")),
-            "minutes_sec":   safe_str(row.get("MIN_SEC")),
-            "fgm":           safe_int(row.get("FGM")),
-            "fga":           safe_int(row.get("FGA")),
-            "fg_pct":        safe_float(row.get("FG_PCT")),
-            "fg3m":          safe_int(row.get("FG3M")),
-            "fg3a":          safe_int(row.get("FG3A")),
-            "fg3_pct":       safe_float(row.get("FG3_PCT")),
-            "ftm":           safe_int(row.get("FTM")),
-            "fta":           safe_int(row.get("FTA")),
-            "ft_pct":        safe_float(row.get("FT_PCT")),
-            "oreb":          safe_int(row.get("OREB")),
-            "dreb":          safe_int(row.get("DREB")),
-            "reb":           safe_int(row.get("REB")),
-            "ast":           safe_int(row.get("AST")),
-            "tov":           safe_int(row.get("TOV")),
-            "stl":           safe_int(row.get("STL")),
-            "blk":           safe_int(row.get("BLK")),
-            "blka":          safe_int(row.get("BLKA")),
-            "pf":            safe_int(row.get("PF")),
-            "pfd":           safe_int(row.get("PFD")),
-            "pts":           safe_int(row.get("PTS")),
-            "plus_minus":    safe_int(row.get("PLUS_MINUS")),
-            "dd2":           safe_int(row.get("DD2")),
-            "td3":           safe_int(row.get("TD3")),
+            "season_year":    safe_str(row.get("SEASON_YEAR")),
+            "player_id":      safe_int(row.get("PLAYER_ID")),
+            "player_name":    safe_str(row.get("PLAYER_NAME")),
+            "team_id":        safe_int(row.get("TEAM_ID")),
+            "team_tricode":   safe_str(row.get("TEAM_ABBREVIATION")),
+            "game_id":        safe_str(row.get("GAME_ID")),
+            "game_date":      safe_date(row.get("GAME_DATE")),
+            "matchup":        safe_str(row.get("MATCHUP")),
+            "period":         period_label,   # 1Q / 2Q / 3Q / 4Q / OT
+            "minutes":        safe_float(row.get("MIN")),
+            "minutes_sec":    safe_str(row.get("MIN_SEC")),
+            "fgm":            safe_int(row.get("FGM")),
+            "fga":            safe_int(row.get("FGA")),
+            "fg_pct":         safe_float(row.get("FG_PCT")),
+            "fg3m":           safe_int(row.get("FG3M")),
+            "fg3a":           safe_int(row.get("FG3A")),
+            "fg3_pct":        safe_float(row.get("FG3_PCT")),
+            "ftm":            safe_int(row.get("FTM")),
+            "fta":            safe_int(row.get("FTA")),
+            "ft_pct":         safe_float(row.get("FT_PCT")),
+            "oreb":           safe_int(row.get("OREB")),
+            "dreb":           safe_int(row.get("DREB")),
+            "reb":            safe_int(row.get("REB")),
+            "ast":            safe_int(row.get("AST")),
+            "tov":            safe_int(row.get("TOV")),
+            "stl":            safe_int(row.get("STL")),
+            "blk":            safe_int(row.get("BLK")),
+            "blka":           safe_int(row.get("BLKA")),
+            "pf":             safe_int(row.get("PF")),
+            "pfd":            safe_int(row.get("PFD")),
+            "pts":            safe_int(row.get("PTS")),
+            "plus_minus":     safe_int(row.get("PLUS_MINUS")),
+            "dd2":            safe_int(row.get("DD2")),
+            "td3":            safe_int(row.get("TD3")),
             "available_flag": safe_int(row.get("AVAILABLE_FLAG")),
         })
     return rows
@@ -738,72 +871,71 @@ def _fetch_game_logs_for_date(game_date, season, period_val, period_label):
 
 def load_game_logs(engine, season, days):
     """
-    Incremental load of nba.player_game_logs.
-    Processes --days oldest missing dates.
-    For each date, makes 5 API calls (Q1/Q2/Q3/Q4/OT).
-    M BatchSize was 10 but HalfBatch = 5 was applied for box scores because
-    5 calls per date (5 periods) is expensive.  We use days directly as the
-    date batch size here; tune --days down if rate limiting occurs.
+    Mirrors M BoxScores batch logic exactly:
+      HalfBatch = BatchSize // 2  (M uses HalfBatch for box scores)
+      MinDate   = minimum date in the batch
+      Fetch all 5 periods from MinDate forward, filter to batch dates only.
     """
     log.info("Loading nba.player_game_logs")
     all_dates = get_season_game_dates(season)
     existing  = get_existing_dates(engine, "nba", "player_game_logs")
     missing   = sorted([d for d in all_dates if d not in existing])
-    batch     = missing[:days]
+
+    # M: HalfBatch = BatchSize // 2, minimum 1
+    half_batch = max(1, days // 2)
+    batch      = missing[:half_batch]
 
     if not batch:
         log.info("  player_game_logs: all dates loaded.")
         return
 
-    log.info(f"  {len(missing)} dates missing, processing {len(batch)}")
-    total_rows = 0
-    for d in batch:
-        date_rows = []
-        for period_val, period_label in PERIODS:
-            rows = _fetch_game_logs_for_date(d, season, period_val, period_label)
-            date_rows.extend(rows)
-            if not rows:
-                log.info(f"  {d} {period_label}: no data")
-            else:
-                log.info(f"  {d} {period_label}: {len(rows)} rows")
-            time.sleep(API_DELAY)
+    min_date   = min(batch)
+    batch_set  = set(batch)
+    log.info(f"  {len(missing)} dates missing, HalfBatch={half_batch}, "
+             f"MinDate={min_date}, fetching {len(batch)} dates")
 
-        if date_rows:
-            df = pd.DataFrame(date_rows)
-            upsert(df, engine, "nba", "player_game_logs",
-                   ["game_id", "player_id", "period"])
-            total_rows += len(df)
+    all_rows = []
+    for period_val, period_label in PERIODS:
+        rows = _fetch_game_logs_for_period(min_date, season, period_val, period_label)
+        # Filter to only the batch dates (M fetches >= MinDate then combines
+        # with existing history; we filter here since we only want the batch)
+        rows = [r for r in rows if r["game_date"] in batch_set]
+        log.info(f"  {period_label}: {len(rows)} rows")
+        all_rows.extend(rows)
+        time.sleep(API_DELAY)
 
-    log.info(f"  player_game_logs complete: {total_rows} rows across {len(batch)} dates")
+    if all_rows:
+        df = pd.DataFrame(all_rows)
+        upsert(df, engine, "nba", "player_game_logs",
+               ["game_id", "player_id", "period"])
+        log.info(f"  player_game_logs complete: {len(df)} rows")
+    else:
+        log.info("  player_game_logs: no rows returned for batch")
 
 
 # ===========================================================================
-# REBOUND CHANCES V2  (nba.player_rebound_chances_v2)
+# REBOUND CHANCES  (M: RebChances)
+# Endpoint: leaguedashptstats, PtMeasureType=Rebounding
+# DateFrom=DateTo=single date (M passes each date individually)
+# Incremental by game_date.
 # ===========================================================================
 def _fetch_rebound_chances_for_date(game_date, season):
-    """
-    Calls leaguedashptstats with PtMeasureType=Rebounding for a single date.
-    Mirrors the M RebChances FetchDate function exactly.
-    """
     fmt_date = game_date.strftime("%m/%d/%Y")
     params = {
-        "Season":          season,
-        "SeasonType":      "Regular Season",
-        "PlayerOrTeam":    "Player",
-        "PtMeasureType":   "Rebounding",
-        "PerMode":         "Totals",
-        "LastNGames":      "0",
-        "Month":           "0",
-        "OpponentTeamID":  "0",
-        "DateFrom":        fmt_date,
-        "DateTo":          fmt_date,
+        "Season":         season,
+        "SeasonType":     "Regular Season",
+        "PlayerOrTeam":   "Player",
+        "PtMeasureType":  "Rebounding",
+        "PerMode":        "Totals",
+        "LastNGames":     "0",
+        "Month":          "0",
+        "OpponentTeamID": "0",
+        "DateFrom":       fmt_date,
+        "DateTo":         fmt_date,
     }
-    data = _get(
-        "https://stats.nba.com/stats/leaguedashptstats",
-        f"leaguedashptstats Rebounding {game_date}",
-        params=params,
-        timeout=60,
-    )
+    data = _get("https://stats.nba.com/stats/leaguedashptstats",
+                f"leaguedashptstats Rebounding {game_date}",
+                params=params, timeout=60)
     df = _parse_result_set(data)
     if df is None or df.empty:
         return []
@@ -814,8 +946,8 @@ def _fetch_rebound_chances_for_date(game_date, season):
         if pid is None:
             continue
         rows.append({
-            "player_id":           pid,
             "game_date":           game_date,
+            "player_id":           pid,
             "player_name":         safe_str(row.get("PLAYER_NAME")),
             "team_id":             safe_int(row.get("TEAM_ID")),
             "team_tricode":        safe_str(row.get("TEAM_ABBREVIATION")),
@@ -850,35 +982,112 @@ def _fetch_rebound_chances_for_date(game_date, season):
     return rows
 
 
-def load_rebound_chances_v2(engine, season, days):
-    log.info("Loading nba.player_rebound_chances_v2")
+# ===========================================================================
+# PASSING STATS  (M: PotentialAst)
+# Endpoint: leaguedashptstats, PtMeasureType=Passing
+# DateFrom=DateTo=single date
+# Incremental by game_date.
+# ===========================================================================
+def _fetch_passing_stats_for_date(game_date, season):
+    fmt_date = game_date.strftime("%m/%d/%Y")
+    params = {
+        "Season":         season,
+        "SeasonType":     "Regular Season",
+        "PlayerOrTeam":   "Player",
+        "PtMeasureType":  "Passing",
+        "PerMode":        "Totals",
+        "LastNGames":     "0",
+        "Month":          "0",
+        "OpponentTeamID": "0",
+        "DateFrom":       fmt_date,
+        "DateTo":         fmt_date,
+    }
+    data = _get("https://stats.nba.com/stats/leaguedashptstats",
+                f"leaguedashptstats Passing {game_date}",
+                params=params, timeout=60)
+    df = _parse_result_set(data)
+    if df is None or df.empty:
+        return []
+
+    rows = []
+    for _, row in df.iterrows():
+        pid = safe_int(row.get("PLAYER_ID"))
+        if pid is None:
+            continue
+        rows.append({
+            "game_date":          game_date,
+            "player_id":          pid,
+            "player_name":        safe_str(row.get("PLAYER_NAME")),
+            "team_id":            safe_int(row.get("TEAM_ID")),
+            "team_tricode":       safe_str(row.get("TEAM_ABBREVIATION")),
+            "passes_made":        safe_int(row.get("PASSES_MADE")),
+            "passes_received":    safe_int(row.get("PASSES_RECEIVED")),
+            "ft_ast":             safe_int(row.get("FT_AST")),
+            "secondary_ast":      safe_int(row.get("SECONDARY_AST")),
+            "potential_ast":      safe_int(row.get("POTENTIAL_AST")),
+            "ast_pts_created":    safe_int(row.get("AST_PTS_CREATED")),
+            "ast_adj":            safe_int(row.get("AST_ADJ")),
+            "ast_to_pass_pct":    safe_float(row.get("AST_TO_PASS_PCT")),
+            "ast_to_pass_pct_adj": safe_float(row.get("AST_TO_PASS_PCT_ADJ")),
+        })
+    return rows
+
+
+def load_pt_stats(engine, season, days):
+    """
+    Loads both rebound chances and passing stats.
+    Each date makes two leaguedashptstats calls with PT_BETWEEN_DELAY between them,
+    matching M's sequential fetch pattern.
+    """
+    log.info("Loading nba.player_rebound_chances and nba.player_passing_stats")
+
     all_dates = get_season_game_dates(season)
-    existing  = get_existing_dates(engine, "nba", "player_rebound_chances_v2")
-    missing   = sorted([d for d in all_dates if d not in existing])
-    batch     = missing[:days]
+
+    reb_existing  = get_existing_dates(engine, "nba", "player_rebound_chances")
+    pass_existing = get_existing_dates(engine, "nba", "player_passing_stats")
+    # Use rebound chances as the state driver (M used the same gameList for both)
+    missing = sorted([d for d in all_dates
+                      if d not in reb_existing or d not in pass_existing])
+    batch   = missing[:days]
 
     if not batch:
-        log.info("  player_rebound_chances_v2: all dates loaded.")
+        log.info("  pt stats: all dates loaded.")
         return
 
     log.info(f"  {len(missing)} dates missing, processing {len(batch)}")
-    total_rows = 0
+    reb_total = pass_total = 0
+
     for i, d in enumerate(batch):
-        rows = _fetch_rebound_chances_for_date(d, season)
-        if not rows:
-            log.info(f"  {d}: no rebound chances data")
+        # Rebounding
+        reb_rows = _fetch_rebound_chances_for_date(d, season)
+        if reb_rows:
+            upsert(pd.DataFrame(reb_rows), engine,
+                   "nba", "player_rebound_chances", ["player_id", "game_date"])
+            reb_total += len(reb_rows)
+            log.info(f"  {d} rebounding: {len(reb_rows)} rows")
         else:
-            df = pd.DataFrame(rows)
-            upsert(df, engine, "nba", "player_rebound_chances_v2",
-                   ["player_id", "game_date"])
-            total_rows += len(df)
-            log.info(f"  {d}: {len(df)} rows")
+            log.info(f"  {d} rebounding: no data")
+
+        # M waits between the two leaguedashptstats calls
+        log.info(f"  Waiting {PT_BETWEEN_DELAY}s before passing call...")
+        time.sleep(PT_BETWEEN_DELAY)
+
+        # Passing
+        pass_rows = _fetch_passing_stats_for_date(d, season)
+        if pass_rows:
+            upsert(pd.DataFrame(pass_rows), engine,
+                   "nba", "player_passing_stats", ["player_id", "game_date"])
+            pass_total += len(pass_rows)
+            log.info(f"  {d} passing: {len(pass_rows)} rows")
+        else:
+            log.info(f"  {d} passing: no data")
 
         if i < len(batch) - 1:
             log.info(f"  Waiting {PT_BETWEEN_DELAY}s before next date...")
             time.sleep(PT_BETWEEN_DELAY)
 
-    log.info(f"  player_rebound_chances_v2 complete: {total_rows} rows across {len(batch)} dates")
+    log.info(f"  pt stats complete: {reb_total} rebound rows, "
+             f"{pass_total} passing rows across {len(batch)} dates")
 
 
 # ===========================================================================
@@ -886,16 +1095,20 @@ def load_rebound_chances_v2(engine, season, days):
 # ===========================================================================
 def main():
     parser = argparse.ArgumentParser(description="NBA Supplemental ETL")
-    parser.add_argument("--days",             type=int, default=BATCH_DEFAULT)
-    parser.add_argument("--season",           type=str, default=SEASON_DEFAULT)
-    parser.add_argument("--skip-schedule",    action="store_true")
-    parser.add_argument("--skip-lineups",     action="store_true")
-    parser.add_argument("--skip-gamelogs",    action="store_true")
-    parser.add_argument("--skip-rebounding",  action="store_true")
+    parser.add_argument("--days",           type=int, default=BATCH_DEFAULT)
+    parser.add_argument("--season",         type=str, default=SEASON_DEFAULT)
+    parser.add_argument("--skip-players",   action="store_true")
+    parser.add_argument("--skip-schedule",  action="store_true")
+    parser.add_argument("--skip-lineups",   action="store_true")
+    parser.add_argument("--skip-gamelogs",  action="store_true")
+    parser.add_argument("--skip-pt-stats",  action="store_true")
     args = parser.parse_args()
 
     engine = get_engine()
     ensure_tables(engine)
+
+    if not args.skip_players:
+        load_all_players(engine, args.season)
 
     if not args.skip_schedule:
         load_schedule(engine, args.season)
@@ -906,8 +1119,8 @@ def main():
     if not args.skip_gamelogs:
         load_game_logs(engine, args.season, args.days)
 
-    if not args.skip_rebounding:
-        load_rebound_chances_v2(engine, args.season, args.days)
+    if not args.skip_pt_stats:
+        load_pt_stats(engine, args.season, args.days)
 
     log.info("NBA supplemental ETL complete.")
 
