@@ -19,6 +19,13 @@ Proxy usage
   blocked by stats.nba.com.
   If NBA_PROXY_URL is not set, calls fall back to direct (useful locally).
 
+Season type fallback
+  playergamelogs and leaguedashptstats only return rows for games that match
+  SeasonType. Preseason games (typically early October) return nothing under
+  "Regular Season". All three fetch functions try "Regular Season" first and
+  fall back to "Pre Season" if the first call returns no rows. This ensures
+  the full season backfill works without hardcoding date cutoffs.
+
 Args
   --days N          Game dates to process per incremental run (default 10).
   --season S        Season string e.g. 2025-26 (default 2025-26).
@@ -64,6 +71,11 @@ RETRY_COUNT      = 3
 RETRY_WAIT       = 30
 PT_BETWEEN_DELAY = 15
 
+# Season types tried in order when fetching game-level stats.
+# playergamelogs and leaguedashptstats return nothing for preseason games
+# when SeasonType=Regular Season. Trying both ensures full season coverage.
+SEASON_TYPES = ["Regular Season", "Pre Season"]
+
 PROXY_URL = os.environ.get("NBA_PROXY_URL")
 
 NBA_HEADERS = {
@@ -86,13 +98,9 @@ PERIODS = [
 
 # ---------------------------------------------------------------------------
 # DDL
-# Note on ensure_tables strategy:
-#   nba.schedule is a truncate-and-reload table with no persistent data.
-#   It is dropped and recreated on every schema verification so that column
-#   type changes take effect immediately without a separate migration step.
-#   All other tables are created with IF NOT EXISTS and their data is preserved.
+# nba.schedule is dropped and recreated every run (truncate-and-reload table).
+# All other tables use IF NOT EXISTS to preserve existing data.
 # ---------------------------------------------------------------------------
-# nba.schedule is managed via DROP/CREATE (see ensure_tables), not IF NOT EXISTS.
 SCHEDULE_DDL = """
 CREATE TABLE nba.schedule (
     game_id              VARCHAR(15)   NOT NULL,
@@ -322,20 +330,14 @@ def get_engine():
 
 def ensure_tables(engine):
     with engine.begin() as conn:
-        # nba.schedule: drop and recreate every run.
-        # It is a truncate-and-reload table so there is no data to preserve.
-        # Dropping ensures column definitions are always current.
         conn.execute(text("""
             IF EXISTS (SELECT 1 FROM sys.objects
                        WHERE object_id = OBJECT_ID(N'nba.schedule') AND type = 'U')
             DROP TABLE nba.schedule
         """))
         conn.execute(text(SCHEDULE_DDL))
-
-        # All other tables: create if not exists, preserving existing data.
         for stmt in DDL:
             conn.execute(text(stmt))
-
         for stmt in DDL_INDEXES:
             conn.execute(text(stmt))
     log.info("Schema verified.")
@@ -384,10 +386,9 @@ def safe_bool(val):
 
 def safe_datetime(val):
     """
-    Returns a timezone-naive Python datetime for pyodbc / DATETIME2 compatibility.
-    pyodbc with fast_executemany=True serializes tz-aware Timestamps as strings
-    with the UTC offset appended, which SQL Server rejects for DATETIME2.
-    Converting to UTC then stripping tzinfo gives pyodbc a plain naive datetime.
+    Returns a timezone-naive datetime. pyodbc with fast_executemany=True
+    serializes tz-aware Timestamps with the UTC offset appended, which
+    SQL Server rejects for DATETIME2. Stripping tzinfo fixes this.
     """
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
@@ -642,7 +643,6 @@ def load_schedule(engine, season):
         log.warning("  No schedule rows produced")
         return
 
-    # Table was already cleared by DROP/CREATE in ensure_tables; just insert.
     upsert(pd.DataFrame(rows), engine, "nba", "schedule", ["game_id"])
     log.info(f"  {len(rows)} schedule rows loaded")
 
@@ -717,73 +717,82 @@ def load_lineups(engine, season, days):
 
 # ===========================================================================
 # PLAYER GAME LOGS  (M: BoxScores / fnGetBoxScore)
+# Season type fallback: tries Regular Season first, then Pre Season.
 # ===========================================================================
 def _fetch_game_logs_for_period(min_date, season, period_val, period_label):
+    """
+    Calls playergamelogs for one period starting from min_date.
+    Tries Regular Season first; falls back to Pre Season if no rows returned.
+    DateTo is intentionally empty, mirroring M fnGetBoxScore exactly.
+    """
     fmt_date = min_date.strftime("%m/%d/%Y")
-    params = {
-        "Season":       season,
-        "SeasonType":   "Regular Season",
-        "PlayerOrTeam": "P",
-        "MeasureType":  "Base",
-        "DateFrom":     fmt_date,
-        "DateTo":       "",
-    }
-    if period_label == "OT":
-        params["GameSegment"] = "Overtime"
-        params["Period"]      = ""
-    else:
-        params["Period"] = period_val
 
-    data = _get_proxied(
-        "https://stats.nba.com/stats/playergamelogs",
-        f"playergamelogs {min_date} {period_label}",
-        params=params,
-        timeout=60,
-    )
-    df = _parse_result_set(data)
-    if df is None or df.empty:
-        return []
+    for season_type in SEASON_TYPES:
+        params = {
+            "Season":       season,
+            "SeasonType":   season_type,
+            "PlayerOrTeam": "P",
+            "MeasureType":  "Base",
+            "DateFrom":     fmt_date,
+            "DateTo":       "",
+        }
+        if period_label == "OT":
+            params["GameSegment"] = "Overtime"
+            params["Period"]      = ""
+        else:
+            params["Period"] = period_val
 
-    rows = []
-    for _, row in df.iterrows():
-        rows.append({
-            "season_year":    safe_str(row.get("SEASON_YEAR")),
-            "player_id":      safe_int(row.get("PLAYER_ID")),
-            "player_name":    safe_str(row.get("PLAYER_NAME")),
-            "team_id":        safe_int(row.get("TEAM_ID")),
-            "team_tricode":   safe_str(row.get("TEAM_ABBREVIATION")),
-            "game_id":        safe_str(row.get("GAME_ID")),
-            "game_date":      safe_date(row.get("GAME_DATE")),
-            "matchup":        safe_str(row.get("MATCHUP")),
-            "period":         period_label,
-            "minutes":        safe_float(row.get("MIN")),
-            "minutes_sec":    safe_str(row.get("MIN_SEC")),
-            "fgm":            safe_int(row.get("FGM")),
-            "fga":            safe_int(row.get("FGA")),
-            "fg_pct":         safe_float(row.get("FG_PCT")),
-            "fg3m":           safe_int(row.get("FG3M")),
-            "fg3a":           safe_int(row.get("FG3A")),
-            "fg3_pct":        safe_float(row.get("FG3_PCT")),
-            "ftm":            safe_int(row.get("FTM")),
-            "fta":            safe_int(row.get("FTA")),
-            "ft_pct":         safe_float(row.get("FT_PCT")),
-            "oreb":           safe_int(row.get("OREB")),
-            "dreb":           safe_int(row.get("DREB")),
-            "reb":            safe_int(row.get("REB")),
-            "ast":            safe_int(row.get("AST")),
-            "tov":            safe_int(row.get("TOV")),
-            "stl":            safe_int(row.get("STL")),
-            "blk":            safe_int(row.get("BLK")),
-            "blka":           safe_int(row.get("BLKA")),
-            "pf":             safe_int(row.get("PF")),
-            "pfd":            safe_int(row.get("PFD")),
-            "pts":            safe_int(row.get("PTS")),
-            "plus_minus":     safe_int(row.get("PLUS_MINUS")),
-            "dd2":            safe_int(row.get("DD2")),
-            "td3":            safe_int(row.get("TD3")),
-            "available_flag": safe_int(row.get("AVAILABLE_FLAG")),
-        })
-    return rows
+        data = _get_proxied(
+            "https://stats.nba.com/stats/playergamelogs",
+            f"playergamelogs {min_date} {period_label} [{season_type}]",
+            params=params,
+            timeout=60,
+        )
+        df = _parse_result_set(data)
+        if df is not None and not df.empty:
+            log.info(f"    {period_label}: matched SeasonType={season_type}")
+            rows = []
+            for _, row in df.iterrows():
+                rows.append({
+                    "season_year":    safe_str(row.get("SEASON_YEAR")),
+                    "player_id":      safe_int(row.get("PLAYER_ID")),
+                    "player_name":    safe_str(row.get("PLAYER_NAME")),
+                    "team_id":        safe_int(row.get("TEAM_ID")),
+                    "team_tricode":   safe_str(row.get("TEAM_ABBREVIATION")),
+                    "game_id":        safe_str(row.get("GAME_ID")),
+                    "game_date":      safe_date(row.get("GAME_DATE")),
+                    "matchup":        safe_str(row.get("MATCHUP")),
+                    "period":         period_label,
+                    "minutes":        safe_float(row.get("MIN")),
+                    "minutes_sec":    safe_str(row.get("MIN_SEC")),
+                    "fgm":            safe_int(row.get("FGM")),
+                    "fga":            safe_int(row.get("FGA")),
+                    "fg_pct":         safe_float(row.get("FG_PCT")),
+                    "fg3m":           safe_int(row.get("FG3M")),
+                    "fg3a":           safe_int(row.get("FG3A")),
+                    "fg3_pct":        safe_float(row.get("FG3_PCT")),
+                    "ftm":            safe_int(row.get("FTM")),
+                    "fta":            safe_int(row.get("FTA")),
+                    "ft_pct":         safe_float(row.get("FT_PCT")),
+                    "oreb":           safe_int(row.get("OREB")),
+                    "dreb":           safe_int(row.get("DREB")),
+                    "reb":            safe_int(row.get("REB")),
+                    "ast":            safe_int(row.get("AST")),
+                    "tov":            safe_int(row.get("TOV")),
+                    "stl":            safe_int(row.get("STL")),
+                    "blk":            safe_int(row.get("BLK")),
+                    "blka":           safe_int(row.get("BLKA")),
+                    "pf":             safe_int(row.get("PF")),
+                    "pfd":            safe_int(row.get("PFD")),
+                    "pts":            safe_int(row.get("PTS")),
+                    "plus_minus":     safe_int(row.get("PLUS_MINUS")),
+                    "dd2":            safe_int(row.get("DD2")),
+                    "td3":            safe_int(row.get("TD3")),
+                    "available_flag": safe_int(row.get("AVAILABLE_FLAG")),
+                })
+            return rows
+
+    return []
 
 
 def load_game_logs(engine, season, days):
@@ -820,28 +829,43 @@ def load_game_logs(engine, season, days):
 
 # ===========================================================================
 # PT STATS  (M: RebChances + PotentialAst -- leaguedashptstats)
+# Season type fallback: tries Regular Season first, then Pre Season.
 # ===========================================================================
-def _fetch_rebound_chances_for_date(game_date, season):
+def _fetch_pt_stats_for_date(game_date, season, pt_measure_type):
+    """
+    Calls leaguedashptstats for a single date.
+    Tries Regular Season first; falls back to Pre Season if no rows returned.
+    """
     fmt_date = game_date.strftime("%m/%d/%Y")
-    params = {
-        "Season":         season,
-        "SeasonType":     "Regular Season",
-        "PlayerOrTeam":   "Player",
-        "PtMeasureType":  "Rebounding",
-        "PerMode":        "Totals",
-        "LastNGames":     "0",
-        "Month":          "0",
-        "OpponentTeamID": "0",
-        "DateFrom":       fmt_date,
-        "DateTo":         fmt_date,
-    }
-    data = _get_proxied("https://stats.nba.com/stats/leaguedashptstats",
-                        f"leaguedashptstats Rebounding {game_date}",
-                        params=params, timeout=60)
-    df = _parse_result_set(data)
-    if df is None or df.empty:
-        return []
 
+    for season_type in SEASON_TYPES:
+        params = {
+            "Season":         season,
+            "SeasonType":     season_type,
+            "PlayerOrTeam":   "Player",
+            "PtMeasureType":  pt_measure_type,
+            "PerMode":        "Totals",
+            "LastNGames":     "0",
+            "Month":          "0",
+            "OpponentTeamID": "0",
+            "DateFrom":       fmt_date,
+            "DateTo":         fmt_date,
+        }
+        data = _get_proxied(
+            "https://stats.nba.com/stats/leaguedashptstats",
+            f"leaguedashptstats {pt_measure_type} {game_date} [{season_type}]",
+            params=params,
+            timeout=60,
+        )
+        df = _parse_result_set(data)
+        if df is not None and not df.empty:
+            log.info(f"    {pt_measure_type} {game_date}: matched SeasonType={season_type}")
+            return df
+
+    return None
+
+
+def _build_rebound_rows(game_date, df):
     rows = []
     for _, row in df.iterrows():
         pid = safe_int(row.get("PLAYER_ID"))
@@ -884,27 +908,7 @@ def _fetch_rebound_chances_for_date(game_date, season):
     return rows
 
 
-def _fetch_passing_stats_for_date(game_date, season):
-    fmt_date = game_date.strftime("%m/%d/%Y")
-    params = {
-        "Season":         season,
-        "SeasonType":     "Regular Season",
-        "PlayerOrTeam":   "Player",
-        "PtMeasureType":  "Passing",
-        "PerMode":        "Totals",
-        "LastNGames":     "0",
-        "Month":          "0",
-        "OpponentTeamID": "0",
-        "DateFrom":       fmt_date,
-        "DateTo":         fmt_date,
-    }
-    data = _get_proxied("https://stats.nba.com/stats/leaguedashptstats",
-                        f"leaguedashptstats Passing {game_date}",
-                        params=params, timeout=60)
-    df = _parse_result_set(data)
-    if df is None or df.empty:
-        return []
-
+def _build_passing_rows(game_date, df):
     rows = []
     for _, row in df.iterrows():
         pid = safe_int(row.get("PLAYER_ID"))
@@ -946,24 +950,28 @@ def load_pt_stats(engine, season, days):
     reb_total = pass_total = 0
 
     for i, d in enumerate(batch):
-        reb_rows = _fetch_rebound_chances_for_date(d, season)
-        if reb_rows:
-            upsert(pd.DataFrame(reb_rows), engine,
-                   "nba", "player_rebound_chances", ["player_id", "game_date"])
-            reb_total += len(reb_rows)
-            log.info(f"  {d} rebounding: {len(reb_rows)} rows")
+        reb_df = _fetch_pt_stats_for_date(d, season, "Rebounding")
+        if reb_df is not None:
+            reb_rows = _build_rebound_rows(d, reb_df)
+            if reb_rows:
+                upsert(pd.DataFrame(reb_rows), engine,
+                       "nba", "player_rebound_chances", ["player_id", "game_date"])
+                reb_total += len(reb_rows)
+                log.info(f"  {d} rebounding: {len(reb_rows)} rows")
         else:
             log.info(f"  {d} rebounding: no data")
 
         log.info(f"  Waiting {PT_BETWEEN_DELAY}s before passing call...")
         time.sleep(PT_BETWEEN_DELAY)
 
-        pass_rows = _fetch_passing_stats_for_date(d, season)
-        if pass_rows:
-            upsert(pd.DataFrame(pass_rows), engine,
-                   "nba", "player_passing_stats", ["player_id", "game_date"])
-            pass_total += len(pass_rows)
-            log.info(f"  {d} passing: {len(pass_rows)} rows")
+        pass_df = _fetch_pt_stats_for_date(d, season, "Passing")
+        if pass_df is not None:
+            pass_rows = _build_passing_rows(d, pass_df)
+            if pass_rows:
+                upsert(pd.DataFrame(pass_rows), engine,
+                       "nba", "player_passing_stats", ["player_id", "game_date"])
+                pass_total += len(pass_rows)
+                log.info(f"  {d} passing: {len(pass_rows)} rows")
         else:
             log.info(f"  {d} passing: no data")
 
