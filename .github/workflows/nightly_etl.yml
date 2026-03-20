@@ -1,5 +1,0 @@
-# ARCHIVED — multi-sport shared workflow, violates one-YML-per-sport rule.
-# Uses stale actions/checkout@v3. The shared setup job's pip cache does not
-# carry over to parallel jobs on GitHub Actions ephemeral runners.
-# Each sport now has its own independent workflow.
-# No triggers defined intentionally.
