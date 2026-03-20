@@ -1,13 +1,18 @@
-name: NBA Nightly ETL NEW
+name: NBA Nightly ETL
 
 on:
-  # Nightly run
+  # Nightly scheduled run
   schedule:
     # 09:00 UTC = 3:00 AM CST / 4:00 AM CDT
     - cron: '0 9 * * *'
 
-  # Manual trigger
+  # Manual trigger with inputs
   workflow_dispatch:
+    inputs:
+      batch_size:
+        description: "Number of game dates to process (backfill / catch-up)"
+        required: false
+        default: "10"
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -65,5 +70,6 @@ jobs:
       # --------------------------------------------------
       - name: Run NBA ETL
         run: |
-          python etl/nba/nba_etl.py
+          python etl/nba/nba_etl.py \
+            --batch-size ${{ github.event.inputs.batch_size || 10 }}
 ``
