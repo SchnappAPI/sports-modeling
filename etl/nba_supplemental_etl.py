@@ -7,57 +7,23 @@ No redesign. No substitutions.
 
 Tables written
   nba.all_players             commonallplayers, active roster only.
-                              Source: PLAYER M query.
-                              Truncate-and-reload every run.
   nba.schedule                scheduleleaguev2, full season.
-                              Source: SCHEDULE M query.
-                              Truncate-and-reload every run.
   nba.daily_lineups           00_daily_lineups_{YYYYMMDD}.json
-                              Source: DailyLineups / fnGetLineups M queries.
-                              Incremental by game_date.
   nba.player_game_logs        playergamelogs per period (1Q/2Q/3Q/4Q/OT).
-                              Source: BoxScores / fnGetBoxScore M queries.
-                              Incremental by game_date. DateTo left empty,
-                              MinDate strategy mirrors M batch logic exactly.
   nba.player_rebound_chances  leaguedashptstats PtMeasureType=Rebounding.
-                              Source: RebChances M query.
-                              Incremental by game_date.
   nba.player_passing_stats    leaguedashptstats PtMeasureType=Passing.
-                              Source: PotentialAst M query.
-                              Incremental by game_date.
 
-M query translation notes
-  PLAYER       endpoint: stats.nba.com/stats/commonallplayers
-               fields: PERSON_ID, DISPLAY_FIRST_LAST, TEAM_ID, TEAM_NAME,
-                       TEAM_ABBREVIATION, ROSTERSTATUS, FROM_YEAR, TO_YEAR
-               filter: ROSTERSTATUS = 1 (active only)
-
-  SCHEDULE     endpoint: stats.nba.com/stats/scheduleleaguev2
-               drills into leagueSchedule.gameDates[].games[]
-               home/away nested under homeTeam{} / awayTeam{}
-
-  fnGetLineups endpoint: stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
-               gameDate arg is YYYYMMDD string
-               starterStatus logic: position not null/empty -> Starter,
-               rosterStatus == Active -> Bench, else Inactive
-
-  fnGetBoxScore endpoint: stats.nba.com/stats/playergamelogs
-               period labels in M: 1Q, 2Q, 3Q, 4Q, OT
-               OT params: GameSegment=Overtime, Period=""
-               DateTo always empty (M leaves it blank)
-               batch strategy: MinDate of batch, fetch everything >= MinDate
-               per period, filter down to batch dates in Python
-
-  RebChances   endpoint: stats.nba.com/stats/leaguedashptstats
-               PtMeasureType=Rebounding, DateFrom=DateTo=single date
-
-  PotentialAst endpoint: stats.nba.com/stats/leaguedashptstats
-               PtMeasureType=Passing, DateFrom=DateTo=single date
+Proxy usage
+  All stats.nba.com endpoints are routed through NBA_PROXY_URL (Webshare
+  rotating residential proxy) because GitHub Actions datacenter IPs are
+  blocked by stats.nba.com.
+  The lineup JSON endpoint (stats.nba.com/js/data/leaders/...) uses the
+  same proxy since it is on the same host.
+  If NBA_PROXY_URL is not set, all calls fall back to direct (useful for
+  local testing where the residential IP is not blocked).
 
 Args
-  --days N          Game dates to process per incremental run (default 10,
-                    matches M BatchSize). BoxScores use HalfBatch = days // 2
-                    matching M HalfBatch logic.
+  --days N          Game dates to process per incremental run (default 10).
   --season S        Season string e.g. 2025-26 (default 2025-26).
   --skip-players    Skip all_players reload.
   --skip-schedule   Skip schedule reload.
@@ -66,7 +32,8 @@ Args
   --skip-pt-stats   Skip rebounding and passing stats ingestion.
 
 Secrets required
-  AZURE_SQL_SERVER, AZURE_SQL_DATABASE, AZURE_SQL_USERNAME, AZURE_SQL_PASSWORD
+  NBA_PROXY_URL, AZURE_SQL_SERVER, AZURE_SQL_DATABASE,
+  AZURE_SQL_USERNAME, AZURE_SQL_PASSWORD
 """
 
 import argparse
@@ -94,16 +61,13 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 SEASON_DEFAULT   = "2025-26"
-BATCH_DEFAULT    = 10        # M BatchSize = 10
+BATCH_DEFAULT    = 10
 API_DELAY        = 1.5
 RETRY_COUNT      = 3
 RETRY_WAIT       = 30
-PT_BETWEEN_DELAY = 15        # between leaguedashptstats calls
+PT_BETWEEN_DELAY = 15
 
-# Explicit no-proxy: prevents NBA_PROXY_URL env var from routing these calls
-# through the residential proxy. All endpoints in this script work from
-# datacenter IPs with the browser headers below.
-NO_PROXY = {"http": None, "https": None}
+PROXY_URL = os.environ.get("NBA_PROXY_URL")
 
 NBA_HEADERS = {
     "User-Agent":          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -115,27 +79,18 @@ NBA_HEADERS = {
     "Referer":             "https://www.nba.com/",
 }
 
-# Period labels exactly as M uses them: 1Q 2Q 3Q 4Q OT
-# period_value is the Period= param; period_label is what gets stored.
 PERIODS = [
     ("1", "1Q"),
     ("2", "2Q"),
     ("3", "3Q"),
     ("4", "4Q"),
-    ("",  "OT"),   # OT: Period="" + GameSegment="Overtime"
+    ("",  "OT"),
 ]
 
 # ---------------------------------------------------------------------------
 # DDL
 # ---------------------------------------------------------------------------
 DDL = [
-    # ------------------------------------------------------------------
-    # nba.all_players
-    # Source: commonallplayers, active players only (ROSTERSTATUS=1).
-    # Matches M PLAYER query field list exactly.
-    # Truncate-and-reload every run (M rebuilds from scratch each refresh).
-    # Separate from nba.players which uses commonteamroster in nba_etl.py.
-    # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.all_players') AND type = 'U')
@@ -152,12 +107,6 @@ DDL = [
         CONSTRAINT pk_nba_all_players PRIMARY KEY (player_id)
     )
     """,
-    # ------------------------------------------------------------------
-    # nba.schedule
-    # Source: scheduleleaguev2 -> leagueSchedule.gameDates[].games[].
-    # Matches M SCHEDULE query field list exactly.
-    # Truncate-and-reload every run.
-    # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.schedule') AND type = 'U')
@@ -201,12 +150,6 @@ DDL = [
         CONSTRAINT pk_nba_schedule PRIMARY KEY (game_id)
     )
     """,
-    # ------------------------------------------------------------------
-    # nba.daily_lineups
-    # Source: 00_daily_lineups_{YYYYMMDD}.json -> games[].homeTeam/awayTeam.players[].
-    # Matches M fnGetLineups / DailyLineups field list exactly.
-    # Incremental by game_date.
-    # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.daily_lineups') AND type = 'U')
@@ -224,12 +167,6 @@ DDL = [
         CONSTRAINT pk_nba_daily_lineups PRIMARY KEY (game_id, player_name, home_away)
     )
     """,
-    # ------------------------------------------------------------------
-    # nba.player_game_logs
-    # Source: playergamelogs per period.
-    # Period values: 1Q 2Q 3Q 4Q OT (matches M fnGetBoxScore periodLabel exactly).
-    # Incremental by game_date.
-    # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_game_logs') AND type = 'U')
@@ -273,12 +210,6 @@ DDL = [
         CONSTRAINT pk_nba_pgl PRIMARY KEY (game_id, player_id, period)
     )
     """,
-    # ------------------------------------------------------------------
-    # nba.player_rebound_chances
-    # Source: leaguedashptstats PtMeasureType=Rebounding.
-    # Matches M RebChances field list exactly.
-    # Incremental by game_date.
-    # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_rebound_chances') AND type = 'U')
@@ -319,12 +250,6 @@ DDL = [
         CONSTRAINT pk_nba_prc PRIMARY KEY (player_id, game_date)
     )
     """,
-    # ------------------------------------------------------------------
-    # nba.player_passing_stats
-    # Source: leaguedashptstats PtMeasureType=Passing.
-    # Matches M PotentialAst field list exactly.
-    # Incremental by game_date.
-    # ------------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_passing_stats') AND type = 'U')
@@ -512,15 +437,29 @@ def upsert(df, engine, schema, table, pk_cols):
 
 # ---------------------------------------------------------------------------
 # HTTP
+# Two helpers:
+#   _get_proxied  -- stats.nba.com endpoints, routes through NBA_PROXY_URL
+#   _get_direct   -- any endpoint that does not need the proxy
 # ---------------------------------------------------------------------------
-def _get(url, label, params=None, timeout=60):
+def _get_proxied(url, label, params=None, timeout=60):
+    """Routes through NBA_PROXY_URL. Falls back to direct if proxy not set."""
+    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+    return _request(url, label, params=params, timeout=timeout, proxies=proxies)
+
+
+def _get_direct(url, label, params=None, timeout=60):
+    """No proxy. Used for endpoints that work from datacenter IPs."""
+    return _request(url, label, params=params, timeout=timeout, proxies=None)
+
+
+def _request(url, label, params=None, timeout=60, proxies=None):
     for attempt in range(1, RETRY_COUNT + 1):
         try:
             resp = requests.get(
                 url,
                 headers=NBA_HEADERS,
                 params=params,
-                proxies=NO_PROXY,
+                proxies=proxies,
                 timeout=timeout,
             )
             if resp.status_code in (429, 500, 502, 503, 504):
@@ -565,13 +504,12 @@ def get_existing_dates(engine, schema, table, col="game_date"):
 
 
 # ---------------------------------------------------------------------------
-# Game date list  (M: gameList query)
-# Returns sorted list of date objects strictly before today.
+# Game date list  (M: gameList)
 # ---------------------------------------------------------------------------
 def get_season_game_dates(season):
     url  = "https://stats.nba.com/stats/scheduleleaguev2"
-    data = _get(url, "scheduleleaguev2 (game dates)",
-                params={"Season": season, "LeagueID": "00"})
+    data = _get_proxied(url, "scheduleleaguev2 (game dates)",
+                        params={"Season": season, "LeagueID": "00"})
     if data is None:
         return []
     today = date.today()
@@ -580,7 +518,6 @@ def get_season_game_dates(season):
         raw = gd_entry.get("gameDate")
         if not raw:
             continue
-        # M parses "10/02/2025" -> date. pd.to_datetime handles both formats.
         d = safe_date(raw[:10])
         if d and d < today:
             dates.append(d)
@@ -588,21 +525,16 @@ def get_season_game_dates(season):
 
 
 # ===========================================================================
-# ALL PLAYERS  (M: PLAYER query)
-# Endpoint: commonallplayers
-# Fields: PERSON_ID, DISPLAY_FIRST_LAST, TEAM_ID, TEAM_NAME,
-#         TEAM_ABBREVIATION, ROSTERSTATUS, FROM_YEAR, TO_YEAR
-# Filter: ROSTERSTATUS = 1
-# Behavior: truncate-and-reload (M rebuilt from scratch each refresh)
+# ALL PLAYERS  (M: PLAYER query -- commonallplayers)
 # ===========================================================================
 def load_all_players(engine, season):
-    log.info(f"Loading nba.all_players from commonallplayers season={season}")
+    log.info(f"Loading nba.all_players season={season}")
     url  = "https://stats.nba.com/stats/commonallplayers"
-    data = _get(url, "commonallplayers",
-                params={"IsOnlyCurrentSeason": "1", "LeagueID": "00",
-                        "Season": season})
+    data = _get_proxied(url, "commonallplayers",
+                        params={"IsOnlyCurrentSeason": "1", "LeagueID": "00",
+                                "Season": season})
     if data is None:
-        log.error("  commonallplayers failed -- all_players not loaded")
+        log.error("  commonallplayers failed")
         return
 
     df = _parse_result_set(data)
@@ -612,7 +544,6 @@ def load_all_players(engine, season):
 
     rows = []
     for _, row in df.iterrows():
-        # M filter: rosterStatus = 1
         if safe_int(row.get("ROSTERSTATUS")) != 1:
             continue
         rows.append({
@@ -632,24 +563,20 @@ def load_all_players(engine, season):
 
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM nba.all_players"))
-    df_out = pd.DataFrame(rows)
-    upsert(df_out, engine, "nba", "all_players", ["player_id"])
-    log.info(f"  {len(df_out)} active players loaded")
+    upsert(pd.DataFrame(rows), engine, "nba", "all_players", ["player_id"])
+    log.info(f"  {len(rows)} active players loaded")
 
 
 # ===========================================================================
-# SCHEDULE  (M: SCHEDULE query)
-# Endpoint: scheduleleaguev2
-# Drills: leagueSchedule.gameDates[].games[]
-# Behavior: truncate-and-reload
+# SCHEDULE  (M: SCHEDULE query -- scheduleleaguev2)
 # ===========================================================================
 def load_schedule(engine, season):
-    log.info(f"Loading nba.schedule for season {season}")
+    log.info(f"Loading nba.schedule season={season}")
     url  = "https://stats.nba.com/stats/scheduleleaguev2"
-    data = _get(url, "scheduleleaguev2 (schedule)",
-                params={"Season": season, "LeagueID": "00"})
+    data = _get_proxied(url, "scheduleleaguev2 (schedule)",
+                        params={"Season": season, "LeagueID": "00"})
     if data is None:
-        log.error("  scheduleleaguev2 failed -- schedule not loaded")
+        log.error("  scheduleleaguev2 failed")
         return
 
     rows = []
@@ -708,19 +635,14 @@ def load_schedule(engine, season):
 
 
 # ===========================================================================
-# DAILY LINEUPS  (M: DailyLineups / fnGetLineups)
+# DAILY LINEUPS  (M: fnGetLineups / DailyLineups)
 # Endpoint: stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
-# gameDate arg: YYYYMMDD string (matches M fnGetLineups signature)
-# Incremental by game_date.
+# Uses proxy (same host as stats.nba.com).
 # ===========================================================================
 def _fetch_lineups_for_date(game_date):
-    """
-    game_date: date object. Converted to YYYYMMDD string to build the URL,
-    matching M's fnGetLineups(gameDate as text) signature exactly.
-    """
     date_str = game_date.strftime("%Y%m%d")
     url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_str}.json"
-    data     = _get(url, f"lineups {date_str}", timeout=30)
+    data     = _get_proxied(url, f"lineups {date_str}", timeout=30)
     if data is None:
         return []
 
@@ -735,10 +657,6 @@ def _fetch_lineups_for_date(game_date):
             for p in team.get("players", []):
                 position      = safe_str(p.get("position"))
                 roster_status = safe_str(p.get("rosterStatus"))
-                # M starterStatus logic (translated exactly):
-                #   if position <> null and position <> "" -> "Starter"
-                #   else if rosterStatus = "Active"        -> "Bench"
-                #   else                                   -> "Inactive"
                 if position:
                     starter_status = "Starter"
                 elif roster_status == "Active":
@@ -775,7 +693,7 @@ def load_lineups(engine, season, days):
     for d in batch:
         rows = _fetch_lineups_for_date(d)
         if not rows:
-            log.info(f"  {d}: no lineup file (may not exist for this date)")
+            log.info(f"  {d}: no lineup file")
             continue
         df = pd.DataFrame(rows)
         upsert(df, engine, "nba", "daily_lineups",
@@ -789,19 +707,11 @@ def load_lineups(engine, season, days):
 # ===========================================================================
 # PLAYER GAME LOGS  (M: BoxScores / fnGetBoxScore)
 # Endpoint: playergamelogs
-# Period labels: 1Q 2Q 3Q 4Q OT  (exactly as M stores them)
-# OT params: GameSegment=Overtime, Period=""
-# DateTo: empty string  (M leaves DateTo blank -- returns all games >= DateFrom)
-# Batch strategy: take MinDate of the batch, fetch all >= MinDate per period,
-#   then filter down to only batch dates. Mirrors M HalfBatch / MinDate logic.
-# Incremental by game_date.
+# Period labels: 1Q 2Q 3Q 4Q OT
+# DateTo: empty (M leaves blank)
+# Batch: MinDate strategy, HalfBatch = days // 2
 # ===========================================================================
 def _fetch_game_logs_for_period(min_date, season, period_val, period_label):
-    """
-    Fetches playergamelogs for all games on or after min_date for one period.
-    DateTo is intentionally left empty, mirroring M fnGetBoxScore exactly.
-    Returns list of row dicts.
-    """
     fmt_date = min_date.strftime("%m/%d/%Y")
     params = {
         "Season":       season,
@@ -809,7 +719,7 @@ def _fetch_game_logs_for_period(min_date, season, period_val, period_label):
         "PlayerOrTeam": "P",
         "MeasureType":  "Base",
         "DateFrom":     fmt_date,
-        "DateTo":       "",          # M leaves DateTo empty
+        "DateTo":       "",
     }
     if period_label == "OT":
         params["GameSegment"] = "Overtime"
@@ -817,7 +727,7 @@ def _fetch_game_logs_for_period(min_date, season, period_val, period_label):
     else:
         params["Period"] = period_val
 
-    data = _get(
+    data = _get_proxied(
         "https://stats.nba.com/stats/playergamelogs",
         f"playergamelogs {min_date} {period_label}",
         params=params,
@@ -838,7 +748,7 @@ def _fetch_game_logs_for_period(min_date, season, period_val, period_label):
             "game_id":        safe_str(row.get("GAME_ID")),
             "game_date":      safe_date(row.get("GAME_DATE")),
             "matchup":        safe_str(row.get("MATCHUP")),
-            "period":         period_label,   # 1Q / 2Q / 3Q / 4Q / OT
+            "period":         period_label,
             "minutes":        safe_float(row.get("MIN")),
             "minutes_sec":    safe_str(row.get("MIN_SEC")),
             "fgm":            safe_int(row.get("FGM")),
@@ -870,18 +780,10 @@ def _fetch_game_logs_for_period(min_date, season, period_val, period_label):
 
 
 def load_game_logs(engine, season, days):
-    """
-    Mirrors M BoxScores batch logic exactly:
-      HalfBatch = BatchSize // 2  (M uses HalfBatch for box scores)
-      MinDate   = minimum date in the batch
-      Fetch all 5 periods from MinDate forward, filter to batch dates only.
-    """
     log.info("Loading nba.player_game_logs")
-    all_dates = get_season_game_dates(season)
-    existing  = get_existing_dates(engine, "nba", "player_game_logs")
-    missing   = sorted([d for d in all_dates if d not in existing])
-
-    # M: HalfBatch = BatchSize // 2, minimum 1
+    all_dates  = get_season_game_dates(season)
+    existing   = get_existing_dates(engine, "nba", "player_game_logs")
+    missing    = sorted([d for d in all_dates if d not in existing])
     half_batch = max(1, days // 2)
     batch      = missing[:half_batch]
 
@@ -889,35 +791,28 @@ def load_game_logs(engine, season, days):
         log.info("  player_game_logs: all dates loaded.")
         return
 
-    min_date   = min(batch)
-    batch_set  = set(batch)
-    log.info(f"  {len(missing)} dates missing, HalfBatch={half_batch}, "
-             f"MinDate={min_date}, fetching {len(batch)} dates")
+    min_date  = min(batch)
+    batch_set = set(batch)
+    log.info(f"  {len(missing)} dates missing, HalfBatch={half_batch}, MinDate={min_date}")
 
     all_rows = []
     for period_val, period_label in PERIODS:
         rows = _fetch_game_logs_for_period(min_date, season, period_val, period_label)
-        # Filter to only the batch dates (M fetches >= MinDate then combines
-        # with existing history; we filter here since we only want the batch)
         rows = [r for r in rows if r["game_date"] in batch_set]
         log.info(f"  {period_label}: {len(rows)} rows")
         all_rows.extend(rows)
         time.sleep(API_DELAY)
 
     if all_rows:
-        df = pd.DataFrame(all_rows)
-        upsert(df, engine, "nba", "player_game_logs",
+        upsert(pd.DataFrame(all_rows), engine, "nba", "player_game_logs",
                ["game_id", "player_id", "period"])
-        log.info(f"  player_game_logs complete: {len(df)} rows")
+        log.info(f"  player_game_logs complete: {len(all_rows)} rows")
     else:
-        log.info("  player_game_logs: no rows returned for batch")
+        log.info("  player_game_logs: no rows for batch")
 
 
 # ===========================================================================
-# REBOUND CHANCES  (M: RebChances)
-# Endpoint: leaguedashptstats, PtMeasureType=Rebounding
-# DateFrom=DateTo=single date (M passes each date individually)
-# Incremental by game_date.
+# PT STATS  (M: RebChances + PotentialAst -- leaguedashptstats)
 # ===========================================================================
 def _fetch_rebound_chances_for_date(game_date, season):
     fmt_date = game_date.strftime("%m/%d/%Y")
@@ -933,9 +828,9 @@ def _fetch_rebound_chances_for_date(game_date, season):
         "DateFrom":       fmt_date,
         "DateTo":         fmt_date,
     }
-    data = _get("https://stats.nba.com/stats/leaguedashptstats",
-                f"leaguedashptstats Rebounding {game_date}",
-                params=params, timeout=60)
+    data = _get_proxied("https://stats.nba.com/stats/leaguedashptstats",
+                        f"leaguedashptstats Rebounding {game_date}",
+                        params=params, timeout=60)
     df = _parse_result_set(data)
     if df is None or df.empty:
         return []
@@ -982,12 +877,6 @@ def _fetch_rebound_chances_for_date(game_date, season):
     return rows
 
 
-# ===========================================================================
-# PASSING STATS  (M: PotentialAst)
-# Endpoint: leaguedashptstats, PtMeasureType=Passing
-# DateFrom=DateTo=single date
-# Incremental by game_date.
-# ===========================================================================
 def _fetch_passing_stats_for_date(game_date, season):
     fmt_date = game_date.strftime("%m/%d/%Y")
     params = {
@@ -1002,9 +891,9 @@ def _fetch_passing_stats_for_date(game_date, season):
         "DateFrom":       fmt_date,
         "DateTo":         fmt_date,
     }
-    data = _get("https://stats.nba.com/stats/leaguedashptstats",
-                f"leaguedashptstats Passing {game_date}",
-                params=params, timeout=60)
+    data = _get_proxied("https://stats.nba.com/stats/leaguedashptstats",
+                        f"leaguedashptstats Passing {game_date}",
+                        params=params, timeout=60)
     df = _parse_result_set(data)
     if df is None or df.empty:
         return []
@@ -1015,40 +904,32 @@ def _fetch_passing_stats_for_date(game_date, season):
         if pid is None:
             continue
         rows.append({
-            "game_date":          game_date,
-            "player_id":          pid,
-            "player_name":        safe_str(row.get("PLAYER_NAME")),
-            "team_id":            safe_int(row.get("TEAM_ID")),
-            "team_tricode":       safe_str(row.get("TEAM_ABBREVIATION")),
-            "passes_made":        safe_int(row.get("PASSES_MADE")),
-            "passes_received":    safe_int(row.get("PASSES_RECEIVED")),
-            "ft_ast":             safe_int(row.get("FT_AST")),
-            "secondary_ast":      safe_int(row.get("SECONDARY_AST")),
-            "potential_ast":      safe_int(row.get("POTENTIAL_AST")),
-            "ast_pts_created":    safe_int(row.get("AST_PTS_CREATED")),
-            "ast_adj":            safe_int(row.get("AST_ADJ")),
-            "ast_to_pass_pct":    safe_float(row.get("AST_TO_PASS_PCT")),
+            "game_date":           game_date,
+            "player_id":           pid,
+            "player_name":         safe_str(row.get("PLAYER_NAME")),
+            "team_id":             safe_int(row.get("TEAM_ID")),
+            "team_tricode":        safe_str(row.get("TEAM_ABBREVIATION")),
+            "passes_made":         safe_int(row.get("PASSES_MADE")),
+            "passes_received":     safe_int(row.get("PASSES_RECEIVED")),
+            "ft_ast":              safe_int(row.get("FT_AST")),
+            "secondary_ast":       safe_int(row.get("SECONDARY_AST")),
+            "potential_ast":       safe_int(row.get("POTENTIAL_AST")),
+            "ast_pts_created":     safe_int(row.get("AST_PTS_CREATED")),
+            "ast_adj":             safe_int(row.get("AST_ADJ")),
+            "ast_to_pass_pct":     safe_float(row.get("AST_TO_PASS_PCT")),
             "ast_to_pass_pct_adj": safe_float(row.get("AST_TO_PASS_PCT_ADJ")),
         })
     return rows
 
 
 def load_pt_stats(engine, season, days):
-    """
-    Loads both rebound chances and passing stats.
-    Each date makes two leaguedashptstats calls with PT_BETWEEN_DELAY between them,
-    matching M's sequential fetch pattern.
-    """
     log.info("Loading nba.player_rebound_chances and nba.player_passing_stats")
-
-    all_dates = get_season_game_dates(season)
-
+    all_dates     = get_season_game_dates(season)
     reb_existing  = get_existing_dates(engine, "nba", "player_rebound_chances")
     pass_existing = get_existing_dates(engine, "nba", "player_passing_stats")
-    # Use rebound chances as the state driver (M used the same gameList for both)
-    missing = sorted([d for d in all_dates
-                      if d not in reb_existing or d not in pass_existing])
-    batch   = missing[:days]
+    missing       = sorted([d for d in all_dates
+                            if d not in reb_existing or d not in pass_existing])
+    batch         = missing[:days]
 
     if not batch:
         log.info("  pt stats: all dates loaded.")
@@ -1058,7 +939,6 @@ def load_pt_stats(engine, season, days):
     reb_total = pass_total = 0
 
     for i, d in enumerate(batch):
-        # Rebounding
         reb_rows = _fetch_rebound_chances_for_date(d, season)
         if reb_rows:
             upsert(pd.DataFrame(reb_rows), engine,
@@ -1068,11 +948,9 @@ def load_pt_stats(engine, season, days):
         else:
             log.info(f"  {d} rebounding: no data")
 
-        # M waits between the two leaguedashptstats calls
         log.info(f"  Waiting {PT_BETWEEN_DELAY}s before passing call...")
         time.sleep(PT_BETWEEN_DELAY)
 
-        # Passing
         pass_rows = _fetch_passing_stats_for_date(d, season)
         if pass_rows:
             upsert(pd.DataFrame(pass_rows), engine,
@@ -1103,6 +981,11 @@ def main():
     parser.add_argument("--skip-gamelogs",  action="store_true")
     parser.add_argument("--skip-pt-stats",  action="store_true")
     args = parser.parse_args()
+
+    if PROXY_URL:
+        log.info(f"Proxy active: {PROXY_URL.split('@')[-1]}")
+    else:
+        log.warning("NBA_PROXY_URL not set -- all stats.nba.com calls will be direct")
 
     engine = get_engine()
     ensure_tables(engine)
