@@ -1,0 +1,69 @@
+name: Proxy Test
+
+on:
+  workflow_dispatch:
+
+env:
+  NBA_PROXY_URL: ${{ secrets.NBA_PROXY_URL }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Test proxy connectivity
+        run: |
+          python - <<'EOF'
+          import os
+          import requests
+
+          proxy_url = os.environ.get("NBA_PROXY_URL")
+          if not proxy_url:
+              print("ERROR: NBA_PROXY_URL secret is not set")
+              exit(1)
+
+          proxies = {"http": proxy_url, "https": proxy_url}
+
+          # Test 1: Can the proxy reach the internet at all?
+          print("--- Test 1: General connectivity via proxy ---")
+          try:
+              r = requests.get("https://httpbin.org/ip", proxies=proxies, timeout=30)
+              print(f"Status: {r.status_code}")
+              print(f"Response: {r.json()}")
+          except Exception as e:
+              print(f"FAILED: {e}")
+
+          # Test 2: Can the proxy reach stats.nba.com?
+          print("\n--- Test 2: stats.nba.com connectivity via proxy ---")
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+              "Accept": "application/json, text/plain, */*",
+              "x-nba-stats-origin": "stats",
+              "x-nba-stats-token": "true",
+              "Origin": "https://www.nba.com",
+              "Referer": "https://www.nba.com/",
+          }
+          try:
+              r = requests.get(
+                  "https://stats.nba.com/stats/commonallplayers?IsOnlyCurrentSeason=1&LeagueID=00&Season=2025-26",
+                  headers=headers,
+                  proxies=proxies,
+                  timeout=60,
+              )
+              print(f"Status: {r.status_code}")
+              if r.status_code == 200:
+                  data = r.json()
+                  row_count = len(data.get("resultSets", [{}])[0].get("rowSet", []))
+                  print(f"SUCCESS: {row_count} players returned")
+              else:
+                  print(f"Unexpected status: {r.text[:200]}")
+          except Exception as e:
+              print(f"FAILED: {e}")
+          EOF
