@@ -17,10 +17,7 @@ Proxy usage
   All stats.nba.com endpoints are routed through NBA_PROXY_URL (Webshare
   rotating residential proxy) because GitHub Actions datacenter IPs are
   blocked by stats.nba.com.
-  The lineup JSON endpoint (stats.nba.com/js/data/leaders/...) uses the
-  same proxy since it is on the same host.
-  If NBA_PROXY_URL is not set, all calls fall back to direct (useful for
-  local testing where the residential IP is not blocked).
+  If NBA_PROXY_URL is not set, calls fall back to direct (useful locally).
 
 Args
   --days N          Game dates to process per incremental run (default 10).
@@ -41,7 +38,7 @@ import math
 import os
 import time
 import logging
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import requests
@@ -369,10 +366,21 @@ def safe_bool(val):
 
 
 def safe_datetime(val):
+    """
+    Returns a timezone-naive Python datetime for pyodbc / DATETIME2 compatibility.
+    pyodbc with fast_executemany=True serializes tz-aware timestamps as strings
+    with the UTC offset appended (e.g. '2025-10-02 12:00:00+00:00'), which is
+    longer than what SQL Server accepts for DATETIME2, causing right-truncation.
+    Stripping tzinfo produces a plain naive datetime that pyodbc writes cleanly.
+    """
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
     try:
-        return pd.to_datetime(val).to_pydatetime()
+        dt = pd.to_datetime(val)
+        # Convert to UTC then strip tzinfo to get a naive UTC datetime
+        if dt.tzinfo is not None:
+            dt = dt.tz_convert("UTC").tz_localize(None)
+        return dt.to_pydatetime()
     except Exception:
         return None
 
@@ -437,19 +445,10 @@ def upsert(df, engine, schema, table, pk_cols):
 
 # ---------------------------------------------------------------------------
 # HTTP
-# Two helpers:
-#   _get_proxied  -- stats.nba.com endpoints, routes through NBA_PROXY_URL
-#   _get_direct   -- any endpoint that does not need the proxy
 # ---------------------------------------------------------------------------
 def _get_proxied(url, label, params=None, timeout=60):
-    """Routes through NBA_PROXY_URL. Falls back to direct if proxy not set."""
     proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
     return _request(url, label, params=params, timeout=timeout, proxies=proxies)
-
-
-def _get_direct(url, label, params=None, timeout=60):
-    """No proxy. Used for endpoints that work from datacenter IPs."""
-    return _request(url, label, params=params, timeout=timeout, proxies=None)
 
 
 def _request(url, label, params=None, timeout=60, proxies=None):
@@ -636,8 +635,6 @@ def load_schedule(engine, season):
 
 # ===========================================================================
 # DAILY LINEUPS  (M: fnGetLineups / DailyLineups)
-# Endpoint: stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
-# Uses proxy (same host as stats.nba.com).
 # ===========================================================================
 def _fetch_lineups_for_date(game_date):
     date_str = game_date.strftime("%Y%m%d")
@@ -706,10 +703,6 @@ def load_lineups(engine, season, days):
 
 # ===========================================================================
 # PLAYER GAME LOGS  (M: BoxScores / fnGetBoxScore)
-# Endpoint: playergamelogs
-# Period labels: 1Q 2Q 3Q 4Q OT
-# DateTo: empty (M leaves blank)
-# Batch: MinDate strategy, HalfBatch = days // 2
 # ===========================================================================
 def _fetch_game_logs_for_period(min_date, season, period_val, period_label):
     fmt_date = min_date.strftime("%m/%d/%Y")
