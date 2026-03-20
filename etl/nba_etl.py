@@ -11,9 +11,9 @@ Players:         Direct HTTP to commonallplayers via proxy.
 Schedule:        Direct HTTP to scheduleleaguev2 via proxy.
 Box scores:      Direct HTTP to playergamelogs via proxy.
                  5 calls per run (one per period: 1Q/2Q/3Q/4Q/OT).
-                 DateFrom = earliest missing date, DateTo = empty.
-                 Response covers all games since DateFrom; rows are
-                 filtered to the batch date window before upserting.
+                 DateFrom = Nth oldest missing date (N = --days).
+                 ALL rows returned are upserted regardless of date.
+                 MERGE guarantees idempotency on re-runs.
 Pt stats:        Direct HTTP to leaguedashptstats via proxy.
                  One passing call + one rebounding call per missing date.
                  DateFrom = DateTo = that date (single-day filter).
@@ -36,7 +36,9 @@ Tables written
   nba.daily_lineups          Per-game lineup status, incremental.
 
 Args
-  --days N          Game dates to process per run (default: 3).
+  --days N          Controls DateFrom anchor for box scores. The Nth oldest
+                    missing date is used as DateFrom; all rows returned by
+                    the API since that date are upserted (default: 3).
   --season S        Season string, e.g. 2025-26 (default: 2025-26).
   --load-rosters    Force player reload even if players table is not empty.
   --skip-pt-stats   Skip passing and rebounding stats.
@@ -53,6 +55,7 @@ import os
 import time
 import logging
 from datetime import date, datetime
+from collections import defaultdict
 
 import pandas as pd
 import requests
@@ -95,8 +98,6 @@ def get_proxies():
     return {"http": PROXY_URL, "https": PROXY_URL}
 
 # playergamelogs period config
-# Each tuple: (period_value, game_segment, period_label)
-# OT uses GameSegment=Overtime with Period="" per the working Power Query pattern.
 PERIOD_CONFIG = [
     ("1",  None,       "1Q"),
     ("2",  None,       "2Q"),
@@ -145,13 +146,10 @@ STATIC_TEAMS = [
 # DDL
 # ---------------------------------------------------------------------------
 DDL_STATEMENTS = [
-    # Schema
     """
     IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'nba')
         EXEC('CREATE SCHEMA nba')
     """,
-
-    # nba.teams
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.teams') AND type = 'U')
@@ -166,8 +164,6 @@ DDL_STATEMENTS = [
         CONSTRAINT uq_nba_tricode UNIQUE      (team_tricode)
     )
     """,
-
-    # nba.players
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.players') AND type = 'U')
@@ -186,8 +182,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.teams (team_id)
     )
     """,
-
-    # nba.schedule
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.schedule') AND type = 'U')
@@ -208,8 +202,6 @@ DDL_STATEMENTS = [
         CONSTRAINT pk_nba_schedule PRIMARY KEY (game_id)
     )
     """,
-
-    # nba.games (completed games, FK-linked to teams, used by box scores)
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.games') AND type = 'U')
@@ -234,8 +226,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.teams (team_id)
     )
     """,
-
-    # nba.player_box_score_stats
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_box_score_stats') AND type = 'U')
@@ -283,8 +273,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.players (player_id)
     )
     """,
-
-    # nba.player_passing_stats
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_passing_stats') AND type = 'U')
@@ -301,8 +289,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.players (player_id)
     )
     """,
-
-    # nba.player_rebound_chances
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.player_rebound_chances') AND type = 'U')
@@ -319,8 +305,6 @@ DDL_STATEMENTS = [
             REFERENCES nba.players (player_id)
     )
     """,
-
-    # nba.daily_lineups
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
                    WHERE object_id = OBJECT_ID(N'nba.daily_lineups') AND type = 'U')
@@ -570,7 +554,6 @@ def load_players(engine, season):
 
 # ---------------------------------------------------------------------------
 # Schedule (scheduleleaguev2 via proxy)
-# Loads nba.schedule (full reload) and nba.games (completed games only).
 # ---------------------------------------------------------------------------
 def load_schedule(engine, season):
     log.info(f"Loading nba.schedule for season {season}")
@@ -656,11 +639,8 @@ def load_schedule(engine, season):
 # ---------------------------------------------------------------------------
 # Box scores via playergamelogs (via proxy)
 #
-# Strategy: 5 API calls per run, one per period (1Q/2Q/3Q/4Q/OT).
-# DateFrom = earliest missing date, DateTo = empty (open-ended).
-# The response contains all games from DateFrom onward for that period.
-# Rows are filtered to batch_dates before upserting, so only the intended
-# window is written and the incremental state key (game_date) stays correct.
+# 5 API calls per run, one per period. DateFrom = Nth oldest missing date.
+# ALL rows returned are upserted. MERGE handles idempotency.
 # ---------------------------------------------------------------------------
 def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season, timeout=90):
     date_str = date_from.strftime("%m/%d/%Y")
@@ -694,18 +674,12 @@ def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_fr
     return df
 
 
-def fetch_box_scores_for_batch(batch_dates, season):
+def fetch_and_upsert_box_scores(date_from, season, engine):
     """
-    Fetch all 5 period calls once using the earliest batch date as DateFrom.
-    Returns a dict of {game_date: [row_dicts]} containing only rows whose
-    GAME_DATE falls within batch_dates.
+    Make 5 period calls with DateFrom = date_from, DateTo = empty.
+    Group all returned rows by game_date and upsert each date in full.
     """
-    if not batch_dates:
-        return {}
-
-    batch_date_set = set(batch_dates)
-    date_from      = min(batch_dates)
-    rows_by_date   = {d: [] for d in batch_dates}
+    rows_by_date = defaultdict(list)
 
     for period_value, game_segment, period_label in PERIOD_CONFIG:
         df = _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season)
@@ -716,8 +690,6 @@ def fetch_box_scores_for_batch(batch_dates, season):
             gid      = safe_str(row.get("GAME_ID"))
             row_date = safe_date(row.get("GAME_DATE"))
             if pid is None or gid is None or row_date is None:
-                continue
-            if row_date not in batch_date_set:
                 continue
             rows_by_date[row_date].append({
                 "game_id":        gid,
@@ -757,13 +729,24 @@ def fetch_box_scores_for_batch(batch_dates, season):
                 "available_flag": safe_int(row.get("AVAILABLE_FLAG")),
             })
 
-    return rows_by_date
+    total_rows = 0
+    for game_date in sorted(rows_by_date):
+        date_rows = rows_by_date[game_date]
+        upsert(
+            pd.DataFrame(date_rows), engine,
+            "nba", "player_box_score_stats",
+            ["game_id", "player_id", "period"],
+        )
+        log.info(f"  {len(date_rows)} rows upserted for {game_date}")
+        total_rows += len(date_rows)
+
+    log.info(f"  Box scores total: {total_rows} rows across {len(rows_by_date)} date(s)")
 
 
 # ---------------------------------------------------------------------------
-# Dates with missing box score data
+# Earliest missing box score date anchor
 # ---------------------------------------------------------------------------
-def get_unloaded_box_dates(completed_pairs, engine):
+def get_earliest_missing_box_date(completed_pairs, engine, days):
     with engine.connect() as conn:
         loaded = {
             str(row[0]) for row in
@@ -772,7 +755,12 @@ def get_unloaded_box_dates(completed_pairs, engine):
     all_dates = sorted(set(gdate for _, gdate in completed_pairs))
     missing   = [d for d in all_dates if str(d) not in loaded]
     log.info(f"  Box scores: {len(loaded)} dates loaded, {len(missing)} remaining")
-    return missing
+    if not missing:
+        return None
+    # Anchor to the Nth oldest missing date so --days controls how far back
+    # DateFrom is set. The API returns everything from there forward.
+    anchor_index = min(days - 1, len(missing) - 1)
+    return missing[anchor_index]
 
 
 # ---------------------------------------------------------------------------
@@ -792,8 +780,6 @@ def get_unloaded_pt_dates(completed_pairs, engine):
 
 # ---------------------------------------------------------------------------
 # Pt stats (via proxy)
-# One passing call + one rebounding call per missing date.
-# DateFrom = DateTo = that date (single-day cumulative totals).
 # ---------------------------------------------------------------------------
 def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     date_str = game_date.strftime("%m/%d/%Y")
@@ -871,7 +857,6 @@ def load_rebound_chances(game_date, season, engine):
 
 # ---------------------------------------------------------------------------
 # Daily lineups (via proxy)
-# Incremental: completed games loaded once; unfinished games re-fetched every run.
 # ---------------------------------------------------------------------------
 def get_lineup_games_to_fetch(schedule_rows_today, engine):
     with engine.connect() as conn:
@@ -986,34 +971,19 @@ def main():
     completed_pairs = load_schedule(engine, args.season)
 
     # ------------------------------------------------------------------
-    # Box scores: 5 API calls total regardless of batch size.
+    # Box scores: 5 API calls total.
+    # DateFrom = Nth oldest missing date (N controlled by --days).
+    # Everything returned since DateFrom is upserted.
     # ------------------------------------------------------------------
     if not completed_pairs:
         log.info("Box scores: no completed games found.")
     else:
-        missing_dates = get_unloaded_box_dates(completed_pairs, engine)
-        batch_dates   = missing_dates[:args.days]
-        if not batch_dates:
+        date_from = get_earliest_missing_box_date(completed_pairs, engine, args.days)
+        if date_from is None:
             log.info("Box scores: all dates up to date.")
         else:
-            remain = len(missing_dates) - len(batch_dates)
-            log.info(
-                f"Box scores: {len(batch_dates)} date(s) in batch "
-                f"({batch_dates[0]} to {batch_dates[-1]}), "
-                f"{remain} date(s) remain after this run."
-            )
-            rows_by_date = fetch_box_scores_for_batch(batch_dates, args.season)
-            for box_date in batch_dates:
-                date_rows = rows_by_date.get(box_date, [])
-                if not date_rows:
-                    log.warning(f"  No box score rows for {box_date}, skipping.")
-                    continue
-                upsert(
-                    pd.DataFrame(date_rows), engine,
-                    "nba", "player_box_score_stats",
-                    ["game_id", "player_id", "period"],
-                )
-                log.info(f"  {len(date_rows)} rows upserted for {box_date}")
+            log.info(f"Box scores: fetching from {date_from}, upserting all returned dates.")
+            fetch_and_upsert_box_scores(date_from, args.season, engine)
             log.info("Box score phase complete.")
 
     # ------------------------------------------------------------------
