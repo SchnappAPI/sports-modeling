@@ -40,27 +40,26 @@ STAT_COL_MAP = {
     "RA":  "ra",
 }
 
-# Columns to SUM from per-period rows to get full-game totals
+# Numeric columns to SUM from per-period rows to get full-game totals.
+# minutes_sec is varchar in the source table and is excluded.
 SUM_COLS = [
     "pts", "ast", "reb", "fg3m", "stl", "blk",
     "fgm", "fga", "fg3a", "ftm", "fta",
-    "oreb", "dreb", "tov", "minutes_sec"
+    "oreb", "dreb", "tov",
 ]
 
 
 def get_active_players(engine, grade_date):
     """
-    Return a list of {player_name} dicts for players expected to play today.
+    Return a list of player_name strings for players expected to play today.
 
     Priority:
-      1. Confirmed active players from daily_lineups (lineup_status = Confirmed,
-         roster_status = Active)
-      2. Expected active players (lineup_status = Expected, roster_status = Active)
+      1. Confirmed active players from daily_lineups
+      2. Expected active players from daily_lineups
       3. Fallback: distinct players who appeared in a game in the last FALLBACK_DAYS
     """
     date_str = str(grade_date)
 
-    # Check for confirmed rows first
     confirmed = pd.read_sql(
         text("""
             SELECT DISTINCT player_name
@@ -77,7 +76,6 @@ def get_active_players(engine, grade_date):
         print(f"  Using {len(confirmed)} confirmed active players from daily_lineups.")
         return confirmed["player_name"].tolist()
 
-    # Fall back to expected
     expected = pd.read_sql(
         text("""
             SELECT DISTINCT player_name
@@ -94,7 +92,6 @@ def get_active_players(engine, grade_date):
         print(f"  Using {len(expected)} expected active players from daily_lineups.")
         return expected["player_name"].tolist()
 
-    # Fallback: recent box score participants
     cutoff = (pd.to_datetime(grade_date) - timedelta(days=FALLBACK_DAYS)).date()
     recent = pd.read_sql(
         text("""
@@ -118,7 +115,9 @@ def get_player_game_totals(engine, player_name, grade_date, lookback_days):
     OT is included in all sums.
     """
     cutoff = (pd.to_datetime(grade_date) - timedelta(days=lookback_days)).date()
-    sum_expr = ", ".join([f"SUM({c}) AS {c}" for c in SUM_COLS])
+
+    # Cast each column to FLOAT before summing to avoid smallint aggregation issues
+    sum_expr = ", ".join([f"SUM(CAST({c} AS FLOAT)) AS {c}" for c in SUM_COLS])
 
     df = pd.read_sql(
         text(f"""
@@ -172,7 +171,6 @@ def build_grade_rows(player_name, grade_date, df):
         if df.empty or col not in df.columns:
             continue
 
-        # Compute hit rate at every line threshold
         line_results = []
         for line in lines:
             hr, n = hit_rate(df, col, line)
@@ -182,18 +180,17 @@ def build_grade_rows(player_name, grade_date, df):
                 "sample_size": n
             })
 
-        # Each threshold becomes its own grade row
         for result in line_results:
             hr_val = result["hit_rate"]
             rows.append({
-                "grade_date":          str(grade_date),
-                "player_name":         player_name,
-                "stat_code":           stat_code,
-                "line_value":          result["line"],
-                "hit_rate":            hr_val,
-                "sample_size":         result["sample_size"],
-                "grade":               round(hr_val * 100, 1) if hr_val is not None else None,
-                "all_line_hit_rates":  json.dumps(line_results),
+                "grade_date":         str(grade_date),
+                "player_name":        player_name,
+                "stat_code":          stat_code,
+                "line_value":         result["line"],
+                "hit_rate":           hr_val,
+                "sample_size":        result["sample_size"],
+                "grade":              round(hr_val * 100, 1) if hr_val is not None else None,
+                "all_line_hit_rates": json.dumps(line_results),
             })
 
     return rows
