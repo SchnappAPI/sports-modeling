@@ -10,65 +10,137 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from etl.db import get_engine
 
 LOOKBACK_DAYS = 60
+FALLBACK_DAYS = 14  # days of recent play used when no lineup data exists
 
-# Columns to sum from per-period rows to get full-game totals.
-# dd2 and td3 are excluded because they must be derived after aggregation.
-SUM_COLS = [
-    "fgm", "fga", "fg3m", "fg3a", "ftm", "fta",
-    "oreb", "dreb", "reb", "ast", "tov", "stl", "blk", "pts", "minutes_sec"
-]
-
-PROP_COL_MAP = {
-    "points":    "pts",
-    "rebounds":  "reb",
-    "assists":   "ast",
-    "threes":    "fg3m",
-    "steals":    "stl",
-    "blocks":    "blk",
-    "turnovers": "tov",
-    "pra":       "pra",   # derived
-    "pr":        "pr",    # derived
-    "ra":        "ra",    # derived
+# Generic lines per stat code
+GENERIC_LINES = {
+    "PTS": [0, 10, 15, 20, 25, 30, 35, 40],
+    "AST": [0, 2, 4, 6, 8, 10, 12, 14],
+    "REB": [0, 4, 6, 8, 10, 12, 14, 16],
+    "3PM": [0, 1, 2, 3, 4, 5, 6, 7],
+    "STL": [0, 1, 2, 3, 4, 5, 6, 7],
+    "BLK": [0, 1, 2, 3, 4, 5, 6, 7],
+    "PR":  [0, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+    "PA":  [0, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+    "PRA": [0, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65],
+    "RA":  [0, 10, 15, 20, 25, 30, 35],
 }
 
-ALT_SPREAD = [-5.0, -2.5, 0.0, 2.5, 5.0]  # offsets from primary line
+# Maps stat code to the aggregated column name used after summation
+STAT_COL_MAP = {
+    "PTS": "pts",
+    "AST": "ast",
+    "REB": "reb",
+    "3PM": "fg3m",
+    "STL": "stl",
+    "BLK": "blk",
+    "PR":  "pr",
+    "PA":  "pa",
+    "PRA": "pra",
+    "RA":  "ra",
+}
+
+# Columns to SUM from per-period rows to get full-game totals
+SUM_COLS = [
+    "pts", "ast", "reb", "fg3m", "stl", "blk",
+    "fgm", "fga", "fg3a", "ftm", "fta",
+    "oreb", "dreb", "tov", "minutes_sec"
+]
 
 
-def get_player_game_totals(engine, player_id, game_date, lookback_days):
+def get_active_players(engine, grade_date):
+    """
+    Return a list of {player_name} dicts for players expected to play today.
+
+    Priority:
+      1. Confirmed active players from daily_lineups (lineup_status = Confirmed,
+         roster_status = Active)
+      2. Expected active players (lineup_status = Expected, roster_status = Active)
+      3. Fallback: distinct players who appeared in a game in the last FALLBACK_DAYS
+    """
+    date_str = str(grade_date)
+
+    # Check for confirmed rows first
+    confirmed = pd.read_sql(
+        text("""
+            SELECT DISTINCT player_name
+            FROM nba.daily_lineups
+            WHERE game_date = :gd
+              AND lineup_status = 'Confirmed'
+              AND roster_status = 'Active'
+        """),
+        engine,
+        params={"gd": date_str}
+    )
+
+    if not confirmed.empty:
+        print(f"  Using {len(confirmed)} confirmed active players from daily_lineups.")
+        return confirmed["player_name"].tolist()
+
+    # Fall back to expected
+    expected = pd.read_sql(
+        text("""
+            SELECT DISTINCT player_name
+            FROM nba.daily_lineups
+            WHERE game_date = :gd
+              AND lineup_status = 'Expected'
+              AND roster_status = 'Active'
+        """),
+        engine,
+        params={"gd": date_str}
+    )
+
+    if not expected.empty:
+        print(f"  Using {len(expected)} expected active players from daily_lineups.")
+        return expected["player_name"].tolist()
+
+    # Fallback: recent box score participants
+    cutoff = (pd.to_datetime(grade_date) - timedelta(days=FALLBACK_DAYS)).date()
+    recent = pd.read_sql(
+        text("""
+            SELECT DISTINCT player_name
+            FROM nba.player_box_score_stats
+            WHERE game_date >= :cutoff
+        """),
+        engine,
+        params={"cutoff": str(cutoff)}
+    )
+
+    print(f"  No lineup data for {grade_date}. "
+          f"Falling back to {len(recent)} players active in last {FALLBACK_DAYS} days.")
+    return recent["player_name"].tolist()
+
+
+def get_player_game_totals(engine, player_name, grade_date, lookback_days):
     """
     Aggregate per-period rows into full-game totals for a player
     over the lookback window. Returns one row per game_id.
-    OT is included in all sums (matches sportsbook convention).
+    OT is included in all sums.
     """
-    cutoff = (pd.to_datetime(game_date) - timedelta(days=lookback_days)).date()
-
+    cutoff = (pd.to_datetime(grade_date) - timedelta(days=lookback_days)).date()
     sum_expr = ", ".join([f"SUM({c}) AS {c}" for c in SUM_COLS])
 
-    sql = f"""
-        SELECT
-            game_id,
-            game_date,
-            {sum_expr}
-        FROM nba.player_box_score_stats
-        WHERE player_id = :pid
-          AND game_date >= :cutoff
-          AND game_date < :gd
-        GROUP BY game_id, game_date
-        ORDER BY game_date ASC
-    """
-
     df = pd.read_sql(
-        text(sql),
+        text(f"""
+            SELECT game_id, game_date, {sum_expr}
+            FROM nba.player_box_score_stats
+            WHERE player_name = :name
+              AND game_date >= :cutoff
+              AND game_date < :gd
+            GROUP BY game_id, game_date
+            ORDER BY game_date ASC
+        """),
         engine,
-        params={"pid": player_id, "cutoff": str(cutoff), "gd": str(game_date)}
+        params={"name": player_name, "cutoff": str(cutoff), "gd": str(grade_date)}
     )
 
     if df.empty:
         return df
 
-    # Derive combo props after aggregation
-    df["pra"] = df["pts"] + df["reb"] + df["ast"]
+    # Derive combo stats after aggregation
     df["pr"]  = df["pts"] + df["reb"]
+    df["pa"]  = df["pts"] + df["ast"]
+    df["pra"] = df["pts"] + df["reb"] + df["ast"]
     df["ra"]  = df["reb"] + df["ast"]
 
     return df
@@ -86,38 +158,45 @@ def hit_rate(df, col, line):
     return rate, n
 
 
-def alternate_hit_rates(df, col, primary_line, spreads):
-    results = []
-    for offset in spreads:
-        threshold = primary_line + offset
-        rate, n = hit_rate(df, col, threshold)
-        results.append({
-            "threshold": threshold,
-            "hit_rate": rate,
-            "sample_size": n
-        })
-    return results
-
-
-def scale_grade(hit_rate_value):
+def build_grade_rows(player_name, grade_date, df):
     """
-    Phase 1: grade is the hit rate scaled to 0-100.
-    Later phases blend additional components in here.
+    For a single player's game history DataFrame, compute hit rates
+    across every stat code and every generic line. Returns a list of
+    row dicts ready to upsert into common.daily_grades.
     """
-    if hit_rate_value is None:
-        return None
-    return round(hit_rate_value * 100, 1)
+    rows = []
 
+    for stat_code, lines in GENERIC_LINES.items():
+        col = STAT_COL_MAP[stat_code]
 
-def get_lines(engine, grade_date):
-    """Pull active prop lines for the given date from common.prop_lines."""
-    sql = """
-        SELECT player_id, player_name, prop_type, line_value
-        FROM common.prop_lines
-        WHERE grade_date = :gd AND active = 1
-    """
-    df = pd.read_sql(text(sql), engine, params={"gd": str(grade_date)})
-    return df.to_dict("records")
+        if df.empty or col not in df.columns:
+            continue
+
+        # Compute hit rate at every line threshold
+        line_results = []
+        for line in lines:
+            hr, n = hit_rate(df, col, line)
+            line_results.append({
+                "line": line,
+                "hit_rate": hr,
+                "sample_size": n
+            })
+
+        # Each threshold becomes its own grade row
+        for result in line_results:
+            hr_val = result["hit_rate"]
+            rows.append({
+                "grade_date":          str(grade_date),
+                "player_name":         player_name,
+                "stat_code":           stat_code,
+                "line_value":          result["line"],
+                "hit_rate":            hr_val,
+                "sample_size":         result["sample_size"],
+                "grade":               round(hr_val * 100, 1) if hr_val is not None else None,
+                "all_line_hit_rates":  json.dumps(line_results),
+            })
+
+    return rows
 
 
 def ensure_tables(engine):
@@ -128,18 +207,17 @@ def ensure_tables(engine):
                 WHERE TABLE_SCHEMA = 'common' AND TABLE_NAME = 'daily_grades'
             )
             CREATE TABLE common.daily_grades (
-                grade_id             INT IDENTITY(1,1) PRIMARY KEY,
-                grade_date           DATE NOT NULL,
-                player_id            INT NOT NULL,
-                player_name          NVARCHAR(100) NOT NULL,
-                prop_type            NVARCHAR(50) NOT NULL,
-                line_value           FLOAT NOT NULL,
-                final_grade          FLOAT,
-                hit_rate_score       FLOAT,
-                sample_size          INT,
-                alternate_hit_rates  NVARCHAR(MAX),
-                created_at           DATETIME2 DEFAULT GETUTCDATE(),
-                CONSTRAINT uq_daily_grade UNIQUE (grade_date, player_id, prop_type, line_value)
+                grade_id            INT IDENTITY(1,1) PRIMARY KEY,
+                grade_date          DATE NOT NULL,
+                player_name         NVARCHAR(100) NOT NULL,
+                stat_code           NVARCHAR(10) NOT NULL,
+                line_value          FLOAT NOT NULL,
+                hit_rate            FLOAT,
+                sample_size         INT,
+                grade               FLOAT,
+                all_line_hit_rates  NVARCHAR(MAX),
+                created_at          DATETIME2 DEFAULT GETUTCDATE(),
+                CONSTRAINT uq_daily_grade UNIQUE (grade_date, player_name, stat_code, line_value)
             )
         """))
 
@@ -158,21 +236,21 @@ def upsert_grades(engine, rows):
         conn.execute(text("""
             MERGE common.daily_grades AS t
             USING #stage_daily_grades AS s
-            ON (    t.grade_date = s.grade_date
-                AND t.player_id  = s.player_id
-                AND t.prop_type  = s.prop_type
-                AND t.line_value = s.line_value)
+            ON (    t.grade_date  = s.grade_date
+                AND t.player_name = s.player_name
+                AND t.stat_code   = s.stat_code
+                AND t.line_value  = s.line_value)
             WHEN MATCHED THEN UPDATE SET
-                t.final_grade         = s.final_grade,
-                t.hit_rate_score      = s.hit_rate_score,
-                t.sample_size         = s.sample_size,
-                t.alternate_hit_rates = s.alternate_hit_rates
+                t.hit_rate           = s.hit_rate,
+                t.sample_size        = s.sample_size,
+                t.grade              = s.grade,
+                t.all_line_hit_rates = s.all_line_hit_rates
             WHEN NOT MATCHED THEN INSERT (
-                grade_date, player_id, player_name, prop_type, line_value,
-                final_grade, hit_rate_score, sample_size, alternate_hit_rates
+                grade_date, player_name, stat_code, line_value,
+                hit_rate, sample_size, grade, all_line_hit_rates
             ) VALUES (
-                s.grade_date, s.player_id, s.player_name, s.prop_type, s.line_value,
-                s.final_grade, s.hit_rate_score, s.sample_size, s.alternate_hit_rates
+                s.grade_date, s.player_name, s.stat_code, s.line_value,
+                s.hit_rate, s.sample_size, s.grade, s.all_line_hit_rates
             );
         """))
 
@@ -186,47 +264,31 @@ def run(grade_date=None):
     engine = get_engine()
     ensure_tables(engine)
 
-    lines = get_lines(engine, grade_date)
-    if not lines:
-        print(f"No active prop lines found for {grade_date}. "
-              f"Insert rows into common.prop_lines and re-run.")
+    print(f"Grading date: {grade_date}")
+    players = get_active_players(engine, grade_date)
+
+    if not players:
+        print("No active players found. Exiting.")
         return
 
-    print(f"Grading {len(lines)} props for {grade_date}.")
-    rows = []
+    all_rows = []
+    skipped = 0
 
-    for item in lines:
-        pid       = item["player_id"]
-        name      = item["player_name"]
-        prop      = item["prop_type"]
-        line      = item["line_value"]
-        col       = PROP_COL_MAP.get(prop)
+    for player_name in players:
+        df = get_player_game_totals(engine, player_name, grade_date, LOOKBACK_DAYS)
 
-        if col is None:
-            print(f"  SKIP: unknown prop_type '{prop}' for {name}")
+        if df.empty:
+            skipped += 1
             continue
 
-        df = get_player_game_totals(engine, pid, grade_date, LOOKBACK_DAYS)
-        hr, n = hit_rate(df, col, line)
-        grade = scale_grade(hr)
-        alt   = alternate_hit_rates(df, col, line, ALT_SPREAD)
+        rows = build_grade_rows(player_name, grade_date, df)
+        all_rows.extend(rows)
 
-        print(f"  {name} | {prop} {line} | hit_rate={hr} n={n} | grade={grade}")
+    print(f"  {len(players) - skipped} players graded, {skipped} skipped (no history).")
+    print(f"  Writing {len(all_rows)} grade rows...")
 
-        rows.append({
-            "grade_date":          str(grade_date),
-            "player_id":           pid,
-            "player_name":         name,
-            "prop_type":           prop,
-            "line_value":          line,
-            "final_grade":         grade,
-            "hit_rate_score":      round(hr * 100, 1) if hr is not None else None,
-            "sample_size":         n,
-            "alternate_hit_rates": json.dumps(alt),
-        })
-
-    upsert_grades(engine, rows)
-    print(f"Done. Wrote {len(rows)} grades for {grade_date}.")
+    upsert_grades(engine, all_rows)
+    print(f"Done. Wrote {len(all_rows)} grades for {grade_date}.")
 
 
 if __name__ == "__main__":
