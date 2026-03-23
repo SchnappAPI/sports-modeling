@@ -115,12 +115,11 @@ def grade_date_set_based(engine, grade_date):
 
     Returns a list of row dicts ready to upsert.
     """
-    # Determine active players for this date
     lineup_players = pd.read_sql(
         text("""
             SELECT DISTINCT player_name
             FROM nba.daily_lineups
-            WHERE game_date   = :gd
+            WHERE game_date    = :gd
               AND roster_status = 'Active'
               AND lineup_status IN ('Confirmed', 'Expected')
         """),
@@ -129,6 +128,7 @@ def grade_date_set_based(engine, grade_date):
     )
 
     if not lineup_players.empty:
+        # Join alias must match the CTE alias in player_stats: u
         player_filter_sql = """
             JOIN (
                 SELECT DISTINCT player_name
@@ -136,7 +136,7 @@ def grade_date_set_based(engine, grade_date):
                 WHERE game_date    = :gd
                   AND roster_status = 'Active'
                   AND lineup_status IN ('Confirmed', 'Expected')
-            ) lp ON g.player_name = lp.player_name
+            ) lp ON u.player_name = lp.player_name
         """
         source = "lineup"
     else:
@@ -146,12 +146,10 @@ def grade_date_set_based(engine, grade_date):
                 FROM nba.player_box_score_stats
                 WHERE game_date >= DATEADD(day, -:lb, :gd)
                   AND game_date <  :gd
-            ) lp ON g.player_name = lp.player_name
+            ) lp ON u.player_name = lp.player_name
         """
         source = "fallback"
 
-    # One query: aggregate per-period rows into game totals, derive combo stats,
-    # cross join with thresholds, compute hit rates — all in the database.
     sql = f"""
         WITH game_totals AS (
             SELECT
@@ -178,31 +176,22 @@ def grade_date_set_based(engine, grade_date):
                 fg3m,
                 stl,
                 blk,
-                pts + reb            AS pr,
-                pts + ast            AS pa,
-                pts + reb + ast      AS pra,
-                reb + ast            AS ra
+                pts + reb       AS pr,
+                pts + ast       AS pa,
+                pts + reb + ast AS pra,
+                reb + ast       AS ra
             FROM game_totals
         ),
         unpivoted AS (
-            SELECT player_name, game_date, 'PTS' AS stat_code, pts  AS stat_value FROM game_totals_with_combos
-            UNION ALL
-            SELECT player_name, game_date, 'AST',  ast  FROM game_totals_with_combos
-            UNION ALL
-            SELECT player_name, game_date, 'REB',  reb  FROM game_totals_with_combos
-            UNION ALL
-            SELECT player_name, game_date, '3PM',  fg3m FROM game_totals_with_combos
-            UNION ALL
-            SELECT player_name, game_date, 'STL',  stl  FROM game_totals_with_combos
-            UNION ALL
-            SELECT player_name, game_date, 'BLK',  blk  FROM game_totals_with_combos
-            UNION ALL
-            SELECT player_name, game_date, 'PR',   pr   FROM game_totals_with_combos
-            UNION ALL
-            SELECT player_name, game_date, 'PA',   pa   FROM game_totals_with_combos
-            UNION ALL
-            SELECT player_name, game_date, 'PRA',  pra  FROM game_totals_with_combos
-            UNION ALL
+            SELECT player_name, game_date, 'PTS' AS stat_code, pts  AS stat_value FROM game_totals_with_combos UNION ALL
+            SELECT player_name, game_date, 'AST',  ast  FROM game_totals_with_combos UNION ALL
+            SELECT player_name, game_date, 'REB',  reb  FROM game_totals_with_combos UNION ALL
+            SELECT player_name, game_date, '3PM',  fg3m FROM game_totals_with_combos UNION ALL
+            SELECT player_name, game_date, 'STL',  stl  FROM game_totals_with_combos UNION ALL
+            SELECT player_name, game_date, 'BLK',  blk  FROM game_totals_with_combos UNION ALL
+            SELECT player_name, game_date, 'PR',   pr   FROM game_totals_with_combos UNION ALL
+            SELECT player_name, game_date, 'PA',   pa   FROM game_totals_with_combos UNION ALL
+            SELECT player_name, game_date, 'PRA',  pra  FROM game_totals_with_combos UNION ALL
             SELECT player_name, game_date, 'RA',   ra   FROM game_totals_with_combos
         ),
         player_stats AS (
@@ -215,8 +204,8 @@ def grade_date_set_based(engine, grade_date):
                 ps.player_name,
                 ps.stat_code,
                 t.line_value,
-                COUNT(*)                                                        AS sample_size,
-                SUM(CASE WHEN ps.stat_value > t.line_value THEN 1 ELSE 0 END)  AS hits
+                COUNT(*)                                                       AS sample_size,
+                SUM(CASE WHEN ps.stat_value > t.line_value THEN 1 ELSE 0 END) AS hits
             FROM player_stats ps
             JOIN common.grade_thresholds t ON t.stat_code = ps.stat_code
             GROUP BY ps.player_name, ps.stat_code, t.line_value
@@ -241,8 +230,6 @@ def grade_date_set_based(engine, grade_date):
     if df.empty:
         return [], source
 
-    # Build the all_line_hit_rates JSON per player+stat using the full result
-    # already in memory — no additional queries needed.
     json_map = {}
     for (player, stat), group in df.groupby(["player_name", "stat_code"]):
         json_map[(player, stat)] = json.dumps([
@@ -336,10 +323,6 @@ def run(grade_date=None, batch_size=BATCH_SIZE):
     engine = get_engine()
     ensure_tables(engine)
 
-    # Determine the upper bound date for grading.
-    # If a specific date is passed, grade only that date.
-    # If no date is passed, grade all missing dates up to yesterday
-    # (today's games have not been played yet).
     if grade_date:
         target_date = str(pd.to_datetime(grade_date).date())
         work_dates = [target_date]
