@@ -49,6 +49,15 @@ SUM_COLS = [
 ]
 
 
+def _to_python(val):
+    """Convert numpy scalars to native Python types so pyodbc can bind them."""
+    if val is None:
+        return None
+    if hasattr(val, "item"):
+        return val.item()
+    return val
+
+
 def get_active_players(engine, grade_date):
     """
     Return a list of player_name strings for players expected to play today.
@@ -153,7 +162,7 @@ def hit_rate(df, col, line):
     if valid.empty:
         return None, 0
     n = len(valid)
-    rate = round((valid > line).sum() / n, 4)
+    rate = round(float((valid > line).sum()) / n, 4)
     return rate, n
 
 
@@ -186,10 +195,10 @@ def build_grade_rows(player_name, grade_date, df):
                 "grade_date":         str(grade_date),
                 "player_name":        player_name,
                 "stat_code":          stat_code,
-                "line_value":         result["line"],
-                "hit_rate":           hr_val,
-                "sample_size":        result["sample_size"],
-                "grade":              round(hr_val * 100, 1) if hr_val is not None else None,
+                "line_value":         float(result["line"]),
+                "hit_rate":           float(hr_val) if hr_val is not None else None,
+                "sample_size":        int(result["sample_size"]),
+                "grade":              round(float(hr_val) * 100, 1) if hr_val is not None else None,
                 "all_line_hit_rates": json.dumps(line_results),
             })
 
@@ -226,8 +235,6 @@ def upsert_grades(engine, rows):
 
     # All staging work happens inside a single connection so the local temp
     # table remains visible for the INSERT chunks and the MERGE that follows.
-    # exec_driver_sql with a list of tuples uses executemany under the hood,
-    # which correctly handles NVARCHAR(MAX) without type inference truncation.
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE #stage_daily_grades (
@@ -245,17 +252,18 @@ def upsert_grades(engine, rows):
         chunk_size = 200
         for i in range(0, len(rows), chunk_size):
             chunk = rows[i:i + chunk_size]
-            # Build list of tuples — exec_driver_sql executemany form
+            # All values converted to native Python types before binding.
+            # pyodbc cannot handle numpy scalars and miscalculates buffer sizes.
             tuples = [
                 (
-                    r["grade_date"],
-                    r["player_name"],
-                    r["stat_code"],
-                    r["line_value"],
-                    r["hit_rate"],
-                    r["sample_size"],
-                    r["grade"],
-                    r["all_line_hit_rates"],
+                    _to_python(r["grade_date"]),
+                    _to_python(r["player_name"]),
+                    _to_python(r["stat_code"]),
+                    _to_python(r["line_value"]),
+                    _to_python(r["hit_rate"]),
+                    _to_python(r["sample_size"]),
+                    _to_python(r["grade"]),
+                    _to_python(r["all_line_hit_rates"]),
                 )
                 for r in chunk
             ]
