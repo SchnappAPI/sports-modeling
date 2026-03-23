@@ -224,16 +224,10 @@ def upsert_grades(engine, rows):
         print("No grades to write.")
         return
 
-    df = pd.DataFrame(rows)
-    df = df.where(pd.notna(df), other=None)
-
-    # Create the staging table explicitly so pandas never infers column types.
-    # Without this, pandas infers VARCHAR width from the first row it sees and
-    # truncates longer JSON strings (e.g. PRA with 13 thresholds hits 810 chars).
+    # All staging work happens inside a single connection so the local temp
+    # table remains visible for both the INSERT and the MERGE that follows.
     with engine.begin() as conn:
         conn.execute(text("""
-            IF OBJECT_ID('tempdb..#stage_daily_grades') IS NOT NULL
-                DROP TABLE #stage_daily_grades;
             CREATE TABLE #stage_daily_grades (
                 grade_date         DATE,
                 player_name        NVARCHAR(100),
@@ -243,13 +237,32 @@ def upsert_grades(engine, rows):
                 sample_size        INT,
                 grade              FLOAT,
                 all_line_hit_rates NVARCHAR(MAX)
-            );
+            )
         """))
 
-    # Append into the pre-created staging table — pandas skips schema inference
-    df.to_sql("#stage_daily_grades", engine, index=False, if_exists="append", chunksize=200)
+        # Insert rows in chunks using parameterised VALUES to avoid the
+        # 2100-parameter limit. Each row is 8 params; 200-row chunks = 1600.
+        chunk_size = 200
+        for i in range(0, len(rows), chunk_size):
+            chunk = rows[i:i + chunk_size]
+            placeholders = ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)" for _ in chunk])
+            params = []
+            for r in chunk:
+                params.extend([
+                    r["grade_date"],
+                    r["player_name"],
+                    r["stat_code"],
+                    r["line_value"],
+                    r["hit_rate"],
+                    r["sample_size"],
+                    r["grade"],
+                    r["all_line_hit_rates"],
+                ])
+            conn.exec_driver_sql(
+                f"INSERT INTO #stage_daily_grades VALUES {placeholders}",
+                params
+            )
 
-    with engine.begin() as conn:
         conn.execute(text("""
             MERGE common.daily_grades AS t
             USING #stage_daily_grades AS s
@@ -268,7 +281,7 @@ def upsert_grades(engine, rows):
             ) VALUES (
                 s.grade_date, s.player_name, s.stat_code, s.line_value,
                 s.hit_rate, s.sample_size, s.grade, s.all_line_hit_rates
-            );
+            )
         """))
 
 
