@@ -307,7 +307,7 @@ def upsert_grades(engine, rows):
             ) VALUES (
                 s.grade_date, s.player_name, s.stat_code, s.line_value,
                 s.hit_rate, s.sample_size, s.grade, s.all_line_hit_rates
-            )
+            );
         """))
 
 
