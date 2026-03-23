@@ -227,7 +227,27 @@ def upsert_grades(engine, rows):
     df = pd.DataFrame(rows)
     df = df.where(pd.notna(df), other=None)
 
-    df.to_sql("#stage_daily_grades", engine, index=False, if_exists="replace", chunksize=200)
+    # Create the staging table explicitly so pandas never infers column types.
+    # Without this, pandas infers VARCHAR width from the first row it sees and
+    # truncates longer JSON strings (e.g. PRA with 13 thresholds hits 810 chars).
+    with engine.begin() as conn:
+        conn.execute(text("""
+            IF OBJECT_ID('tempdb..#stage_daily_grades') IS NOT NULL
+                DROP TABLE #stage_daily_grades;
+            CREATE TABLE #stage_daily_grades (
+                grade_date         DATE,
+                player_name        NVARCHAR(100),
+                stat_code          NVARCHAR(10),
+                line_value         FLOAT,
+                hit_rate           FLOAT,
+                sample_size        INT,
+                grade              FLOAT,
+                all_line_hit_rates NVARCHAR(MAX)
+            );
+        """))
+
+    # Append into the pre-created staging table — pandas skips schema inference
+    df.to_sql("#stage_daily_grades", engine, index=False, if_exists="append", chunksize=200)
 
     with engine.begin() as conn:
         conn.execute(text("""
