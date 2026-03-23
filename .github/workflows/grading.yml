@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: 'Grade date (YYYY-MM-DD). Leave blank for today.'
+        description: 'Grade a specific date (YYYY-MM-DD). Leave blank to process all missing dates.'
+        required: false
+        default: ''
+      batch:
+        description: 'Max dates to process per run. Use 50+ for backfill, leave blank for default (10).'
         required: false
         default: ''
 
@@ -38,8 +42,11 @@ jobs:
 
       - name: Run grading
         run: |
+          ARGS=""
           if [ -n "${{ github.event.inputs.date }}" ]; then
-            python grading/grade_props.py --date "${{ github.event.inputs.date }}"
-          else
-            python grading/grade_props.py
+            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
           fi
+          if [ -n "${{ github.event.inputs.batch }}" ]; then
+            ARGS="$ARGS --batch ${{ github.event.inputs.batch }}"
+          fi
+          python grading/grade_props.py $ARGS
