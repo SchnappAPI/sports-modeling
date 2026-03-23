@@ -2,12 +2,12 @@ import argparse
 import json
 import os
 import sys
+import time
 import pandas as pd
 from datetime import date, timedelta
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from etl.db import get_engine
 
 LOOKBACK_DAYS = 60
 FALLBACK_DAYS = 14  # days of recent play used when no lineup data exists
@@ -49,13 +49,34 @@ SUM_COLS = [
 ]
 
 
-def _to_python(val):
-    """Convert numpy scalars to native Python types so pyodbc can bind them."""
-    if val is None:
-        return None
-    if hasattr(val, "item"):
-        return val.item()
-    return val
+def get_engine(max_retries=3, retry_wait=45):
+    """
+    Grading-specific engine with fast_executemany=False.
+    fast_executemany pre-allocates a fixed buffer from the first row, which
+    truncates NVARCHAR(MAX) columns like all_line_hit_rates when later rows
+    contain longer strings (e.g. PRA with 13 thresholds vs PTS with 8).
+    """
+    conn_str = (
+        f"mssql+pyodbc://{os.environ['AZURE_SQL_USERNAME']}:"
+        f"{os.environ['AZURE_SQL_PASSWORD']}@"
+        f"{os.environ['AZURE_SQL_SERVER']}/"
+        f"{os.environ['AZURE_SQL_DATABASE']}"
+        "?driver=ODBC+Driver+18+for+SQL+Server"
+        "&Encrypt=yes&TrustServerCertificate=no"
+    )
+
+    engine = create_engine(conn_str, fast_executemany=False)
+
+    for i in range(max_retries):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return engine
+        except Exception:
+            if i == max_retries - 1:
+                raise
+            print(f"  Connection attempt {i + 1} failed. Retrying in {retry_wait}s...")
+            time.sleep(retry_wait)
 
 
 def get_active_players(engine, grade_date):
@@ -125,7 +146,6 @@ def get_player_game_totals(engine, player_name, grade_date, lookback_days):
     """
     cutoff = (pd.to_datetime(grade_date) - timedelta(days=lookback_days)).date()
 
-    # Cast each column to FLOAT before summing to avoid smallint aggregation issues
     sum_expr = ", ".join([f"SUM(CAST({c} AS FLOAT)) AS {c}" for c in SUM_COLS])
 
     df = pd.read_sql(
@@ -145,7 +165,6 @@ def get_player_game_totals(engine, player_name, grade_date, lookback_days):
     if df.empty:
         return df
 
-    # Derive combo stats after aggregation
     df["pr"]  = df["pts"] + df["reb"]
     df["pa"]  = df["pts"] + df["ast"]
     df["pra"] = df["pts"] + df["reb"] + df["ast"]
@@ -252,18 +271,16 @@ def upsert_grades(engine, rows):
         chunk_size = 200
         for i in range(0, len(rows), chunk_size):
             chunk = rows[i:i + chunk_size]
-            # All values converted to native Python types before binding.
-            # pyodbc cannot handle numpy scalars and miscalculates buffer sizes.
             tuples = [
                 (
-                    _to_python(r["grade_date"]),
-                    _to_python(r["player_name"]),
-                    _to_python(r["stat_code"]),
-                    _to_python(r["line_value"]),
-                    _to_python(r["hit_rate"]),
-                    _to_python(r["sample_size"]),
-                    _to_python(r["grade"]),
-                    _to_python(r["all_line_hit_rates"]),
+                    r["grade_date"],
+                    r["player_name"],
+                    r["stat_code"],
+                    r["line_value"],
+                    r["hit_rate"],
+                    r["sample_size"],
+                    r["grade"],
+                    r["all_line_hit_rates"],
                 )
                 for r in chunk
             ]
