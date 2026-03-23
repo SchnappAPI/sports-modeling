@@ -225,7 +225,9 @@ def upsert_grades(engine, rows):
         return
 
     # All staging work happens inside a single connection so the local temp
-    # table remains visible for both the INSERT and the MERGE that follows.
+    # table remains visible for the INSERT chunks and the MERGE that follows.
+    # exec_driver_sql with a list of tuples uses executemany under the hood,
+    # which correctly handles NVARCHAR(MAX) without type inference truncation.
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE #stage_daily_grades (
@@ -240,15 +242,12 @@ def upsert_grades(engine, rows):
             )
         """))
 
-        # Insert rows in chunks using parameterised VALUES to avoid the
-        # 2100-parameter limit. Each row is 8 params; 200-row chunks = 1600.
         chunk_size = 200
         for i in range(0, len(rows), chunk_size):
             chunk = rows[i:i + chunk_size]
-            placeholders = ", ".join(["(?, ?, ?, ?, ?, ?, ?, ?)" for _ in chunk])
-            params = []
-            for r in chunk:
-                params.extend([
+            # Build list of tuples — exec_driver_sql executemany form
+            tuples = [
+                (
                     r["grade_date"],
                     r["player_name"],
                     r["stat_code"],
@@ -257,10 +256,12 @@ def upsert_grades(engine, rows):
                     r["sample_size"],
                     r["grade"],
                     r["all_line_hit_rates"],
-                ])
+                )
+                for r in chunk
+            ]
             conn.exec_driver_sql(
-                f"INSERT INTO #stage_daily_grades VALUES {placeholders}",
-                params
+                "INSERT INTO #stage_daily_grades VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                tuples
             )
 
         conn.execute(text("""
