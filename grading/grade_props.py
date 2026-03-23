@@ -10,51 +10,14 @@ from sqlalchemy import create_engine, text
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 LOOKBACK_DAYS = 60
-FALLBACK_DAYS = 14  # days of recent play used when no lineup data exists
-
-# Generic lines per stat code
-GENERIC_LINES = {
-    "PTS": [0, 10, 15, 20, 25, 30, 35, 40],
-    "AST": [0, 2, 4, 6, 8, 10, 12, 14],
-    "REB": [0, 4, 6, 8, 10, 12, 14, 16],
-    "3PM": [0, 1, 2, 3, 4, 5, 6, 7],
-    "STL": [0, 1, 2, 3, 4, 5, 6, 7],
-    "BLK": [0, 1, 2, 3, 4, 5, 6, 7],
-    "PR":  [0, 10, 15, 20, 25, 30, 35, 40, 45, 50],
-    "PA":  [0, 10, 15, 20, 25, 30, 35, 40, 45, 50],
-    "PRA": [0, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65],
-    "RA":  [0, 10, 15, 20, 25, 30, 35],
-}
-
-# Maps stat code to the aggregated column name used after summation
-STAT_COL_MAP = {
-    "PTS": "pts",
-    "AST": "ast",
-    "REB": "reb",
-    "3PM": "fg3m",
-    "STL": "stl",
-    "BLK": "blk",
-    "PR":  "pr",
-    "PA":  "pa",
-    "PRA": "pra",
-    "RA":  "ra",
-}
-
-# Numeric columns to SUM from per-period rows to get full-game totals.
-# minutes_sec is varchar in the source table and is excluded.
-SUM_COLS = [
-    "pts", "ast", "reb", "fg3m", "stl", "blk",
-    "fgm", "fga", "fg3a", "ftm", "fta",
-    "oreb", "dreb", "tov",
-]
+BATCH_SIZE    = 10   # game dates processed per run (increase for backfill)
 
 
 def get_engine(max_retries=3, retry_wait=45):
     """
     Grading-specific engine with fast_executemany=False.
-    fast_executemany pre-allocates a fixed buffer from the first row, which
-    truncates NVARCHAR(MAX) columns like all_line_hit_rates when later rows
-    contain longer strings (e.g. PRA with 13 thresholds vs PTS with 8).
+    fast_executemany pre-allocates a fixed buffer from the first row which
+    truncates NVARCHAR(MAX) columns when later rows have longer strings.
     """
     conn_str = (
         f"mssql+pyodbc://{os.environ['AZURE_SQL_USERNAME']}:"
@@ -64,9 +27,7 @@ def get_engine(max_retries=3, retry_wait=45):
         "?driver=ODBC+Driver+18+for+SQL+Server"
         "&Encrypt=yes&TrustServerCertificate=no"
     )
-
     engine = create_engine(conn_str, fast_executemany=False)
-
     for i in range(max_retries):
         try:
             with engine.connect() as conn:
@@ -79,151 +40,6 @@ def get_engine(max_retries=3, retry_wait=45):
             time.sleep(retry_wait)
 
 
-def get_active_players(engine, grade_date):
-    """
-    Return a list of player_name strings for players expected to play today.
-
-    Priority:
-      1. Confirmed active players from daily_lineups
-      2. Expected active players from daily_lineups
-      3. Fallback: distinct players who appeared in a game in the last FALLBACK_DAYS
-    """
-    date_str = str(grade_date)
-
-    confirmed = pd.read_sql(
-        text("""
-            SELECT DISTINCT player_name
-            FROM nba.daily_lineups
-            WHERE game_date = :gd
-              AND lineup_status = 'Confirmed'
-              AND roster_status = 'Active'
-        """),
-        engine,
-        params={"gd": date_str}
-    )
-
-    if not confirmed.empty:
-        print(f"  Using {len(confirmed)} confirmed active players from daily_lineups.")
-        return confirmed["player_name"].tolist()
-
-    expected = pd.read_sql(
-        text("""
-            SELECT DISTINCT player_name
-            FROM nba.daily_lineups
-            WHERE game_date = :gd
-              AND lineup_status = 'Expected'
-              AND roster_status = 'Active'
-        """),
-        engine,
-        params={"gd": date_str}
-    )
-
-    if not expected.empty:
-        print(f"  Using {len(expected)} expected active players from daily_lineups.")
-        return expected["player_name"].tolist()
-
-    cutoff = (pd.to_datetime(grade_date) - timedelta(days=FALLBACK_DAYS)).date()
-    recent = pd.read_sql(
-        text("""
-            SELECT DISTINCT player_name
-            FROM nba.player_box_score_stats
-            WHERE game_date >= :cutoff
-        """),
-        engine,
-        params={"cutoff": str(cutoff)}
-    )
-
-    print(f"  No lineup data for {grade_date}. "
-          f"Falling back to {len(recent)} players active in last {FALLBACK_DAYS} days.")
-    return recent["player_name"].tolist()
-
-
-def get_player_game_totals(engine, player_name, grade_date, lookback_days):
-    """
-    Aggregate per-period rows into full-game totals for a player
-    over the lookback window. Returns one row per game_id.
-    OT is included in all sums.
-    """
-    cutoff = (pd.to_datetime(grade_date) - timedelta(days=lookback_days)).date()
-
-    sum_expr = ", ".join([f"SUM(CAST({c} AS FLOAT)) AS {c}" for c in SUM_COLS])
-
-    df = pd.read_sql(
-        text(f"""
-            SELECT game_id, game_date, {sum_expr}
-            FROM nba.player_box_score_stats
-            WHERE player_name = :name
-              AND game_date >= :cutoff
-              AND game_date < :gd
-            GROUP BY game_id, game_date
-            ORDER BY game_date ASC
-        """),
-        engine,
-        params={"name": player_name, "cutoff": str(cutoff), "gd": str(grade_date)}
-    )
-
-    if df.empty:
-        return df
-
-    df["pr"]  = df["pts"] + df["reb"]
-    df["pa"]  = df["pts"] + df["ast"]
-    df["pra"] = df["pts"] + df["reb"] + df["ast"]
-    df["ra"]  = df["reb"] + df["ast"]
-
-    return df
-
-
-def hit_rate(df, col, line):
-    """Fraction of games where col exceeded line. Returns (rate, sample_size)."""
-    if df.empty or col not in df.columns:
-        return None, 0
-    valid = df[col].dropna()
-    if valid.empty:
-        return None, 0
-    n = len(valid)
-    rate = round(float((valid > line).sum()) / n, 4)
-    return rate, n
-
-
-def build_grade_rows(player_name, grade_date, df):
-    """
-    For a single player's game history DataFrame, compute hit rates
-    across every stat code and every generic line. Returns a list of
-    row dicts ready to upsert into common.daily_grades.
-    """
-    rows = []
-
-    for stat_code, lines in GENERIC_LINES.items():
-        col = STAT_COL_MAP[stat_code]
-
-        if df.empty or col not in df.columns:
-            continue
-
-        line_results = []
-        for line in lines:
-            hr, n = hit_rate(df, col, line)
-            line_results.append({
-                "line": line,
-                "hit_rate": hr,
-                "sample_size": n
-            })
-
-        for result in line_results:
-            hr_val = result["hit_rate"]
-            rows.append({
-                "grade_date":         str(grade_date),
-                "player_name":        player_name,
-                "stat_code":          stat_code,
-                "line_value":         float(result["line"]),
-                "hit_rate":           float(hr_val) if hr_val is not None else None,
-                "sample_size":        int(result["sample_size"]),
-                "grade":              round(float(hr_val) * 100, 1) if hr_val is not None else None,
-                "all_line_hit_rates": json.dumps(line_results),
-            })
-
-    return rows
-
-
 def ensure_tables(engine):
     with engine.begin() as conn:
         conn.execute(text("""
@@ -233,27 +49,232 @@ def ensure_tables(engine):
             )
             CREATE TABLE common.daily_grades (
                 grade_id            INT IDENTITY(1,1) PRIMARY KEY,
-                grade_date          DATE NOT NULL,
+                grade_date          DATE          NOT NULL,
                 player_name         NVARCHAR(100) NOT NULL,
-                stat_code           NVARCHAR(10) NOT NULL,
-                line_value          FLOAT NOT NULL,
+                stat_code           NVARCHAR(10)  NOT NULL,
+                line_value          FLOAT         NOT NULL,
                 hit_rate            FLOAT,
                 sample_size         INT,
                 grade               FLOAT,
                 all_line_hit_rates  NVARCHAR(MAX),
                 created_at          DATETIME2 DEFAULT GETUTCDATE(),
-                CONSTRAINT uq_daily_grade UNIQUE (grade_date, player_name, stat_code, line_value)
-            )
+                CONSTRAINT uq_daily_grade
+                    UNIQUE (grade_date, player_name, stat_code, line_value)
+            );
         """))
+
+
+def get_work_dates(engine, grade_date, batch_size, lookback_days):
+    """
+    Return up to batch_size game dates that:
+      - exist in the box score table
+      - have enough lookback history (at least lookback_days of prior data)
+      - are not yet in daily_grades
+    Oldest dates first.
+    """
+    earliest_gradeable = pd.read_sql(
+        text("""
+            SELECT DATEADD(day, :lb, MIN(game_date)) AS earliest
+            FROM nba.player_box_score_stats
+        """),
+        engine,
+        params={"lb": lookback_days}
+    ).iloc[0]["earliest"]
+
+    if earliest_gradeable is None:
+        return []
+
+    cutoff = str(grade_date) if grade_date else "9999-12-31"
+
+    missing = pd.read_sql(
+        text("""
+            SELECT DISTINCT b.game_date
+            FROM nba.player_box_score_stats b
+            WHERE b.game_date >= :earliest
+              AND b.game_date <= :cutoff
+              AND NOT EXISTS (
+                  SELECT 1 FROM common.daily_grades g
+                  WHERE g.grade_date = b.game_date
+              )
+            ORDER BY b.game_date ASC
+        """),
+        engine,
+        params={"earliest": str(earliest_gradeable), "cutoff": cutoff}
+    )
+
+    return missing["game_date"].astype(str).tolist()[:batch_size]
+
+
+def grade_date_set_based(engine, grade_date):
+    """
+    Compute all hit rates for all active players on a single grade_date
+    using one set-based SQL query.
+
+    Active players = confirmed/expected from daily_lineups if available,
+    otherwise all players who appeared in the lookback window.
+
+    Returns a list of row dicts ready to upsert.
+    """
+    # Determine active players for this date
+    lineup_players = pd.read_sql(
+        text("""
+            SELECT DISTINCT player_name
+            FROM nba.daily_lineups
+            WHERE game_date   = :gd
+              AND roster_status = 'Active'
+              AND lineup_status IN ('Confirmed', 'Expected')
+        """),
+        engine,
+        params={"gd": grade_date}
+    )
+
+    if not lineup_players.empty:
+        player_filter_sql = """
+            JOIN (
+                SELECT DISTINCT player_name
+                FROM nba.daily_lineups
+                WHERE game_date    = :gd
+                  AND roster_status = 'Active'
+                  AND lineup_status IN ('Confirmed', 'Expected')
+            ) lp ON g.player_name = lp.player_name
+        """
+        source = "lineup"
+    else:
+        player_filter_sql = """
+            JOIN (
+                SELECT DISTINCT player_name
+                FROM nba.player_box_score_stats
+                WHERE game_date >= DATEADD(day, -:lb, :gd)
+                  AND game_date <  :gd
+            ) lp ON g.player_name = lp.player_name
+        """
+        source = "fallback"
+
+    # One query: aggregate per-period rows into game totals, derive combo stats,
+    # cross join with thresholds, compute hit rates — all in the database.
+    sql = f"""
+        WITH game_totals AS (
+            SELECT
+                player_name,
+                game_date,
+                SUM(CAST(pts  AS FLOAT)) AS pts,
+                SUM(CAST(ast  AS FLOAT)) AS ast,
+                SUM(CAST(reb  AS FLOAT)) AS reb,
+                SUM(CAST(fg3m AS FLOAT)) AS fg3m,
+                SUM(CAST(stl  AS FLOAT)) AS stl,
+                SUM(CAST(blk  AS FLOAT)) AS blk
+            FROM nba.player_box_score_stats
+            WHERE game_date >= DATEADD(day, -:lb, :gd)
+              AND game_date <  :gd
+            GROUP BY player_name, game_date
+        ),
+        game_totals_with_combos AS (
+            SELECT
+                player_name,
+                game_date,
+                pts,
+                ast,
+                reb,
+                fg3m,
+                stl,
+                blk,
+                pts + reb            AS pr,
+                pts + ast            AS pa,
+                pts + reb + ast      AS pra,
+                reb + ast            AS ra
+            FROM game_totals
+        ),
+        unpivoted AS (
+            SELECT player_name, game_date, 'PTS' AS stat_code, pts  AS stat_value FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, 'AST',  ast  FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, 'REB',  reb  FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, '3PM',  fg3m FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, 'STL',  stl  FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, 'BLK',  blk  FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, 'PR',   pr   FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, 'PA',   pa   FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, 'PRA',  pra  FROM game_totals_with_combos
+            UNION ALL
+            SELECT player_name, game_date, 'RA',   ra   FROM game_totals_with_combos
+        ),
+        player_stats AS (
+            SELECT u.player_name, u.stat_code, u.game_date, u.stat_value
+            FROM unpivoted u
+            {player_filter_sql}
+        ),
+        hit_counts AS (
+            SELECT
+                ps.player_name,
+                ps.stat_code,
+                t.line_value,
+                COUNT(*)                                                        AS sample_size,
+                SUM(CASE WHEN ps.stat_value > t.line_value THEN 1 ELSE 0 END)  AS hits
+            FROM player_stats ps
+            JOIN common.grade_thresholds t ON t.stat_code = ps.stat_code
+            GROUP BY ps.player_name, ps.stat_code, t.line_value
+        )
+        SELECT
+            player_name,
+            stat_code,
+            line_value,
+            sample_size,
+            hits,
+            CAST(hits AS FLOAT) / NULLIF(sample_size, 0) AS hit_rate
+        FROM hit_counts
+        ORDER BY player_name, stat_code, line_value;
+    """
+
+    df = pd.read_sql(
+        text(sql),
+        engine,
+        params={"gd": grade_date, "lb": LOOKBACK_DAYS}
+    )
+
+    if df.empty:
+        return [], source
+
+    # Build the all_line_hit_rates JSON per player+stat using the full result
+    # already in memory — no additional queries needed.
+    json_map = {}
+    for (player, stat), group in df.groupby(["player_name", "stat_code"]):
+        json_map[(player, stat)] = json.dumps([
+            {
+                "line":        float(row["line_value"]),
+                "hit_rate":    round(float(row["hit_rate"]), 4) if row["hit_rate"] is not None else None,
+                "sample_size": int(row["sample_size"])
+            }
+            for _, row in group.iterrows()
+        ])
+
+    rows = []
+    for _, row in df.iterrows():
+        hr = float(row["hit_rate"]) if row["hit_rate"] is not None else None
+        rows.append({
+            "grade_date":         grade_date,
+            "player_name":        row["player_name"],
+            "stat_code":          row["stat_code"],
+            "line_value":         float(row["line_value"]),
+            "hit_rate":           round(hr, 4) if hr is not None else None,
+            "sample_size":        int(row["sample_size"]),
+            "grade":              round(hr * 100, 1) if hr is not None else None,
+            "all_line_hit_rates": json_map[(row["player_name"], row["stat_code"])],
+        })
+
+    return rows, source
 
 
 def upsert_grades(engine, rows):
     if not rows:
-        print("No grades to write.")
         return
 
-    # All staging work happens inside a single connection so the local temp
-    # table remains visible for the INSERT chunks and the MERGE that follows.
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE #stage_daily_grades (
@@ -311,45 +332,51 @@ def upsert_grades(engine, rows):
         """))
 
 
-def run(grade_date=None):
-    if grade_date is None:
-        grade_date = date.today()
-    else:
-        grade_date = pd.to_datetime(grade_date).date()
-
+def run(grade_date=None, batch_size=BATCH_SIZE):
     engine = get_engine()
     ensure_tables(engine)
 
-    print(f"Grading date: {grade_date}")
-    players = get_active_players(engine, grade_date)
+    # Determine the upper bound date for grading.
+    # If a specific date is passed, grade only that date.
+    # If no date is passed, grade all missing dates up to yesterday
+    # (today's games have not been played yet).
+    if grade_date:
+        target_date = str(pd.to_datetime(grade_date).date())
+        work_dates = [target_date]
+    else:
+        yesterday = str(date.today() - timedelta(days=1))
+        work_dates = get_work_dates(engine, yesterday, batch_size, LOOKBACK_DAYS)
 
-    if not players:
-        print("No active players found. Exiting.")
+    if not work_dates:
+        print("All dates already graded. Nothing to do.")
         return
 
-    all_rows = []
-    skipped = 0
+    print(f"Grading {len(work_dates)} date(s): {work_dates[0]} to {work_dates[-1]}")
 
-    for player_name in players:
-        df = get_player_game_totals(engine, player_name, grade_date, LOOKBACK_DAYS)
+    total_rows = 0
+    for gd in work_dates:
+        rows, source = grade_date_set_based(engine, gd)
 
-        if df.empty:
-            skipped += 1
+        if not rows:
+            print(f"  {gd}: no data. Skipping.")
             continue
 
-        rows = build_grade_rows(player_name, grade_date, df)
-        all_rows.extend(rows)
+        upsert_grades(engine, rows)
+        total_rows += len(rows)
+        print(f"  {gd}: {len(rows)} grades written ({source}).")
 
-    print(f"  {len(players) - skipped} players graded, {skipped} skipped (no history).")
-    print(f"  Writing {len(all_rows)} grade rows...")
-
-    upsert_grades(engine, all_rows)
-    print(f"Done. Wrote {len(all_rows)} grades for {grade_date}.")
+    print(f"Done. {total_rows} total grade rows written.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--date", type=str, default=None,
-                        help="Grade date in YYYY-MM-DD format. Defaults to today.")
+    parser.add_argument(
+        "--date", type=str, default=None,
+        help="Grade a specific date (YYYY-MM-DD). Omit to process missing dates automatically."
+    )
+    parser.add_argument(
+        "--batch", type=int, default=BATCH_SIZE,
+        help=f"Max dates to process per run (default {BATCH_SIZE}). Use higher values for backfill."
+    )
     args = parser.parse_args()
-    run(grade_date=args.date)
+    run(grade_date=args.date, batch_size=args.batch)
