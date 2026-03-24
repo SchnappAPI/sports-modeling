@@ -16,6 +16,12 @@ Datetime handling
   All datetime values stored in row dicts are naive UTC strings (no tzinfo).
   This prevents pandas from inferring DatetimeTZDtype, which SQL Server's
   ODBC driver incorrectly maps to the TIMESTAMP rowversion type on temp tables.
+
+Parameter binding
+  Never use pd.read_sql with named parameters (:name style) against a pyodbc
+  engine. pyodbc only understands ? placeholders; named params cause
+  "SQL contains 0 parameter markers" errors. All parameterised reads use
+  engine.connect() + text() + SQLAlchemy binding instead.
 """
 
 import argparse
@@ -349,6 +355,21 @@ def _check_quota(quota_floor):
 
 
 # ---------------------------------------------------------------------------
+# Database read helpers
+#
+# Never use pd.read_sql with named parameters (:name) against a pyodbc engine.
+# pyodbc only understands ? placeholders. Use engine.connect() + text() instead
+# so SQLAlchemy handles the parameter binding before it reaches pyodbc.
+# ---------------------------------------------------------------------------
+
+def _query_rows(engine, sql, params):
+    """Execute a parameterised SELECT and return list of Row objects."""
+    with engine.connect() as conn:
+        result = conn.execute(text(sql), params)
+        return result.fetchall()
+
+
+# ---------------------------------------------------------------------------
 # Season helpers
 # ---------------------------------------------------------------------------
 
@@ -646,14 +667,16 @@ def run_probe(sport, api_key, quota_floor, engine):
 # ---------------------------------------------------------------------------
 
 def _load_probe_results(engine, sport_key):
+    """Return {market_key: bool} from odds.market_probe, or None if no rows."""
     try:
-        df = pd.read_sql(
+        rows = _query_rows(
+            engine,
             "SELECT market_key, is_covered FROM odds.market_probe WHERE sport_key = :sk",
-            engine, params={"sk": sport_key},
+            {"sk": sport_key},
         )
-        if df.empty:
+        if not rows:
             return None
-        return {r["market_key"]: bool(r["is_covered"]) for _, r in df.iterrows()}
+        return {r[0]: bool(r[1]) for r in rows}
     except Exception:
         return None
 
@@ -670,11 +693,13 @@ def _filter_markets(probe, all_markets, label):
 
 
 def _existing_event_ids(engine, sport_key, season_year):
-    df = pd.read_sql(
-        "SELECT event_id FROM odds.events WHERE sport_key=:sk AND season_year=:sy",
-        engine, params={"sk": sport_key, "sy": season_year},
+    """Return set of event_id strings already loaded for this sport/season."""
+    rows = _query_rows(
+        engine,
+        "SELECT event_id FROM odds.events WHERE sport_key = :sk AND season_year = :sy",
+        {"sk": sport_key, "sy": season_year},
     )
-    return set(df["event_id"].astype(str))
+    return {str(r[0]) for r in rows}
 
 
 def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
