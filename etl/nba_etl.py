@@ -7,7 +7,7 @@ Runs exclusively in GitHub Actions. Never runs locally.
 Design
 ------
 Teams:           Hardcoded static dict, zero HTTP calls.
-Players:         Direct HTTP to commonallplayers via proxy.
+Players:         Direct HTTP to playerindex (Historical=1) via proxy.
 Schedule:        Direct HTTP to scheduleleaguev2 via proxy.
 Box scores:      Direct HTTP to playergamelogs via proxy.
                  5 calls per run (one per period: 1Q/2Q/3Q/4Q/OT).
@@ -521,15 +521,16 @@ def get_known_player_ids(engine):
         }
 
 def load_players(engine, season):
-    log.info(f"Loading nba.players via commonallplayers for season {season}")
-    url  = (
-        "https://stats.nba.com/stats/commonallplayers"
-        f"?IsOnlyCurrentSeason=1&LeagueID=00&Season={season}"
+    log.info(f"Loading nba.players via playerindex for season {season}")
+    url = (
+        "https://stats.nba.com/stats/playerindex"
+        f"?Historical=1&LeagueID=00&Season={season}&SeasonType=Regular%20Season&TeamID=0"
+        "&College=&Country=&DraftPick=&DraftRound=&DraftYear=&Height=&Weight="
     )
-    data = _direct_get(url, "commonallplayers", proxies=get_proxies(), timeout=120)
+    data = _direct_get(url, "playerindex", proxies=get_proxies(), timeout=120)
     df   = _parse_result_set(data, index=0)
     if df is None or df.empty:
-        log.warning("  commonallplayers returned no data")
+        log.warning("  playerindex returned no data")
         return
     rows = []
     for _, row in df.iterrows():
@@ -539,13 +540,16 @@ def load_players(engine, season):
         tid = safe_int(row.get("TEAM_ID"))
         if tid == 0:
             tid = None
+        first = safe_str(row.get("PLAYER_FIRST_NAME")) or ""
+        last  = safe_str(row.get("PLAYER_LAST_NAME")) or ""
+        name  = (first + " " + last).strip() or "Unknown"
         rows.append({
             "player_id":     pid,
-            "player_name":   safe_str(row.get("DISPLAY_FIRST_LAST")) or "Unknown",
+            "player_name":   name,
             "team_id":       tid,
             "team_name":     safe_str(row.get("TEAM_NAME")),
             "team_tricode":  safe_str(row.get("TEAM_ABBREVIATION")),
-            "roster_status": safe_int(row.get("ROSTERSTATUS")),
+            "roster_status": safe_int(row.get("ROSTER_STATUS")),
             "from_year":     safe_int(row.get("FROM_YEAR")),
             "to_year":       safe_int(row.get("TO_YEAR")),
         })
