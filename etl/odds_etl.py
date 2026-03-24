@@ -21,6 +21,14 @@ import os
 import sys
 import time
 from datetime import datetime, timezone, date, timedelta
+from pathlib import Path
+
+# Allow `from etl.db import ...` when the script is invoked as
+# `python etl/odds_etl.py` from the repo root. In that case Python adds
+# etl/ to sys.path but not the repo root, so the etl package is invisible.
+_repo_root = str(Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 import pandas as pd
 import requests
@@ -325,13 +333,13 @@ def _default_season(sport):
     wraps = start_month > end_month  # season crosses calendar year boundary
 
     if wraps:
-        # e.g., NFL: Sep–Feb. Season year is the year in which September falls.
+        # e.g., NFL: Sep-Feb. Season year is the year in which September falls.
         if today.month >= start_month:
             return today.year
         else:
             return today.year - 1
     else:
-        # e.g., MLB: Mar–Nov. Season year is the calendar year.
+        # e.g., MLB: Mar-Nov. Season year is the calendar year.
         if today.month >= start_month:
             return today.year
         else:
@@ -620,7 +628,6 @@ def _probe_select_events(sport, sport_key, api_key, quota_floor):
     wildcard_candidate = None
 
     for i, target_date in enumerate(PROBE_BEST_CASE[sport]):
-        # Find actual date key
         actual_date = None
         for d in all_events_by_date:
             if abs((d - target_date).days) <= 7:
@@ -629,7 +636,6 @@ def _probe_select_events(sport, sport_key, api_key, quota_floor):
         if actual_date and all_events_by_date.get(actual_date):
             events = all_events_by_date[actual_date]
             selected.append(events[0])
-            # Track wildcard: latest commence_time
             for ev in events:
                 cdt = _commence_dt(ev)
                 if cdt:
@@ -651,7 +657,6 @@ def _probe_select_events(sport, sport_key, api_key, quota_floor):
                     if wildcard_candidate is None or cdt > _commence_dt(wildcard_candidate):
                         wildcard_candidate = ev
 
-    # Add wildcard if not already in selected
     if wildcard_candidate:
         already_ids = {e.get("id") for e in selected}
         if wildcard_candidate.get("id") not in already_ids:
@@ -674,12 +679,10 @@ def run_probe(sport, api_key, quota_floor, engine):
 
     print(f"  Selected {len(events)} sample events.")
 
-    # --- Featured markets coverage ---
     featured_markets = FEATURED_MARKETS[sport]
     prop_markets = PROP_MARKETS[sport]
     alt_prop_markets = ALT_PROP_MARKETS[sport]
 
-    # Track per-market coverage: market_key -> {bookmakers seen, outcome count, event hit count}
     featured_coverage = {m: {"bk_set": set(), "outcome_count": 0, "hit_count": 0} for m in featured_markets}
     prop_coverage = {m: {"bk_set": set(), "outcome_count": 0, "hit_count": 0} for m in prop_markets + alt_prop_markets}
 
@@ -695,9 +698,7 @@ def run_probe(sport, api_key, quota_floor, engine):
         if not snap_iso:
             continue
 
-        # Featured: bulk call
         bulk_data, _ = _fetch_bulk_featured(sport_key, snap_iso, featured_markets, api_key, quota_floor)
-        # Filter to this event
         event_data = next((e for e in bulk_data if e.get("id") == eid), None)
         if event_data:
             for bk in event_data.get("bookmakers", []) or []:
@@ -710,9 +711,7 @@ def run_probe(sport, api_key, quota_floor, engine):
                             featured_coverage[mk]["outcome_count"] += len(outcomes)
                             featured_coverage[mk]["hit_count"] += 1
 
-        # Props: per-event calls (skip if before cutoff)
         if cdt and cdt >= PROPS_CUTOFF:
-            # Standard props
             prop_obj, _ = _fetch_event_odds(sport_key, eid, snap_iso, prop_markets, api_key, quota_floor)
             if prop_obj:
                 for bk in prop_obj.get("bookmakers", []) or []:
@@ -726,7 +725,6 @@ def run_probe(sport, api_key, quota_floor, engine):
                                 prop_coverage[mk]["hit_count"] += 1
             time.sleep(1.5)
 
-            # Alt props
             alt_obj, _ = _fetch_event_odds(sport_key, eid, snap_iso, alt_prop_markets, api_key, quota_floor)
             if alt_obj:
                 for bk in alt_obj.get("bookmakers", []) or []:
@@ -808,10 +806,8 @@ def run_probe(sport, api_key, quota_floor, engine):
     )
 
     if _remaining_credits is not None:
-        credits_used_approx = "N/A"
         print(f"\n  Credits remaining: {_remaining_credits:,}")
 
-    # Upsert probe results
     df = pd.DataFrame(probe_rows)
     df = clean_dataframe(df)
     upsert(engine, df, schema="odds", table="market_probe", keys=["sport_key", "market_key"])
@@ -823,10 +819,6 @@ def run_probe(sport, api_key, quota_floor, engine):
 # ---------------------------------------------------------------------------
 
 def _load_probe_results(engine, sport_key):
-    """
-    Return dict: market_key -> is_covered (bool).
-    Returns None if no probe results exist for this sport.
-    """
     try:
         df = pd.read_sql(
             "SELECT market_key, is_covered FROM odds.market_probe WHERE sport_key = :sk",
@@ -841,10 +833,6 @@ def _load_probe_results(engine, sport_key):
 
 
 def _get_covered_markets(probe_results, all_markets, market_type_label):
-    """
-    Filter market list based on probe results. Log skipped markets.
-    If probe_results is None, return all markets with a warning.
-    """
     if probe_results is None:
         print(
             f"    WARNING: No probe results found for {market_type_label} markets. "
@@ -869,13 +857,9 @@ def _get_existing_event_ids(engine, sport_key, season_year):
 
 
 def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
-    """
-    Run incremental backfill for a single sport.
-    """
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Backfill: {sport.upper()} ({sport_key}) Season {season_year} ===")
 
-    # Load probe coverage results
     probe_results = _load_probe_results(engine, sport_key)
 
     featured_markets = _get_covered_markets(
@@ -888,10 +872,8 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         probe_results, ALT_PROP_MARKETS[sport], "alt_prop"
     )
 
-    # Discover all events in the season range
     start_date, end_date = _season_date_range(sport, season_year)
     today = date.today()
-    # Only process dates in the past
     end_date = min(end_date, today - timedelta(days=1))
 
     if start_date > end_date:
@@ -903,7 +885,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
     all_dates = _date_range_list(start_date, end_date)
     print(f"  Discovering events across {len(all_dates)} dates...")
 
-    # Collect all events from the season
     all_events_by_id = {}
     for d in all_dates:
         events = _discover_events_for_date(sport_key, d, api_key, quota_floor)
@@ -920,7 +901,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         print("  All events already loaded. Nothing to do.")
         return
 
-    # Sort by commence_time ascending, take oldest N
     missing_events = [all_events_by_id[eid] for eid in missing_ids]
     missing_events.sort(key=lambda e: e.get("commence_time", ""))
     work_events = missing_events[:games_limit]
@@ -947,7 +927,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         game_lines_all = []
         player_props_all = []
 
-        # Featured odds: bulk call, filter to this event
         if featured_markets:
             bulk_data, bulk_ts = _fetch_bulk_featured(
                 sport_key, snap_iso, featured_markets, api_key, quota_floor
@@ -960,7 +939,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
             else:
                 print(f"    Event not found in bulk featured response.")
 
-        # Per-event prop calls
         if cdt and cdt >= PROPS_CUTOFF:
             if prop_markets:
                 prop_obj, prop_ts = _fetch_event_odds(
@@ -984,13 +962,11 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         else:
             print(f"    Event before props cutoff ({cdt}). Skipping prop calls.")
 
-        # Upsert odds.events first
         event_row = _parse_event_to_row(event, sport_key, season_year)
         df_events = pd.DataFrame([event_row])
         df_events = clean_dataframe(df_events)
         upsert(engine, df_events, schema="odds", table="events", keys=["event_id"])
 
-        # Upsert odds.game_lines
         gl_written = 0
         if game_lines_all:
             df_gl = pd.DataFrame(game_lines_all)
@@ -1001,7 +977,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
             )
             gl_written = len(df_gl)
 
-        # Upsert odds.player_props
         pp_written = 0
         if player_props_all:
             df_pp = pd.DataFrame(player_props_all)
