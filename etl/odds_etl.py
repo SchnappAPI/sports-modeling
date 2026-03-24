@@ -5,22 +5,17 @@ Ingests historical odds data from The Odds API v4 into Azure SQL.
 Schema: odds (events, game_lines, player_props, market_probe)
 
 Modes:
-  probe    -- Coverage discovery pass. Writes only to odds.market_probe. Exits without
-              touching events, game_lines, or player_props.
-  backfill -- Incremental ingestion of historical event odds. Processes oldest-first
-              bounded by --games per run.
-
-Usage examples:
-  python etl/odds_etl.py --mode probe --sport nba
-  python etl/odds_etl.py --mode backfill --sport all --games 20
-  python etl/odds_etl.py --mode backfill --sport nfl --season 2024 --games 10 --quota-floor 100000
+  probe    -- Coverage discovery pass. Writes only to odds.market_probe.
+  backfill -- Incremental ingestion of historical event odds.
 
 Featured market routing
-  The bulk /odds endpoint only supports h2h, spreads, and totals.
-  All other featured markets (team_totals, h1/q1 lines) must be fetched
-  via the per-event /events/{id}/odds endpoint. The script splits the
-  featured market list into BULK_FEATURED and EVENT_FEATURED and routes
-  each group to the correct endpoint automatically.
+  Bulk /odds endpoint: h2h, spreads, totals only.
+  Per-event /events/{id}/odds endpoint: all other markets.
+
+Datetime handling
+  All datetime values stored in row dicts are naive UTC strings (no tzinfo).
+  This prevents pandas from inferring DatetimeTZDtype, which SQL Server's
+  ODBC driver incorrectly maps to the TIMESTAMP rowversion type on temp tables.
 """
 
 import argparse
@@ -30,8 +25,6 @@ import time
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 
-# Allow `from etl.db import ...` when invoked as `python etl/odds_etl.py`
-# from the repo root. Python adds etl/ to sys.path but not the root.
 _repo_root = str(Path(__file__).resolve().parent.parent)
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
@@ -55,21 +48,13 @@ SPORT_KEYS = {
 }
 
 SEASON_MONTHS = {
-    "nfl": (9, 2),   # September through February (wraps year)
-    "nba": (10, 6),  # October through June (wraps year)
-    "mlb": (3, 11),  # March through November (same year)
+    "nfl": (9, 2),
+    "nba": (10, 6),
+    "mlb": (3, 11),
 }
 
 PROPS_CUTOFF = datetime(2023, 5, 3, 5, 30, 0, tzinfo=timezone.utc)
 
-# ---------------------------------------------------------------------------
-# Market constants
-#
-# BULK_FEATURED: supported by the /historical/sports/{sport}/odds endpoint.
-# EVENT_FEATURED: only supported by the per-event /events/{id}/odds endpoint.
-# ---------------------------------------------------------------------------
-
-# Markets valid on the bulk endpoint for all sports
 BULK_FEATURED_MARKETS = ["h2h", "spreads", "totals"]
 
 NFL_EVENT_FEATURED = [
@@ -140,7 +125,6 @@ MLB_ALT_PROPS = [
     "batter_runs_scored_alternate", "pitcher_strikeouts_alternate",
 ]
 
-# All featured markets per sport (bulk + event), used for probe coverage display
 ALL_FEATURED_MARKETS = {
     "nfl": BULK_FEATURED_MARKETS + NFL_EVENT_FEATURED,
     "nba": BULK_FEATURED_MARKETS + NBA_EVENT_FEATURED,
@@ -151,107 +135,101 @@ EVENT_FEATURED_MARKETS = {
     "nba": NBA_EVENT_FEATURED,
     "mlb": MLB_EVENT_FEATURED,
 }
-PROP_MARKETS = {"nfl": NFL_PROPS, "nba": NBA_PROPS, "mlb": MLB_PROPS}
+PROP_MARKETS    = {"nfl": NFL_PROPS,     "nba": NBA_PROPS,     "mlb": MLB_PROPS}
 ALT_PROP_MARKETS = {"nfl": NFL_ALT_PROPS, "nba": NBA_ALT_PROPS, "mlb": MLB_ALT_PROPS}
 
 BOOKMAKERS = "fanduel,draftkings,betmgm,williamhill_us"
 
 # ---------------------------------------------------------------------------
 # DDL
-# Note: column is named probed_at, not probe_timestamp, to avoid collision
-# with SQL Server's reserved TIMESTAMP type which breaks pandas to_sql.
 # ---------------------------------------------------------------------------
 
 DDL_STATEMENTS = [
     "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'odds') EXEC('CREATE SCHEMA odds')",
-
     """
-    IF NOT EXISTS (
-        SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_SCHEMA = 'odds' AND TABLE_NAME = 'events'
-    )
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='events')
     CREATE TABLE odds.events (
-        event_id        VARCHAR(50)  NOT NULL PRIMARY KEY,
+        event_id      VARCHAR(50)  NOT NULL PRIMARY KEY,
+        sport_key     VARCHAR(50)  NOT NULL,
+        sport_title   VARCHAR(50)  NULL,
+        commence_time DATETIME2    NOT NULL,
+        home_team     VARCHAR(100) NULL,
+        away_team     VARCHAR(100) NULL,
+        season_year   INT          NULL,
+        created_at    DATETIME2    NOT NULL DEFAULT GETUTCDATE()
+    )
+    """,
+    """
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='game_lines')
+    CREATE TABLE odds.game_lines (
+        event_id           VARCHAR(50)  NOT NULL,
+        sport_key          VARCHAR(50)  NOT NULL,
+        market_key         VARCHAR(100) NOT NULL,
+        bookmaker_key      VARCHAR(50)  NOT NULL,
+        bookmaker_title    VARCHAR(100) NULL,
+        outcome_name       VARCHAR(100) NOT NULL,
+        outcome_price      INT          NULL,
+        outcome_point      DECIMAL(6,1) NULL,
+        snap_ts            DATETIME2    NULL,
+        created_at         DATETIME2    NOT NULL DEFAULT GETUTCDATE()
+    )
+    """,
+    """
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='player_props')
+    CREATE TABLE odds.player_props (
+        event_id        VARCHAR(50)  NOT NULL,
         sport_key       VARCHAR(50)  NOT NULL,
-        sport_title     VARCHAR(50)  NULL,
-        commence_time   DATETIME2    NOT NULL,
-        home_team       VARCHAR(100) NULL,
-        away_team       VARCHAR(100) NULL,
-        season_year     INT          NULL,
+        market_key      VARCHAR(100) NOT NULL,
+        bookmaker_key   VARCHAR(50)  NOT NULL,
+        bookmaker_title VARCHAR(100) NULL,
+        player_name     VARCHAR(100) NOT NULL,
+        outcome_name    VARCHAR(20)  NOT NULL,
+        outcome_price   INT          NULL,
+        outcome_point   DECIMAL(6,1) NULL,
+        snap_ts         DATETIME2    NULL,
         created_at      DATETIME2    NOT NULL DEFAULT GETUTCDATE()
     )
     """,
-
     """
-    IF NOT EXISTS (
-        SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_SCHEMA = 'odds' AND TABLE_NAME = 'game_lines'
-    )
-    CREATE TABLE odds.game_lines (
-        event_id            VARCHAR(50)   NOT NULL,
-        sport_key           VARCHAR(50)   NOT NULL,
-        market_key          VARCHAR(100)  NOT NULL,
-        bookmaker_key       VARCHAR(50)   NOT NULL,
-        bookmaker_title     VARCHAR(100)  NULL,
-        outcome_name        VARCHAR(100)  NOT NULL,
-        outcome_price       INT           NULL,
-        outcome_point       DECIMAL(6,1)  NULL,
-        snapshot_timestamp  DATETIME2     NULL,
-        created_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE()
-    )
-    """,
-
-    """
-    IF NOT EXISTS (
-        SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_SCHEMA = 'odds' AND TABLE_NAME = 'player_props'
-    )
-    CREATE TABLE odds.player_props (
-        event_id            VARCHAR(50)   NOT NULL,
-        sport_key           VARCHAR(50)   NOT NULL,
-        market_key          VARCHAR(100)  NOT NULL,
-        bookmaker_key       VARCHAR(50)   NOT NULL,
-        bookmaker_title     VARCHAR(100)  NULL,
-        player_name         VARCHAR(100)  NOT NULL,
-        outcome_name        VARCHAR(20)   NOT NULL,
-        outcome_price       INT           NULL,
-        outcome_point       DECIMAL(6,1)  NULL,
-        snapshot_timestamp  DATETIME2     NULL,
-        created_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE()
-    )
-    """,
-
-    """
-    IF NOT EXISTS (
-        SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_SCHEMA = 'odds' AND TABLE_NAME = 'market_probe'
-    )
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='market_probe')
     CREATE TABLE odds.market_probe (
         probe_id           INT IDENTITY PRIMARY KEY,
-        sport_key          VARCHAR(50)   NOT NULL,
-        market_key         VARCHAR(100)  NOT NULL,
-        market_type        VARCHAR(20)   NULL,
-        bookmaker_count    INT           NULL,
-        outcome_count      INT           NULL,
-        is_covered         BIT           NULL,
-        covered_bookmakers VARCHAR(200)  NULL,
-        sample_event_ids   VARCHAR(500)  NULL,
-        sample_dates       VARCHAR(200)  NULL,
-        probed_at          DATETIME2     NULL,
-        created_at         DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+        sport_key          VARCHAR(50)  NOT NULL,
+        market_key         VARCHAR(100) NOT NULL,
+        market_type        VARCHAR(20)  NULL,
+        bookmaker_count    INT          NULL,
+        outcome_count      INT          NULL,
+        is_covered         BIT          NULL,
+        covered_bookmakers VARCHAR(200) NULL,
+        sample_event_ids   VARCHAR(500) NULL,
+        sample_dates       VARCHAR(200) NULL,
+        probed_at          DATETIME2    NULL,
+        created_at         DATETIME2    NOT NULL DEFAULT GETUTCDATE()
     )
     """,
-
-    # Migration: rename probe_timestamp -> probed_at if the table was created
-    # with the old column name before this fix was applied.
+    # Rename old column if table was created before this fix
     """
-    IF EXISTS (
-        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = 'odds'
-          AND TABLE_NAME   = 'market_probe'
-          AND COLUMN_NAME  = 'probe_timestamp'
-    )
+    IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='market_probe'
+               AND COLUMN_NAME='probe_timestamp')
     EXEC sp_rename 'odds.market_probe.probe_timestamp', 'probed_at', 'COLUMN'
+    """,
+    # Rename snapshot_timestamp -> snap_ts if created before this fix
+    """
+    IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='game_lines'
+               AND COLUMN_NAME='snapshot_timestamp')
+    EXEC sp_rename 'odds.game_lines.snapshot_timestamp', 'snap_ts', 'COLUMN'
+    """,
+    """
+    IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='player_props'
+               AND COLUMN_NAME='snapshot_timestamp')
+    EXEC sp_rename 'odds.player_props.snapshot_timestamp', 'snap_ts', 'COLUMN'
     """,
 ]
 
@@ -263,10 +241,37 @@ def ensure_schema(engine):
 
 
 # ---------------------------------------------------------------------------
-# DataFrame cleaning
+# Datetime helpers
+#
+# Root cause of the recurring timestamp error:
+#   pandas stores tz-aware datetime objects as DatetimeTZDtype.
+#   When to_sql creates a temp table on SQL Server, the ODBC driver maps
+#   DatetimeTZDtype to SQL Server's TIMESTAMP rowversion type instead of
+#   DATETIME2, causing "Cannot insert an explicit value into a timestamp column".
+#
+# Fix: always store datetime values as naive UTC strings. SQL Server accepts
+#   ISO 8601 strings as DATETIME2 inputs with no ambiguity.
 # ---------------------------------------------------------------------------
 
+def _to_utc_str(dt):
+    """Convert a datetime (aware or naive) or ISO string to a naive UTC string.
+    Returns None if input is None or unparseable."""
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if isinstance(dt, datetime):
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return None
+
+
 def clean_dataframe(df):
+    """Replace NaN/NaT with None and ensure no tz-aware datetime columns remain."""
     df = df.where(pd.notna(df), other=None)
     for col in df.select_dtypes(include=["int64", "float64"]).columns:
         df[col] = df[col].apply(
@@ -274,6 +279,20 @@ def clean_dataframe(df):
             else int(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and x == int(x)
             else float(x)
         )
+    # Convert any remaining datetime columns to plain strings to avoid
+    # the DatetimeTZDtype -> SQL Server TIMESTAMP rowversion mapping.
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].apply(
+                lambda x: None if pd.isna(x) else x.strftime("%Y-%m-%d %H:%M:%S")
+            )
+        elif df[col].dtype == object:
+            # Catch any Python datetime objects stored as object dtype
+            sample = df[col].dropna()
+            if not sample.empty and isinstance(sample.iloc[0], datetime):
+                df[col] = df[col].apply(
+                    lambda x: None if x is None else _to_utc_str(x)
+                )
     return df
 
 
@@ -294,20 +313,20 @@ def _request(url, params, quota_floor, retries=3):
         except Exception as exc:
             last_exc = exc
             if attempt < retries - 1:
-                print(f"    [retry {attempt+1}] Request exception: {exc}. Waiting {wait_times[attempt]}s...")
+                print(f"    [retry {attempt+1}] exception: {exc}. Waiting {wait_times[attempt]}s...")
                 time.sleep(wait_times[attempt])
             continue
 
-        remaining_header = resp.headers.get("x-requests-remaining")
-        used_header = resp.headers.get("x-requests-used")
-        last_header = resp.headers.get("x-requests-last")
-        if remaining_header is not None:
-            _remaining_credits = int(remaining_header)
-            print(f"    [quota] remaining={remaining_header}  used={used_header}  last={last_header}")
+        rh = resp.headers.get("x-requests-remaining")
+        uh = resp.headers.get("x-requests-used")
+        lh = resp.headers.get("x-requests-last")
+        if rh is not None:
+            _remaining_credits = int(rh)
+            print(f"    [quota] remaining={rh}  used={uh}  last={lh}")
 
         if resp.status_code == 200:
             if _remaining_credits is not None and _remaining_credits < quota_floor:
-                print(f"WARNING: remaining credits ({_remaining_credits}) below quota floor ({quota_floor}). Stopping.")
+                print(f"WARNING: {_remaining_credits} credits remaining, below floor {quota_floor}. Stopping.")
                 sys.exit(1)
             return resp.json(), resp.headers
 
@@ -317,20 +336,20 @@ def _request(url, params, quota_floor, retries=3):
 
         if resp.status_code == 429 or resp.status_code >= 500:
             wait = wait_times[min(attempt, len(wait_times) - 1)]
-            print(f"    [retry {attempt+1}] HTTP {resp.status_code}: {resp.text[:200]}. Waiting {wait}s...")
+            print(f"    [retry {attempt+1}] HTTP {resp.status_code}. Waiting {wait}s...")
             time.sleep(wait)
             continue
 
-        print(f"    [skip] Unexpected HTTP {resp.status_code}: {resp.text[:200]}")
+        print(f"    [skip] HTTP {resp.status_code}: {resp.text[:200]}")
         return None, None
 
-    print(f"    [skip] All retries exhausted. Last exception: {last_exc}")
+    print(f"    [skip] All retries exhausted. Last: {last_exc}")
     return None, None
 
 
-def _check_quota_before_call(quota_floor):
+def _check_quota(quota_floor):
     if _remaining_credits is not None and _remaining_credits < quota_floor:
-        print(f"WARNING: remaining credits ({_remaining_credits}) below quota floor ({quota_floor}). Stopping.")
+        print(f"WARNING: {_remaining_credits} credits remaining, below floor {quota_floor}. Stopping.")
         sys.exit(1)
 
 
@@ -344,8 +363,7 @@ def _default_season(sport):
     wraps = start_month > end_month
     if wraps:
         return today.year if today.month >= start_month else today.year - 1
-    else:
-        return today.year if today.month >= start_month else today.year - 1
+    return today.year if today.month >= start_month else today.year - 1
 
 
 def _season_date_range(sport, season_year):
@@ -353,49 +371,49 @@ def _season_date_range(sport, season_year):
     wraps = start_month > end_month
     start_date = date(season_year, start_month, 1)
     end_year = season_year + 1 if wraps else season_year
-    if end_month == 12:
-        end_date = date(end_year, 12, 31)
-    else:
-        end_date = date(end_year, end_month + 1, 1) - timedelta(days=1)
+    end_date = (
+        date(end_year, 12, 31) if end_month == 12
+        else date(end_year, end_month + 1, 1) - timedelta(days=1)
+    )
     return start_date, end_date
 
 
-def _date_range_list(start_date, end_date):
-    dates, cur = [], start_date
+def _date_list(start_date, end_date):
+    out, cur = [], start_date
     while cur <= end_date:
-        dates.append(cur)
+        out.append(cur)
         cur += timedelta(days=1)
-    return dates
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Event discovery
 # ---------------------------------------------------------------------------
 
-def _discover_events_for_date(sport_key, target_date, api_key, quota_floor):
-    _check_quota_before_call(quota_floor)
-    url = f"{BASE_URL}/v4/historical/sports/{sport_key}/events"
-    params = {
-        "apiKey": api_key,
-        "date": f"{target_date}T12:00:00Z",
-        "commenceTimeFrom": f"{target_date}T00:00:00Z",
-        "commenceTimeTo": f"{target_date}T23:59:59Z",
-    }
-    data, _ = _request(url, params, quota_floor)
-    if data is None:
-        return []
-    return data.get("data", []) or []
+def _discover_events(sport_key, target_date, api_key, quota_floor):
+    _check_quota(quota_floor)
+    data, _ = _request(
+        f"{BASE_URL}/v4/historical/sports/{sport_key}/events",
+        {
+            "apiKey": api_key,
+            "date": f"{target_date}T12:00:00Z",
+            "commenceTimeFrom": f"{target_date}T00:00:00Z",
+            "commenceTimeTo":   f"{target_date}T23:59:59Z",
+        },
+        quota_floor,
+    )
+    return (data.get("data") or []) if data else []
 
 
-def _discover_events_for_date_with_fallback(sport_key, target_date, api_key, quota_floor, max_walk=7):
+def _discover_events_with_fallback(sport_key, target_date, api_key, quota_floor, max_walk=7):
     for offset in range(max_walk + 1):
-        check_date = target_date + timedelta(days=offset)
-        events = _discover_events_for_date(sport_key, check_date, api_key, quota_floor)
+        check = target_date + timedelta(days=offset)
+        events = _discover_events(sport_key, check, api_key, quota_floor)
         if events:
-            if offset > 0:
-                print(f"    No events on {target_date}, found {len(events)} events on {check_date}")
-            return events, check_date
-    print(f"    No events found within {max_walk} days of {target_date}")
+            if offset:
+                print(f"    No events on {target_date}, found {len(events)} on {check}")
+            return events, check
+    print(f"    No events within {max_walk} days of {target_date}")
     return [], target_date
 
 
@@ -403,130 +421,89 @@ def _discover_events_for_date_with_fallback(sport_key, target_date, api_key, quo
 # Odds fetching
 # ---------------------------------------------------------------------------
 
-def _fetch_bulk_featured(sport_key, snapshot_iso, markets_list, api_key, quota_floor):
-    """Bulk endpoint: returns all events for the sport. Only h2h/spreads/totals supported."""
-    _check_quota_before_call(quota_floor)
-    url = f"{BASE_URL}/v4/historical/sports/{sport_key}/odds"
-    params = {
-        "apiKey": api_key,
-        "bookmakers": BOOKMAKERS,
-        "markets": ",".join(markets_list),
-        "oddsFormat": "american",
-        "date": snapshot_iso,
-    }
-    data, _ = _request(url, params, quota_floor)
-    if data is None:
-        return [], None
-    return data.get("data", []) or [], data.get("timestamp")
+def _fetch_bulk(sport_key, snap_iso, markets, api_key, quota_floor):
+    _check_quota(quota_floor)
+    data, _ = _request(
+        f"{BASE_URL}/v4/historical/sports/{sport_key}/odds",
+        {"apiKey": api_key, "bookmakers": BOOKMAKERS,
+         "markets": ",".join(markets), "oddsFormat": "american", "date": snap_iso},
+        quota_floor,
+    )
+    return ((data.get("data") or []), data.get("timestamp")) if data else ([], None)
 
 
-def _fetch_event_odds(sport_key, event_id, snapshot_iso, markets_list, api_key, quota_floor):
-    """Per-event endpoint: supports all markets including team_totals and h1/q1 lines."""
-    _check_quota_before_call(quota_floor)
-    url = f"{BASE_URL}/v4/historical/sports/{sport_key}/events/{event_id}/odds"
-    params = {
-        "apiKey": api_key,
-        "bookmakers": BOOKMAKERS,
-        "markets": ",".join(markets_list),
-        "oddsFormat": "american",
-        "date": snapshot_iso,
-    }
-    data, _ = _request(url, params, quota_floor)
-    if data is None:
-        return None, None
-    return data.get("data"), data.get("timestamp")
+def _fetch_event(sport_key, event_id, snap_iso, markets, api_key, quota_floor):
+    _check_quota(quota_floor)
+    data, _ = _request(
+        f"{BASE_URL}/v4/historical/sports/{sport_key}/events/{event_id}/odds",
+        {"apiKey": api_key, "bookmakers": BOOKMAKERS,
+         "markets": ",".join(markets), "oddsFormat": "american", "date": snap_iso},
+        quota_floor,
+    )
+    return (data.get("data"), data.get("timestamp")) if data else (None, None)
 
 
 # ---------------------------------------------------------------------------
-# Parsing helpers
+# Parsing
 # ---------------------------------------------------------------------------
 
-def _parse_event_to_row(event, sport_key, season_year):
-    commence_raw = event.get("commence_time")
-    try:
-        commence_dt = datetime.fromisoformat(commence_raw.replace("Z", "+00:00")) if commence_raw else None
-    except Exception:
-        commence_dt = None
+def _parse_event_row(event, sport_key, season_year):
     return {
         "event_id":     event.get("id"),
         "sport_key":    sport_key,
         "sport_title":  event.get("sport_title"),
-        "commence_time": commence_dt,
+        "commence_time": _to_utc_str(event.get("commence_time")),
         "home_team":    event.get("home_team"),
         "away_team":    event.get("away_team"),
         "season_year":  season_year,
     }
 
 
-def _parse_bookmakers(event_obj, event_id, sport_key, snapshot_timestamp):
-    """
-    Split outcomes into game_lines (no description) and player_props (has description).
-    """
+def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
+    snap_ts = _to_utc_str(snap_ts_raw)
     game_lines, player_props = [], []
-    snapshot_dt = None
-    if snapshot_timestamp:
-        try:
-            snapshot_dt = datetime.fromisoformat(snapshot_timestamp.replace("Z", "+00:00"))
-        except Exception:
-            pass
-
-    for bk in event_obj.get("bookmakers", []) or []:
+    for bk in event_obj.get("bookmakers") or []:
         bk_key, bk_title = bk.get("key"), bk.get("title")
-        for mkt in bk.get("markets", []) or []:
+        for mkt in bk.get("markets") or []:
             mkt_key = mkt.get("key")
-            for outcome in mkt.get("outcomes", []) or []:
-                row = {
-                    "event_id":           event_id,
-                    "sport_key":          sport_key,
-                    "market_key":         mkt_key,
-                    "bookmaker_key":      bk_key,
-                    "bookmaker_title":    bk_title,
-                    "outcome_name":       outcome.get("name"),
-                    "outcome_price":      outcome.get("price"),
-                    "outcome_point":      outcome.get("point"),
-                    "snapshot_timestamp": snapshot_dt,
-                }
+            for outcome in mkt.get("outcomes") or []:
                 description = outcome.get("description")
+                base = {
+                    "event_id":     event_id,
+                    "sport_key":    sport_key,
+                    "market_key":   mkt_key,
+                    "bookmaker_key":   bk_key,
+                    "bookmaker_title": bk_title,
+                    "outcome_name": outcome.get("name"),
+                    "outcome_price": outcome.get("price"),
+                    "outcome_point": outcome.get("point"),
+                    "snap_ts":       snap_ts,
+                }
                 if description:
-                    player_props.append({**row, "player_name": description})
-                    del player_props[-1]["outcome_name"]  # will re-add below
-                    # rebuild with correct field order for player_props table
-                    player_props[-1] = {
-                        "event_id":           event_id,
-                        "sport_key":          sport_key,
-                        "market_key":         mkt_key,
-                        "bookmaker_key":      bk_key,
-                        "bookmaker_title":    bk_title,
-                        "player_name":        description,
-                        "outcome_name":       outcome.get("name"),
-                        "outcome_price":      outcome.get("price"),
-                        "outcome_point":      outcome.get("point"),
-                        "snapshot_timestamp": snapshot_dt,
-                    }
+                    player_props.append({**base, "player_name": description})
                 else:
-                    game_lines.append(row)
-
+                    game_lines.append(base)
     return game_lines, player_props
 
 
-def _snapshot_iso(commence_time_dt):
-    if isinstance(commence_time_dt, str):
-        try:
-            commence_time_dt = datetime.fromisoformat(commence_time_dt.replace("Z", "+00:00"))
-        except Exception:
-            return None
-    if commence_time_dt is None:
+def _snap_iso(commence_raw):
+    """Return ISO string 30 minutes before commence_time."""
+    if not commence_raw:
         return None
-    snap = commence_time_dt - timedelta(minutes=30)
-    return snap.strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        dt = datetime.fromisoformat(str(commence_raw).replace("Z", "+00:00"))
+        snap = dt - timedelta(minutes=30)
+        return snap.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
 
 
-def _commence_dt(event):
+def _cdt(event):
     raw = event.get("commence_time")
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except Exception:
         return None
 
@@ -541,39 +518,33 @@ PROBE_BEST_CASE = {
     "mlb": [date(2024, 6, 15),  date(2024, 8, 15)],
 }
 PROBE_WORST_CASE = {
-    "nfl": [date(2024, 9, 8),  date(2025, 2, 2)],
+    "nfl": [date(2024, 9, 8),   date(2025, 2, 2)],
     "nba": [date(2024, 10, 22), date(2025, 6, 1)],
-    "mlb": [date(2024, 3, 20), date(2024, 9, 28)],
+    "mlb": [date(2024, 3, 20),  date(2024, 9, 28)],
 }
 
 
 def _probe_select_events(sport, sport_key, api_key, quota_floor):
     candidate_dates = PROBE_BEST_CASE[sport] + PROBE_WORST_CASE[sport]
-    all_events_by_date = {}
-    for target_date in candidate_dates:
-        events, actual_date = _discover_events_for_date_with_fallback(
-            sport_key, target_date, api_key, quota_floor
-        )
-        if events:
-            all_events_by_date[actual_date] = events
+    events_by_date = {}
+    for td in candidate_dates:
+        evs, actual = _discover_events_with_fallback(sport_key, td, api_key, quota_floor)
+        if evs:
+            events_by_date[actual] = evs
 
-    selected = []
-    wildcard_candidate = None
-
-    for target_date in PROBE_BEST_CASE[sport] + PROBE_WORST_CASE[sport]:
-        actual_date = next(
-            (d for d in all_events_by_date if abs((d - target_date).days) <= 7), None
-        )
-        if actual_date and all_events_by_date.get(actual_date):
-            evs = all_events_by_date[actual_date]
+    selected, wildcard = [], None
+    for td in candidate_dates:
+        actual = next((d for d in events_by_date if abs((d - td).days) <= 7), None)
+        if actual:
+            evs = events_by_date[actual]
             selected.append(evs[0])
             for ev in evs:
-                cdt = _commence_dt(ev)
-                if cdt and (wildcard_candidate is None or cdt > _commence_dt(wildcard_candidate)):
-                    wildcard_candidate = ev
+                cdt = _cdt(ev)
+                if cdt and (wildcard is None or cdt > _cdt(wildcard)):
+                    wildcard = ev
 
-    if wildcard_candidate and wildcard_candidate.get("id") not in {e.get("id") for e in selected}:
-        selected.append(wildcard_candidate)
+    if wildcard and wildcard.get("id") not in {e.get("id") for e in selected}:
+        selected.append(wildcard)
 
     return selected[:5]
 
@@ -584,166 +555,102 @@ def run_probe(sport, api_key, quota_floor, engine):
 
     events = _probe_select_events(sport, sport_key, api_key, quota_floor)
     if not events:
-        print(f"  No sample events found for {sport}. Skipping probe.")
+        print("  No sample events found. Skipping.")
         return
     print(f"  Selected {len(events)} sample events.")
 
-    all_featured  = ALL_FEATURED_MARKETS[sport]
-    event_featured = EVENT_FEATURED_MARKETS[sport]
-    prop_markets  = PROP_MARKETS[sport]
-    alt_prop_markets = ALT_PROP_MARKETS[sport]
-
-    all_tracked = all_featured + prop_markets + alt_prop_markets
-    coverage = {m: {"bk_set": set(), "outcome_count": 0, "hit_count": 0} for m in all_tracked}
-
-    sample_event_ids = [e.get("id") for e in events]
-    sample_dates = []
+    all_markets   = ALL_FEATURED_MARKETS[sport] + PROP_MARKETS[sport] + ALT_PROP_MARKETS[sport]
+    coverage      = {m: {"bk_set": set(), "outcomes": 0, "hits": 0} for m in all_markets}
+    sample_ids    = [e.get("id") for e in events]
+    sample_dates  = []
 
     for event in events:
         eid = event.get("id")
-        cdt = _commence_dt(event)
+        cdt = _cdt(event)
         if cdt:
             sample_dates.append(str(cdt.date()))
-        snap_iso = _snapshot_iso(cdt) if cdt else None
-        if not snap_iso:
+        snap = _snap_iso(event.get("commence_time"))
+        if not snap:
             continue
 
-        # Bulk featured: h2h, spreads, totals only
-        bulk_data, _ = _fetch_bulk_featured(
-            sport_key, snap_iso, BULK_FEATURED_MARKETS, api_key, quota_floor
-        )
-        event_data = next((e for e in bulk_data if e.get("id") == eid), None)
-        if event_data:
-            for bk in event_data.get("bookmakers", []) or []:
-                for mkt in bk.get("markets", []) or []:
+        def _tally(event_obj):
+            if not event_obj:
+                return
+            for bk in event_obj.get("bookmakers") or []:
+                for mkt in bk.get("markets") or []:
                     mk = mkt.get("key")
-                    if mk in coverage:
-                        outcomes = mkt.get("outcomes", []) or []
-                        if outcomes:
-                            coverage[mk]["bk_set"].add(bk.get("key"))
-                            coverage[mk]["outcome_count"] += len(outcomes)
-                            coverage[mk]["hit_count"] += 1
+                    if mk not in coverage:
+                        continue
+                    outs = mkt.get("outcomes") or []
+                    if outs:
+                        coverage[mk]["bk_set"].add(bk.get("key"))
+                        coverage[mk]["outcomes"] += len(outs)
+                        coverage[mk]["hits"] += 1
 
-        # Per-event: event_featured + props + alt_props (all via same endpoint)
-        # Combine event_featured with props into two calls to keep market counts manageable.
-        # Call 1: event_featured markets (team_totals, h1/q1 lines)
-        if event_featured:
-            ef_obj, _ = _fetch_event_odds(
-                sport_key, eid, snap_iso, event_featured, api_key, quota_floor
-            )
-            if ef_obj:
-                for bk in ef_obj.get("bookmakers", []) or []:
-                    for mkt in bk.get("markets", []) or []:
-                        mk = mkt.get("key")
-                        if mk in coverage:
-                            outcomes = mkt.get("outcomes", []) or []
-                            if outcomes:
-                                coverage[mk]["bk_set"].add(bk.get("key"))
-                                coverage[mk]["outcome_count"] += len(outcomes)
-                                coverage[mk]["hit_count"] += 1
-            time.sleep(1.5)
+        # Bulk: h2h, spreads, totals
+        bulk_data, _ = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key, quota_floor)
+        event_data = next((e for e in bulk_data if e.get("id") == eid), None)
+        _tally(event_data)
+
+        # Per-event: event_featured
+        ef_obj, _ = _fetch_event(sport_key, eid, snap, EVENT_FEATURED_MARKETS[sport], api_key, quota_floor)
+        _tally(ef_obj)
+        time.sleep(1.5)
 
         if cdt and cdt >= PROPS_CUTOFF:
-            # Call 2: standard props
-            prop_obj, _ = _fetch_event_odds(
-                sport_key, eid, snap_iso, prop_markets, api_key, quota_floor
-            )
-            if prop_obj:
-                for bk in prop_obj.get("bookmakers", []) or []:
-                    for mkt in bk.get("markets", []) or []:
-                        mk = mkt.get("key")
-                        if mk in coverage:
-                            outcomes = mkt.get("outcomes", []) or []
-                            if outcomes:
-                                coverage[mk]["bk_set"].add(bk.get("key"))
-                                coverage[mk]["outcome_count"] += len(outcomes)
-                                coverage[mk]["hit_count"] += 1
+            prop_obj, _ = _fetch_event(sport_key, eid, snap, PROP_MARKETS[sport], api_key, quota_floor)
+            _tally(prop_obj)
             time.sleep(1.5)
 
-            # Call 3: alt props
-            alt_obj, _ = _fetch_event_odds(
-                sport_key, eid, snap_iso, alt_prop_markets, api_key, quota_floor
-            )
-            if alt_obj:
-                for bk in alt_obj.get("bookmakers", []) or []:
-                    for mkt in bk.get("markets", []) or []:
-                        mk = mkt.get("key")
-                        if mk in coverage:
-                            outcomes = mkt.get("outcomes", []) or []
-                            if outcomes:
-                                coverage[mk]["bk_set"].add(bk.get("key"))
-                                coverage[mk]["outcome_count"] += len(outcomes)
-                                coverage[mk]["hit_count"] += 1
+            alt_obj, _ = _fetch_event(sport_key, eid, snap, ALT_PROP_MARKETS[sport], api_key, quota_floor)
+            _tally(alt_obj)
             time.sleep(1.5)
         else:
-            print(f"    Event {eid} before props cutoff ({cdt}). Skipping prop calls.")
+            print(f"    {eid}: before props cutoff. Skipping prop calls.")
 
-    coverage_threshold = 3
-    probed_at = datetime.now(tz=timezone.utc)
-    sample_event_ids_str = ",".join(str(i) for i in sample_event_ids if i)
-    sample_dates_str = ",".join(sorted(set(sample_dates)))
+    threshold = 3
+    # probed_at is stored as a plain string, not a datetime object
+    probed_at_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ids_str   = ",".join(str(i) for i in sample_ids if i)[:500]
+    dates_str = ",".join(sorted(set(sample_dates)))[:200]
 
-    probe_rows = []
+    rows = []
     print(f"\n=== {sport.upper()} Market Coverage ({len(events)} events sampled) ===")
 
-    for market_key in all_featured:
-        cov = coverage[market_key]
-        is_covered = cov["hit_count"] >= coverage_threshold
-        covered_bks = sorted(cov["bk_set"])
-        mtype = "bulk_featured" if market_key in BULK_FEATURED_MARKETS else "event_featured"
-        status = "COVERED    " if is_covered else "NOT COVERED"
-        print(
-            f"  {status} {market_key:<45} "
-            f"{len(covered_bks)} books  {cov['outcome_count']} outcomes  {covered_bks}"
+    for mkt in all_markets:
+        cov = coverage[mkt]
+        covered = cov["hits"] >= threshold
+        bks = sorted(cov["bk_set"])
+        mtype = (
+            "bulk_featured"  if mkt in BULK_FEATURED_MARKETS
+            else "event_featured" if mkt in EVENT_FEATURED_MARKETS[sport]
+            else "alt_prop" if mkt in ALT_PROP_MARKETS[sport]
+            else "prop"
         )
-        probe_rows.append({
+        print(f"  {'COVERED    ' if covered else 'NOT COVERED'} {mkt:<45} "
+              f"{len(bks)} books  {cov['outcomes']} outcomes  {bks}")
+        rows.append({
             "sport_key":          sport_key,
-            "market_key":         market_key,
+            "market_key":         mkt,
             "market_type":        mtype,
-            "bookmaker_count":    len(covered_bks),
-            "outcome_count":      cov["outcome_count"],
-            "is_covered":         1 if is_covered else 0,
-            "covered_bookmakers": ",".join(covered_bks)[:200],
-            "sample_event_ids":   sample_event_ids_str[:500],
-            "sample_dates":       sample_dates_str[:200],
-            "probed_at":          probed_at,
+            "bookmaker_count":    len(bks),
+            "outcome_count":      cov["outcomes"],
+            "is_covered":         1 if covered else 0,
+            "covered_bookmakers": ",".join(bks)[:200],
+            "sample_event_ids":   ids_str,
+            "sample_dates":       dates_str,
+            "probed_at":          probed_at_str,  # plain string, no tzinfo
         })
 
-    for market_key in prop_markets + alt_prop_markets:
-        cov = coverage[market_key]
-        is_covered = cov["hit_count"] >= coverage_threshold
-        covered_bks = sorted(cov["bk_set"])
-        mtype = "alt_prop" if market_key in alt_prop_markets else "prop"
-        status = "COVERED    " if is_covered else "NOT COVERED"
-        print(
-            f"  {status} {market_key:<45} "
-            f"{len(covered_bks)} books  {cov['outcome_count']} outcomes  {covered_bks}"
-        )
-        probe_rows.append({
-            "sport_key":          sport_key,
-            "market_key":         market_key,
-            "market_type":        mtype,
-            "bookmaker_count":    len(covered_bks),
-            "outcome_count":      cov["outcome_count"],
-            "is_covered":         1 if is_covered else 0,
-            "covered_bookmakers": ",".join(covered_bks)[:200],
-            "sample_event_ids":   sample_event_ids_str[:500],
-            "sample_dates":       sample_dates_str[:200],
-            "probed_at":          probed_at,
-        })
-
-    covered_count = sum(1 for r in probe_rows if r["is_covered"])
-    print(
-        f"\n  Summary: {len(probe_rows)} markets tested, "
-        f"{covered_count} covered, {len(probe_rows) - covered_count} not covered."
-    )
+    covered_count = sum(1 for r in rows if r["is_covered"])
+    print(f"\n  Summary: {len(rows)} markets, {covered_count} covered, {len(rows)-covered_count} not covered.")
     if _remaining_credits is not None:
         print(f"  Credits remaining: {_remaining_credits:,}")
 
-    df = pd.DataFrame(probe_rows)
+    df = pd.DataFrame(rows)
     df = clean_dataframe(df)
     upsert(engine, df, schema="odds", table="market_probe", keys=["sport_key", "market_key"])
-    print(f"  Probe results written to odds.market_probe ({len(probe_rows)} rows).")
+    print(f"  Written to odds.market_probe ({len(rows)} rows).")
 
 
 # ---------------------------------------------------------------------------
@@ -754,160 +661,130 @@ def _load_probe_results(engine, sport_key):
     try:
         df = pd.read_sql(
             "SELECT market_key, is_covered FROM odds.market_probe WHERE sport_key = :sk",
-            engine,
-            params={"sk": sport_key},
+            engine, params={"sk": sport_key},
         )
+        if df.empty:
+            return None
+        return {r["market_key"]: bool(r["is_covered"]) for _, r in df.iterrows()}
     except Exception:
         return None
-    if df.empty:
-        return None
-    return {row["market_key"]: bool(row["is_covered"]) for _, row in df.iterrows()}
 
 
-def _get_covered_markets(probe_results, all_markets, label):
-    if probe_results is None:
-        print(f"    WARNING: No probe results for {label}. Using full market list.")
+def _filter_markets(probe, all_markets, label):
+    if probe is None:
+        print(f"    WARNING: No probe results for {label}. Using full list.")
         return all_markets
-    covered = [m for m in all_markets if probe_results.get(m, True)]
-    skipped = [m for m in all_markets if not probe_results.get(m, True)]
+    covered = [m for m in all_markets if probe.get(m, True)]
+    skipped = [m for m in all_markets if not probe.get(m, True)]
     if skipped:
-        print(f"    Skipping {len(skipped)} uncovered {label} markets: {skipped}")
+        print(f"    Skipping {len(skipped)} uncovered {label}: {skipped}")
     return covered
 
 
-def _get_existing_event_ids(engine, sport_key, season_year):
+def _existing_event_ids(engine, sport_key, season_year):
     df = pd.read_sql(
-        "SELECT event_id FROM odds.events WHERE sport_key = :sk AND season_year = :sy",
-        engine,
-        params={"sk": sport_key, "sy": season_year},
+        "SELECT event_id FROM odds.events WHERE sport_key=:sk AND season_year=:sy",
+        engine, params={"sk": sport_key, "sy": season_year},
     )
     return set(df["event_id"].astype(str))
 
 
 def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
     sport_key = SPORT_KEYS[sport]
-    print(f"\n=== Backfill: {sport.upper()} ({sport_key}) Season {season_year} ===")
+    print(f"\n=== Backfill: {sport.upper()} Season {season_year} ===")
 
-    probe_results = _load_probe_results(engine, sport_key)
-
-    bulk_featured    = BULK_FEATURED_MARKETS  # always use all three; bulk endpoint is reliable
-    event_featured   = _get_covered_markets(probe_results, EVENT_FEATURED_MARKETS[sport], "event_featured")
-    prop_markets     = _get_covered_markets(probe_results, PROP_MARKETS[sport], "prop")
-    alt_prop_markets = _get_covered_markets(probe_results, ALT_PROP_MARKETS[sport], "alt_prop")
+    probe         = _load_probe_results(engine, sport_key)
+    event_feat    = _filter_markets(probe, EVENT_FEATURED_MARKETS[sport], "event_featured")
+    prop_markets  = _filter_markets(probe, PROP_MARKETS[sport], "prop")
+    alt_markets   = _filter_markets(probe, ALT_PROP_MARKETS[sport], "alt_prop")
 
     start_date, end_date = _season_date_range(sport, season_year)
     end_date = min(end_date, date.today() - timedelta(days=1))
-
     if start_date > end_date:
-        print("  No past dates in season range. Nothing to do.")
+        print("  No past dates in range. Nothing to do.")
         return
 
     print(f"  Season range: {start_date} to {end_date}")
-    all_dates = _date_range_list(start_date, end_date)
+    all_dates = _date_list(start_date, end_date)
     print(f"  Discovering events across {len(all_dates)} dates...")
 
-    all_events_by_id = {}
+    events_by_id = {}
     for d in all_dates:
-        for ev in _discover_events_for_date(sport_key, d, api_key, quota_floor):
+        for ev in _discover_events(sport_key, d, api_key, quota_floor):
             eid = ev.get("id")
             if eid:
-                all_events_by_id[eid] = ev
+                events_by_id[eid] = ev
 
-    existing_ids = _get_existing_event_ids(engine, sport_key, season_year)
-    missing_events = [
-        all_events_by_id[eid]
-        for eid in set(all_events_by_id) - existing_ids
-    ]
-    if not missing_events:
-        print("  All events already loaded. Nothing to do.")
+    existing  = _existing_event_ids(engine, sport_key, season_year)
+    missing   = [events_by_id[eid] for eid in set(events_by_id) - existing]
+    if not missing:
+        print("  All events loaded. Nothing to do.")
         return
 
-    missing_events.sort(key=lambda e: e.get("commence_time", ""))
-    work_events = missing_events[:games_limit]
-    print(f"  {len(missing_events)} missing events. Processing {len(work_events)} (oldest first).")
+    missing.sort(key=lambda e: e.get("commence_time", ""))
+    work = missing[:games_limit]
+    print(f"  {len(missing)} missing. Processing {len(work)} (oldest first).")
 
-    for event in work_events:
+    for event in work:
         eid  = event.get("id")
-        cdt  = _commence_dt(event)
-        snap_iso = _snapshot_iso(cdt) if cdt else None
-        label = f"{event.get('away_team','')} @ {event.get('home_team','')} ({cdt.date() if cdt else 'unknown'})"
-        print(f"\n  Processing: {label}")
+        cdt  = _cdt(event)
+        snap = _snap_iso(event.get("commence_time"))
+        label = f"{event.get('away_team','')} @ {event.get('home_team','')} ({cdt.date() if cdt else '?'})"
+        print(f"\n  {label}")
 
-        if not snap_iso:
-            print("    Could not compute snapshot time. Skipping.")
+        if not snap:
+            print("    No snapshot time. Skipping.")
             continue
 
-        game_lines_all, player_props_all = [], []
+        gl_all, pp_all = [], []
 
-        # Bulk featured (h2h, spreads, totals)
-        bulk_data, bulk_ts = _fetch_bulk_featured(
-            sport_key, snap_iso, bulk_featured, api_key, quota_floor
-        )
-        event_obj = next((e for e in bulk_data if e.get("id") == eid), None)
-        if event_obj:
-            gl, pp = _parse_bookmakers(event_obj, eid, sport_key, bulk_ts)
-            game_lines_all.extend(gl)
-            player_props_all.extend(pp)
+        bulk_data, bulk_ts = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key, quota_floor)
+        ev_obj = next((e for e in bulk_data if e.get("id") == eid), None)
+        if ev_obj:
+            gl, pp = _parse_bookmakers(ev_obj, eid, sport_key, bulk_ts)
+            gl_all.extend(gl); pp_all.extend(pp)
         else:
-            print("    Event not found in bulk featured response.")
+            print("    Not found in bulk response.")
 
-        # Per-event featured (team_totals, h1/q1 lines)
-        if event_featured:
-            ef_obj, ef_ts = _fetch_event_odds(
-                sport_key, eid, snap_iso, event_featured, api_key, quota_floor
-            )
+        if event_feat:
+            ef_obj, ef_ts = _fetch_event(sport_key, eid, snap, event_feat, api_key, quota_floor)
             if ef_obj:
                 gl, pp = _parse_bookmakers(ef_obj, eid, sport_key, ef_ts)
-                game_lines_all.extend(gl)
-                player_props_all.extend(pp)
+                gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
 
-        # Props
         if cdt and cdt >= PROPS_CUTOFF:
             if prop_markets:
-                prop_obj, prop_ts = _fetch_event_odds(
-                    sport_key, eid, snap_iso, prop_markets, api_key, quota_floor
-                )
-                if prop_obj:
-                    gl, pp = _parse_bookmakers(prop_obj, eid, sport_key, prop_ts)
-                    game_lines_all.extend(gl)
-                    player_props_all.extend(pp)
+                p_obj, p_ts = _fetch_event(sport_key, eid, snap, prop_markets, api_key, quota_floor)
+                if p_obj:
+                    gl, pp = _parse_bookmakers(p_obj, eid, sport_key, p_ts)
+                    gl_all.extend(gl); pp_all.extend(pp)
                 time.sleep(1.5)
-
-            if alt_prop_markets:
-                alt_obj, alt_ts = _fetch_event_odds(
-                    sport_key, eid, snap_iso, alt_prop_markets, api_key, quota_floor
-                )
-                if alt_obj:
-                    gl, pp = _parse_bookmakers(alt_obj, eid, sport_key, alt_ts)
-                    game_lines_all.extend(gl)
-                    player_props_all.extend(pp)
+            if alt_markets:
+                a_obj, a_ts = _fetch_event(sport_key, eid, snap, alt_markets, api_key, quota_floor)
+                if a_obj:
+                    gl, pp = _parse_bookmakers(a_obj, eid, sport_key, a_ts)
+                    gl_all.extend(gl); pp_all.extend(pp)
                 time.sleep(1.5)
         else:
-            print(f"    Before props cutoff ({cdt}). Skipping prop calls.")
+            print(f"    Before props cutoff. Skipping prop calls.")
 
-        # Write
-        upsert(engine, clean_dataframe(pd.DataFrame([_parse_event_to_row(event, sport_key, season_year)])),
+        upsert(engine, clean_dataframe(pd.DataFrame([_parse_event_row(event, sport_key, season_year)])),
                schema="odds", table="events", keys=["event_id"])
 
-        gl_written = 0
-        if game_lines_all:
-            upsert(engine, clean_dataframe(pd.DataFrame(game_lines_all)),
+        gl_n = pp_n = 0
+        if gl_all:
+            upsert(engine, clean_dataframe(pd.DataFrame(gl_all)),
                    schema="odds", table="game_lines",
                    keys=["event_id", "market_key", "bookmaker_key", "outcome_name"])
-            gl_written = len(game_lines_all)
-
-        pp_written = 0
-        if player_props_all:
-            upsert(engine, clean_dataframe(pd.DataFrame(player_props_all)),
+            gl_n = len(gl_all)
+        if pp_all:
+            upsert(engine, clean_dataframe(pd.DataFrame(pp_all)),
                    schema="odds", table="player_props",
                    keys=["event_id", "market_key", "bookmaker_key", "player_name", "outcome_name"])
-            pp_written = len(player_props_all)
+            pp_n = len(pp_all)
 
-        print(
-            f"    Loaded: events=1  game_lines={gl_written}  "
-            f"player_props={pp_written}  credits_remaining={_remaining_credits}"
-        )
+        print(f"    events=1  game_lines={gl_n}  player_props={pp_n}  credits={_remaining_credits}")
         time.sleep(1.5)
 
 
@@ -916,7 +793,7 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="The Odds API v4 ETL")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--mode",        choices=["probe", "backfill"], default="backfill")
     parser.add_argument("--sport",       default="all", choices=["nfl", "nba", "mlb", "all"])
     parser.add_argument("--season",      type=int, default=None)
@@ -926,28 +803,19 @@ def main():
 
     api_key = os.environ.get("ODDS_API_KEY")
     if not api_key:
-        raise EnvironmentError(
-            "ODDS_API_KEY environment variable is not set. "
-            "Add it to your GitHub Actions secrets and workflow env block."
-        )
+        raise EnvironmentError("ODDS_API_KEY environment variable is not set.")
 
     sports = ["nfl", "nba", "mlb"] if args.sport == "all" else [args.sport]
-
-    print(f"Mode:        {args.mode}")
-    print(f"Sport(s):    {', '.join(sports)}")
-    print(f"Quota floor: {args.quota_floor:,}")
+    print(f"Mode: {args.mode}  Sports: {', '.join(sports)}  Quota floor: {args.quota_floor:,}")
 
     engine = get_engine()
     ensure_schema(engine)
 
     for sport in sports:
-        season_year = args.season if args.season else _default_season(sport)
+        season_year = args.season or _default_season(sport)
         if args.mode == "probe":
-            print(f"Season:      {season_year} (probe uses hardcoded sample dates)")
             run_probe(sport, api_key, args.quota_floor, engine)
         else:
-            print(f"Season:      {season_year}")
-            print(f"Games limit: {args.games}")
             run_backfill(sport, api_key, args.quota_floor, args.games, season_year, engine)
 
     if _remaining_credits is not None:
