@@ -6,9 +6,10 @@ Schema: odds
 
 Modes
   discover  -- Scans the full season date range and writes every found event
-               into odds.discovered_events. Run this once per season (or any
-               time you suspect gaps). Idempotent: safe to re-run. No odds
-               data is fetched. Costs 1 credit per date scanned.
+               into odds.discovered_events. Tracks every scanned date in
+               odds.discovered_dates regardless of whether events were found,
+               so empty off-days are never re-scanned. Idempotent.
+               Costs 1 credit per unscanned date.
 
   backfill  -- Reads odds.discovered_events as the authoritative game list.
                Diffs against odds.events to find gaps. Processes the oldest
@@ -207,6 +208,21 @@ NBA_TEAM_NAME_TO_TRICODE = {
 
 DDL_STATEMENTS = [
     "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'odds') EXEC('CREATE SCHEMA odds')",
+    # discovered_dates: every date that has been successfully scanned by discover
+    # mode, regardless of whether any events were found. This is the skip-list
+    # that prevents re-scanning known-empty off-days.
+    """
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='discovered_dates')
+    CREATE TABLE odds.discovered_dates (
+        scan_date   DATE        NOT NULL,
+        sport_key   VARCHAR(50) NOT NULL,
+        season_year INT         NOT NULL,
+        event_count INT         NOT NULL DEFAULT 0,
+        scanned_at  DATETIME2   NOT NULL DEFAULT GETUTCDATE(),
+        CONSTRAINT pk_odds_discovered_dates PRIMARY KEY (scan_date, sport_key, season_year)
+    )
+    """,
     # discovered_events: the authoritative event catalog populated by discover mode.
     # Backfill reads this table instead of calling the discovery endpoint.
     """
@@ -667,10 +683,6 @@ def _api_discover_date(sport_key, target_date, api_key, quota_floor):
 
 # ---------------------------------------------------------------------------
 # DISCOVER mode
-# Scans the full season date range and writes every event into
-# odds.discovered_events. This is the only mode that calls the discovery
-# endpoint. It costs 1 credit per date. It is idempotent: already-known
-# dates are skipped so re-running only scans new dates.
 # ---------------------------------------------------------------------------
 
 def run_discover(sport, api_key, quota_floor, season_year, engine):
@@ -678,7 +690,6 @@ def run_discover(sport, api_key, quota_floor, season_year, engine):
     print(f"\n=== Discover: {sport.upper()} Season {season_year} ===")
 
     start_date, end_date = _season_date_range(sport, season_year)
-    # Only scan past dates -- future games can't have historical odds yet.
     end_date = min(end_date, date.today() - timedelta(days=1))
     if start_date > end_date:
         print("  No past dates in range. Nothing to do.")
@@ -686,24 +697,47 @@ def run_discover(sport, api_key, quota_floor, season_year, engine):
 
     all_dates = _date_list(start_date, end_date)
 
-    # Find which dates we have already fully scanned.
-    # A date is considered scanned if at least one discovered_events row
-    # has a commence_time on that date. Dates with zero games are indistinguishable
-    # from dates that were skipped due to rate-limiting, so we track scanned
-    # dates explicitly in a separate table.
-    # Simpler approach: any date where we stored at least one event is considered
-    # scanned. For dates with legitimately zero games (rare) we will re-scan on
-    # every discover run, which costs 1 credit and returns nothing -- acceptable.
+    # Load the explicit scan log. Every date that has been successfully
+    # queried (whether or not events were found) is in this table.
+    # On first run after the table is created, backfill it from
+    # discovered_events so dates already scanned in the previous run
+    # are not re-scanned.
+    with engine.begin() as conn:
+        # Backfill discovered_dates from discovered_events for dates
+        # that predate the discovered_dates table.
+        conn.execute(text("""
+            INSERT INTO odds.discovered_dates (scan_date, sport_key, season_year, event_count)
+            SELECT
+                CAST(commence_time AS DATE),
+                sport_key,
+                season_year,
+                COUNT(*)
+            FROM odds.discovered_events
+            WHERE sport_key   = :sk
+              AND season_year = :sy
+              AND NOT EXISTS (
+                  SELECT 1 FROM odds.discovered_dates d
+                  WHERE d.scan_date   = CAST(odds.discovered_events.commence_time AS DATE)
+                    AND d.sport_key   = odds.discovered_events.sport_key
+                    AND d.season_year = odds.discovered_events.season_year
+              )
+            GROUP BY CAST(commence_time AS DATE), sport_key, season_year
+        """), {"sk": sport_key, "sy": season_year})
+
     with engine.connect() as conn:
         scanned_rows = conn.execute(
             text("""
-                SELECT DISTINCT CAST(commence_time AS DATE)
-                FROM odds.discovered_events
+                SELECT scan_date FROM odds.discovered_dates
                 WHERE sport_key = :sk AND season_year = :sy
             """),
             {"sk": sport_key, "sy": season_year},
         ).fetchall()
-    scanned_dates = {str(r[0]) for r in scanned_rows if r[0] is not None}
+
+    scanned_dates = set()
+    for r in scanned_rows:
+        val = r[0]
+        if val is not None:
+            scanned_dates.add(str(val.date()) if hasattr(val, "date") else str(val)[:10])
 
     missing_dates = [d for d in all_dates if str(d) not in scanned_dates]
     if not missing_dates:
@@ -716,6 +750,7 @@ def run_discover(sport, api_key, quota_floor, season_year, engine):
     total_found = 0
     for i, d in enumerate(missing_dates):
         events = _api_discover_date(sport_key, d, api_key, quota_floor)
+        n_found = 0
         if events:
             rows = [
                 {
@@ -732,10 +767,23 @@ def run_discover(sport, api_key, quota_floor, season_year, engine):
             if rows:
                 upsert(engine, clean_dataframe(pd.DataFrame(rows)),
                        schema="odds", table="discovered_events", keys=["event_id"])
-                total_found += len(rows)
-                print(f"  {d}: {len(rows)} events stored.")
+                n_found = len(rows)
+                total_found += n_found
+                print(f"  {d}: {n_found} events stored.")
         else:
-            print(f"  {d}: no events (or rate-limited; will retry on next discover run).")
+            print(f"  {d}: no events.")
+
+        # Always mark this date as scanned, even when empty.
+        # This is what prevents re-scanning on the next discover run.
+        with engine.begin() as conn:
+            conn.execute(text("""
+                MERGE odds.discovered_dates AS t
+                USING (VALUES (:sd, :sk, :sy, :ec)) AS s (scan_date, sport_key, season_year, event_count)
+                ON t.scan_date = s.scan_date AND t.sport_key = s.sport_key AND t.season_year = s.season_year
+                WHEN MATCHED     THEN UPDATE SET t.event_count = s.event_count
+                WHEN NOT MATCHED THEN INSERT (scan_date, sport_key, season_year, event_count)
+                                      VALUES (s.scan_date, s.sport_key, s.season_year, s.event_count);
+            """), {"sd": str(d), "sk": sport_key, "sy": season_year, "ec": n_found})
 
         if i < len(missing_dates) - 1:
             time.sleep(1.0)
@@ -824,8 +872,6 @@ def _cdt(event):
 
 # ---------------------------------------------------------------------------
 # BACKFILL mode
-# Reads odds.discovered_events as the game list.
-# Never calls the discovery endpoint.
 # ---------------------------------------------------------------------------
 
 def _load_probe_results(engine, sport_key):
@@ -862,8 +908,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
     prop_markets = _filter_markets(probe, PROP_MARKETS[sport], "prop")
     alt_markets  = _filter_markets(probe, ALT_PROP_MARKETS[sport], "alt_prop")
 
-    # Load the full discovered event catalog for this sport/season.
-    # This is the only source of truth for what games exist.
     with engine.connect() as conn:
         discovered = conn.execute(
             text("""
@@ -880,14 +924,12 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         print("  Run --mode discover first to populate the event catalog.")
         return
 
-    # Load already-completed events.
     with engine.connect() as conn:
         loaded_ids = {str(r[0]) for r in conn.execute(
             text("SELECT event_id FROM odds.events WHERE sport_key = :sk AND season_year = :sy"),
             {"sk": sport_key, "sy": season_year},
         ).fetchall()}
 
-    # Build missing list from discovered catalog.
     missing = [
         {"event_id": r[0], "sport_title": r[1],
          "commence_time": r[2], "home_team": r[3], "away_team": r[4]}
@@ -898,7 +940,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         print(f"  All {len(discovered)} discovered events loaded. Nothing to do.")
         return
 
-    # Sort oldest first and cap at games_limit.
     missing.sort(key=lambda e: str(e["commence_time"]))
     work = missing[:games_limit]
     print(f"  Discovered: {len(discovered)}  Loaded: {len(loaded_ids)}  "
@@ -907,7 +948,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
     for ev in work:
         eid   = ev["event_id"]
         ctime = ev["commence_time"]
-        # Reconstruct a minimal event dict so helpers work unchanged.
         event = {
             "id":            eid,
             "sport_title":   ev["sport_title"],
@@ -957,7 +997,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         else:
             print("    Before props cutoff. Skipping prop calls.")
 
-        # Write to odds.events -- this is the "mark as loaded" step.
         upsert(engine,
                clean_dataframe(pd.DataFrame([{
                    "event_id":      eid,
@@ -1125,7 +1164,6 @@ def run_mappings(sport, engine):
     print(f"\n=== Mappings: {sport.upper()} ===")
 
     if sport == "nba":
-        # Team map
         with engine.connect() as conn:
             tricode_to_id = {r[0]: r[1] for r in conn.execute(
                 text("SELECT team_tricode, team_id FROM nba.teams")
@@ -1139,7 +1177,6 @@ def run_mappings(sport, engine):
                schema="odds", table="team_map", keys=["odds_team_name"])
         print(f"  team_map: {len(team_rows)} rows.")
 
-        # Player map
         with engine.connect() as conn:
             db_players = conn.execute(
                 text("SELECT player_id, player_name FROM nba.players")
@@ -1176,7 +1213,6 @@ def run_mappings(sport, engine):
                    schema="odds", table="player_map", keys=["odds_player_name", "sport_key"])
             print(f"  player_map: {len(pm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
-        # Event-game map: only unmapped events
         with engine.connect() as conn:
             unmapped = conn.execute(
                 text("""
