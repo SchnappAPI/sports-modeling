@@ -731,6 +731,34 @@ def _existing_event_ids(engine, sport_key, season_year):
     return {str(r[0]) for r in rows}
 
 
+def _latest_loaded_date(engine, sport_key, season_year):
+    """
+    Return the date of the latest commence_time already loaded for this
+    sport/season, or None if nothing is loaded yet.
+
+    Used to trim the discovery range on incremental runs so we only scan
+    dates that could still have missing events.
+    """
+    rows = _query_rows(
+        engine,
+        """
+        SELECT CAST(MAX(commence_time) AS DATE)
+        FROM odds.events
+        WHERE sport_key = :sk AND season_year = :sy
+        """,
+        {"sk": sport_key, "sy": season_year},
+    )
+    if rows and rows[0][0] is not None:
+        val = rows[0][0]
+        # SQL DATE comes back as a Python date object via pyodbc; normalise.
+        if isinstance(val, str):
+            return date.fromisoformat(val)
+        if hasattr(val, "date"):
+            return val.date()
+        return val
+    return None
+
+
 def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Backfill: {sport.upper()} Season {season_year} ===")
@@ -746,16 +774,25 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         print("  No past dates in range. Nothing to do.")
         return
 
-    print(f"  Season range: {start_date} to {end_date}")
-    all_dates = _date_list(start_date, end_date)
-    print(f"  Discovering events across {len(all_dates)} dates...")
+    # Trim discovery range: start from the day already loaded so we catch
+    # any games on that date that were missed, then continue forward.
+    # This avoids firing hundreds of discovery calls for dates already fully
+    # loaded, which is what causes rate-limit skips during backfill.
+    latest = _latest_loaded_date(engine, sport_key, season_year)
+    discover_from = max(start_date, latest) if latest else start_date
+    print(f"  Season range: {start_date} to {end_date}  |  Discovering from: {discover_from}")
+
+    all_dates = _date_list(discover_from, end_date)
+    print(f"  Discovering events across {len(all_dates)} dates (0.5s sleep between calls)...")
 
     events_by_id = {}
-    for d in all_dates:
+    for i, d in enumerate(all_dates):
         for ev in _discover_events(sport_key, d, api_key, quota_floor):
             eid = ev.get("id")
             if eid:
                 events_by_id[eid] = ev
+        if i < len(all_dates) - 1:
+            time.sleep(0.5)
 
     existing = _existing_event_ids(engine, sport_key, season_year)
     missing  = [events_by_id[eid] for eid in set(events_by_id) - existing]
