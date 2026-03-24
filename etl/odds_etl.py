@@ -5,12 +5,14 @@ Ingests historical odds data from The Odds API v4 into Azure SQL.
 Schema: odds
 
 Modes
-  discover  -- Walks the historical snapshot chain backward from the end of
-               the season using the previous_timestamp field returned by each
-               API response. Each call lands on a real snapshot that actually
-               existed, so no credits are wasted on empty guesses. Progress is
-               checkpointed in odds.discover_cursors so restarts resume from
-               where the last run stopped. Costs 1 credit per snapshot walked.
+  discover  -- Walks backward through the historical snapshot chain one
+               calendar date at a time. For each date it requests a single
+               snapshot near the end of that day, stores whatever events are
+               in that snapshot, then jumps back ~23 hours to land on the
+               previous date. This costs 1 credit per calendar date rather
+               than 1 credit per 5-minute interval. Progress is checkpointed
+               in odds.discover_cursors so restarts resume from where the
+               last run stopped.
 
   backfill  -- Reads odds.discovered_events as the authoritative game list.
                Diffs against odds.events to find gaps. Processes the oldest
@@ -216,7 +218,6 @@ DDL_STATEMENTS = [
     # timestamp reached so far in the backward walk. This is the resume cursor
     # for discover mode. When discover restarts, it picks up from
     # oldest_snapshot_ts instead of re-walking already-covered history.
-    # Replaces the old discovered_dates calendar-day skip list.
     """
     IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
                    WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='discover_cursors')
@@ -672,36 +673,36 @@ def _season_date_range(sport, season_year):
 # ---------------------------------------------------------------------------
 # DISCOVER mode
 # ---------------------------------------------------------------------------
-# Strategy: walk the historical snapshot chain backward using previous_timestamp.
-# Each API call returns the real snapshot closest to (and no later than) the
-# requested date, plus previous_timestamp pointing to the next snapshot further
-# back in time. We follow that pointer hop by hop. This guarantees every real
-# snapshot is visited; no credits are spent on gaps between snapshots.
+# Strategy: one API call per calendar date, not one per 5-minute snapshot.
 #
-# Progress is checkpointed in odds.discover_cursors. The oldest_snapshot_ts
-# column records the earliest snapshot timestamp we have successfully walked
-# past. On restart, we resume from that timestamp rather than re-walking
-# already-covered history.
+# For each date we request a snapshot at 23:59:59 UTC on that date. The API
+# returns the closest real snapshot at or before that timestamp, which will
+# be the last snapshot of the day. We store whatever events are in it, then
+# subtract 23 hours from actual_timestamp to build the request for the next
+# iteration. Subtracting 23h from a 23:59 timestamp lands us somewhere around
+# 00:59 of the same day, which is comfortably inside the previous calendar
+# date's snapshot window. This means we never request the same date twice and
+# never walk intraday 5-minute intervals.
+#
+# Progress is checkpointed in odds.discover_cursors after each date so
+# restarts resume without re-scanning already-covered dates.
 #
 # The walk stops when:
-#   (a) previous_timestamp is absent or empty (reached the beginning of history)
-#   (b) all events in the snapshot have commence_time before the season start
-#   (c) --snapshots limit is reached for this run
+#   (a) previous_timestamp is absent (reached the beginning of history)
+#   (b) actual_timestamp has crossed before the season start date
+#   (c) --snapshots limit (one per date) is reached for this run
 # ---------------------------------------------------------------------------
 
 def _api_discover_snapshot(sport_key, snapshot_ts_iso, api_key, quota_floor):
     """
     Call GET /v4/historical/sports/{sport}/events with date=snapshot_ts_iso.
-    Returns the full response dict (which includes timestamp, previous_timestamp,
+    Returns the full response dict (timestamp, previous_timestamp,
     next_timestamp, data) or None on failure.
     """
     _check_quota(quota_floor)
     data, _ = _request(
         f"{BASE_URL}/v4/historical/sports/{sport_key}/events",
-        {
-            "apiKey": api_key,
-            "date":   snapshot_ts_iso,
-        },
+        {"apiKey": api_key, "date": snapshot_ts_iso},
         quota_floor,
     )
     return data
@@ -711,14 +712,15 @@ def _load_cursor(engine, sport_key, season_year):
     """Return the stored oldest_snapshot_ts for this sport/season, or None."""
     rows = _query_rows(
         engine,
-        "SELECT oldest_snapshot_ts FROM odds.discover_cursors WHERE sport_key = :sk AND season_year = :sy",
+        "SELECT oldest_snapshot_ts FROM odds.discover_cursors "
+        "WHERE sport_key = :sk AND season_year = :sy",
         {"sk": sport_key, "sy": season_year},
     )
     return rows[0][0] if rows else None
 
 
-def _save_cursor(engine, sport_key, season_year, oldest_ts_iso, snapshots_walked, events_found):
-    """Upsert the cursor row for this sport/season."""
+def _save_cursor(engine, sport_key, season_year, oldest_ts_iso, snapshots_delta, events_delta):
+    """Upsert the cursor row, accumulating totals."""
     with engine.begin() as conn:
         conn.execute(text("""
             MERGE odds.discover_cursors AS t
@@ -735,7 +737,7 @@ def _save_cursor(engine, sport_key, season_year, oldest_ts_iso, snapshots_walked
             VALUES (s.sport_key, s.season_year, s.oldest_snapshot_ts,
                     s.snapshots_walked, s.events_found);
         """), {"sk": sport_key, "sy": season_year, "ots": oldest_ts_iso,
-               "sw": snapshots_walked, "ef": events_found})
+               "sw": snapshots_delta, "ef": events_delta})
 
 
 def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engine):
@@ -743,106 +745,100 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
     print(f"\n=== Discover: {sport.upper()} Season {season_year} ===")
 
     season_start, season_end = _season_date_range(sport, season_year)
-
-    # The season may still be in progress. Cap the end to yesterday so we
-    # never try to walk into the future.
     effective_end = min(season_end, date.today() - timedelta(days=1))
     if season_start > effective_end:
         print("  Season has not started yet or no past dates exist. Nothing to do.")
         return
-
-    # Determine where to start the walk.
-    # If a cursor exists, resume from the oldest snapshot we've already reached.
-    # Otherwise, start from the end of the season window.
-    cursor_ts = _load_cursor(engine, sport_key, season_year)
-    if cursor_ts:
-        start_iso = cursor_ts
-        print(f"  Resuming from cursor: {start_iso}")
-    else:
-        start_iso = f"{effective_end.isoformat()}T23:59:59Z"
-        print(f"  No cursor found. Starting from: {start_iso}")
 
     season_start_dt = datetime(
         season_start.year, season_start.month, season_start.day,
         tzinfo=timezone.utc
     )
 
-    snapshots_walked = 0
-    events_stored    = 0
-    next_iso         = start_iso  # the timestamp we'll request next
+    # Resume from cursor if one exists, otherwise start at end of season.
+    cursor_ts = _load_cursor(engine, sport_key, season_year)
+    if cursor_ts:
+        next_request_iso = cursor_ts
+        print(f"  Resuming from cursor: {next_request_iso}")
+    else:
+        next_request_iso = f"{effective_end.isoformat()}T23:59:59Z"
+        print(f"  No cursor found. Starting from: {next_request_iso}")
 
-    print(f"  Walking backward. Limit: {snapshots_limit} snapshots this run.")
+    print(f"  Walking backward. Limit: {snapshots_limit} dates this run.")
 
-    while snapshots_walked < snapshots_limit:
+    dates_walked  = 0
+    events_stored = 0
+
+    while dates_walked < snapshots_limit:
         _check_quota(quota_floor)
-        print(f"  Snapshot {snapshots_walked + 1}: requesting {next_iso} ...")
+        print(f"  Date {dates_walked + 1}: requesting {next_request_iso} ...")
 
-        resp = _api_discover_snapshot(sport_key, next_iso, api_key, quota_floor)
+        resp = _api_discover_snapshot(sport_key, next_request_iso, api_key, quota_floor)
         if resp is None:
             print("  API returned None. Stopping.")
             break
 
-        actual_ts   = resp.get("timestamp")           # what snapshot was actually returned
-        previous_ts = resp.get("previous_timestamp")  # pointer to the next snapshot back in time
+        actual_ts   = resp.get("timestamp")
+        previous_ts = resp.get("previous_timestamp")
         events      = resp.get("data") or []
 
-        print(f"    actual snapshot={actual_ts}  events_in_snapshot={len(events)}  previous={previous_ts or 'none'}")
+        print(f"    actual={actual_ts}  events={len(events)}  previous={previous_ts or 'none'}")
 
-        # Filter to events within this season's date range.
-        season_events = []
-        for ev in events:
-            ctime = _parse_iso(ev.get("commence_time"))
-            if ctime is None:
-                continue
-            # Include events that start on or after season_start.
-            if ctime >= season_start_dt:
-                season_events.append(ev)
+        # Store events within the season window.
+        season_events = [
+            ev for ev in events
+            if ev.get("id") and _parse_iso(ev.get("commence_time")) is not None
+            and _parse_iso(ev.get("commence_time")) >= season_start_dt
+        ]
 
         if season_events:
-            rows = [
-                {
-                    "event_id":      ev.get("id"),
-                    "sport_key":     sport_key,
-                    "sport_title":   ev.get("sport_title"),
-                    "commence_time": _to_utc_str(ev.get("commence_time")),
-                    "home_team":     ev.get("home_team"),
-                    "away_team":     ev.get("away_team"),
-                    "season_year":   season_year,
-                }
-                for ev in season_events if ev.get("id")
-            ]
-            if rows:
-                upsert(engine, clean_dataframe(pd.DataFrame(rows)),
-                       schema="odds", table="discovered_events", keys=["event_id"])
-                events_stored += len(rows)
-                print(f"    Stored {len(rows)} events.")
+            rows = [{
+                "event_id":      ev["id"],
+                "sport_key":     sport_key,
+                "sport_title":   ev.get("sport_title"),
+                "commence_time": _to_utc_str(ev.get("commence_time")),
+                "home_team":     ev.get("home_team"),
+                "away_team":     ev.get("away_team"),
+                "season_year":   season_year,
+            } for ev in season_events]
+            upsert(engine, clean_dataframe(pd.DataFrame(rows)),
+                   schema="odds", table="discovered_events", keys=["event_id"])
+            events_stored += len(rows)
+            print(f"    Stored {len(rows)} events.")
 
-        snapshots_walked += 1
+        dates_walked += 1
 
-        # Checkpoint after every snapshot so partial runs aren't lost.
-        # We store actual_ts (not next_iso) because that's the real snapshot
-        # we reached; previous_ts is where we'll resume from next time.
-        checkpoint_ts = previous_ts if previous_ts else actual_ts
-        _save_cursor(engine, sport_key, season_year, checkpoint_ts,
-                     snapshots_walked=1, events_found=len(season_events))
-
-        # Check stopping conditions.
+        # Stopping conditions before computing next jump.
         if not previous_ts:
-            print("  No previous_timestamp in response. Reached the beginning of history.")
+            print("  No previous_timestamp. Reached beginning of history.")
+            _save_cursor(engine, sport_key, season_year, actual_ts or next_request_iso,
+                         dates_walked, events_stored)
             break
 
-        # If the actual snapshot returned is already before the season start,
-        # everything further back is definitely outside our window.
-        if actual_ts:
-            actual_dt = _parse_iso(actual_ts)
-            if actual_dt and actual_dt < season_start_dt:
-                print(f"  Snapshot {actual_ts} is before season start {season_start}. Walk complete.")
-                break
+        actual_dt = _parse_iso(actual_ts)
+        if actual_dt and actual_dt < season_start_dt:
+            print(f"  Crossed season start ({season_start}). Walk complete.")
+            _save_cursor(engine, sport_key, season_year, actual_ts,
+                         dates_walked, events_stored)
+            break
 
-        next_iso = previous_ts
+        # Jump back ~23 hours from the actual snapshot timestamp to land
+        # squarely inside the previous calendar date's snapshot window,
+        # skipping all intraday 5-minute intervals.
+        if actual_dt:
+            jump_dt  = actual_dt - timedelta(hours=23)
+            next_request_iso = jump_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            # Fallback: use previous_timestamp directly if we couldn't parse actual_ts.
+            next_request_iso = previous_ts
+
+        # Checkpoint after each date.
+        _save_cursor(engine, sport_key, season_year, next_request_iso,
+                     snapshots_delta=1, events_delta=len(season_events))
+
         time.sleep(1.0)
 
-    print(f"\n  Run complete. Snapshots walked: {snapshots_walked}  Events stored this run: {events_stored}")
+    print(f"\n  Run complete. Dates walked: {dates_walked}  Events stored this run: {events_stored}")
     if _remaining_credits is not None:
         print(f"  Credits remaining: {_remaining_credits:,}")
 
@@ -1110,7 +1106,6 @@ def _probe_select_events(sport, sport_key, api_key, quota_floor):
         if not resp:
             continue
         events = resp.get("data") or []
-        # Walk forward up to a week if this snapshot is empty
         hops = 0
         while not events and resp.get("next_timestamp") and hops < 7:
             resp = _api_discover_snapshot(sport_key, resp["next_timestamp"], api_key, quota_floor)
@@ -1485,7 +1480,7 @@ def main():
     parser.add_argument("--games",      type=int, default=10,
                         help="Backfill mode: max events to process per run.")
     parser.add_argument("--snapshots",  type=int, default=50,
-                        help="Discover mode: max snapshots to walk per run. Default 50.")
+                        help="Discover mode: max calendar dates to walk per run. Default 50.")
     parser.add_argument("--days-ahead", type=int, default=1, dest="days_ahead",
                         help="Upcoming mode: calendar days ahead. Default 1 = next game day.")
     parser.add_argument("--quota-floor",type=int, default=50000, dest="quota_floor")
