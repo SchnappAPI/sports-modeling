@@ -12,17 +12,17 @@ on:
         required: false
         default: "all"
       season:
-        description: "Season year (e.g. 2024). Leave blank for auto-detect."
+        description: "Season year. NBA/NFL = year October/September starts (2025 = 2025-26). MLB = calendar year. Leave blank for auto-detect."
         required: false
-        default: ""
+        default: "2025"
       games:
         description: "Max events to process per backfill run"
         required: false
         default: "10"
       quota_floor:
-        description: "Stop if remaining credits fall below this"
+        description: "Stop if remaining credits fall below this. Default protects ~4.7M of your 5M total."
         required: false
-        default: "50000"
+        default: "4700000"
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -70,7 +70,7 @@ jobs:
           FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
           FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'all' }}"
           FLAGS="$FLAGS --games ${{ github.event.inputs.games || '10' }}"
-          FLAGS="$FLAGS --quota-floor ${{ github.event.inputs.quota_floor || '50000' }}"
+          FLAGS="$FLAGS --quota-floor ${{ github.event.inputs.quota_floor || '4700000' }}"
           SEASON="${{ github.event.inputs.season }}"
           [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
           echo "flags=$FLAGS" >> $GITHUB_OUTPUT
