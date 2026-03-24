@@ -1211,6 +1211,17 @@ _NAME_SUFFIXES = re.compile(
     re.IGNORECASE
 )
 
+# Maps Odds API player names to their canonical NBA player names.
+# Add entries here whenever a player's Odds API name doesn't match nba.players.
+_NBA_PLAYER_ALIASES = {
+    "Moe Wagner":          "Moritz Wagner",
+    "Herb Jones":          "Herbert Jones",
+    "Nicolas Claxton":     "Nic Claxton",
+    "Vincent Williams Jr": "Vince Williams Jr.",
+    "Ron Holland":         "Ronald Holland II",
+    "Carlton Carrington":  "Bub Carrington",
+}
+
 
 def _normalize_name(name):
     """
@@ -1272,7 +1283,8 @@ def run_mappings(sport, engine):
         pm_rows = []
         matched = unmatched = 0
         for oname in all_names:
-            norm  = _normalize_name(oname)
+            lookup_name = _NBA_PLAYER_ALIASES.get(oname, oname)
+            norm  = _normalize_name(lookup_name)
             pid   = norm_to_pid.get(norm)
             mname = norm_to_name.get(norm)
             if pid: matched += 1
