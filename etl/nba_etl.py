@@ -512,6 +512,14 @@ def players_table_empty(engine):
     with engine.connect() as conn:
         return conn.execute(text("SELECT COUNT(1) FROM nba.players")).scalar() == 0
 
+def get_known_player_ids(engine):
+    """Return the set of player_ids currently in nba.players."""
+    with engine.connect() as conn:
+        return {
+            int(row[0]) for row in
+            conn.execute(text("SELECT player_id FROM nba.players"))
+        }
+
 def load_players(engine, season):
     log.info(f"Loading nba.players via commonallplayers for season {season}")
     url  = (
@@ -776,14 +784,18 @@ def _fetch_pt_stats_direct(game_date, pt_measure_type, season, timeout=60):
     log.info(f"  {len(df)} rows returned")
     return df
 
-def load_passing_stats(game_date, season, engine):
+def load_passing_stats(game_date, season, engine, known_player_ids):
     df = _fetch_pt_stats_direct(game_date, "Passing", season)
     if df is None or df.empty:
         return 0
     rows = []
+    skipped = []
     for _, row in df.iterrows():
         pid = safe_int(row.get("PLAYER_ID"))
         if pid is None:
+            continue
+        if pid not in known_player_ids:
+            skipped.append((pid, safe_str(row.get("PLAYER_NAME"))))
             continue
         rows.append({
             "player_id":     pid,
@@ -793,19 +805,26 @@ def load_passing_stats(game_date, season, engine):
             "team_tricode":  safe_str(row.get("TEAM_ABBREVIATION")),
             "potential_ast": safe_float(row.get("POTENTIAL_AST")),
         })
+    if skipped:
+        log.warning(f"  Passing stats: skipped {len(skipped)} unknown player(s) for {game_date}: "
+                    + ", ".join(f"{name} ({pid})" for pid, name in skipped))
     if rows:
         upsert(pd.DataFrame(rows), engine, "nba", "player_passing_stats", ["player_id", "game_date"])
         log.info(f"  Passing stats: {len(rows)} rows upserted for {game_date}")
     return len(rows)
 
-def load_rebound_chances(game_date, season, engine):
+def load_rebound_chances(game_date, season, engine, known_player_ids):
     df = _fetch_pt_stats_direct(game_date, "Rebounding", season)
     if df is None or df.empty:
         return 0
     rows = []
+    skipped = []
     for _, row in df.iterrows():
         pid = safe_int(row.get("PLAYER_ID"))
         if pid is None:
+            continue
+        if pid not in known_player_ids:
+            skipped.append((pid, safe_str(row.get("PLAYER_NAME"))))
             continue
         rows.append({
             "player_id":    pid,
@@ -815,6 +834,9 @@ def load_rebound_chances(game_date, season, engine):
             "team_tricode": safe_str(row.get("TEAM_ABBREVIATION")),
             "reb_chances":  safe_float(row.get("REB_CHANCES")),
         })
+    if skipped:
+        log.warning(f"  Rebound chances: skipped {len(skipped)} unknown player(s) for {game_date}: "
+                    + ", ".join(f"{name} ({pid})" for pid, name in skipped))
     if rows:
         upsert(pd.DataFrame(rows), engine, "nba", "player_rebound_chances", ["player_id", "game_date"])
         log.info(f"  Rebound chances: {len(rows)} rows upserted for {game_date}")
@@ -945,14 +967,16 @@ def main():
         if not pt_batch:
             log.info("Pt stats: all dates up to date.")
         else:
+            known_player_ids = get_known_player_ids(engine)
+            log.info(f"  Pt stats: {len(known_player_ids)} known players loaded for FK filtering.")
             remain = len(missing_pt) - len(pt_batch)
             log.info(f"Pt stats: fetching {len(pt_batch)} date(s), {remain} remain after this run.")
             for i, pt_date in enumerate(pt_batch):
-                passing_count = load_passing_stats(pt_date, args.season, engine)
+                passing_count = load_passing_stats(pt_date, args.season, engine, known_player_ids)
                 if passing_count > 0:
                     log.info(f"  Waiting {PT_STATS_BETWEEN_DELAY}s before rebounding call...")
                     time.sleep(PT_STATS_BETWEEN_DELAY)
-                load_rebound_chances(pt_date, args.season, engine)
+                load_rebound_chances(pt_date, args.season, engine, known_player_ids)
                 if i < len(pt_batch) - 1:
                     log.info(f"  Waiting {PT_STATS_BETWEEN_DELAY}s before next date...")
                     time.sleep(PT_STATS_BETWEEN_DELAY)
