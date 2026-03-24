@@ -71,10 +71,11 @@ NFL_EVENT_FEATURED = [
     "h2h_q1", "spreads_q1", "totals_q1",
     "team_totals_h1",
 ]
+# Removed: player_pass_yds_q1 (only fanduel, does not meet 2-book threshold)
 NFL_PROPS = [
     "player_pass_yds", "player_pass_tds", "player_pass_attempts",
     "player_pass_completions", "player_pass_interceptions",
-    "player_pass_longest_completion", "player_pass_yds_q1",
+    "player_pass_longest_completion",
     "player_rush_yds", "player_rush_longest",
     "player_reception_yds", "player_receptions", "player_reception_longest",
     "player_pass_rush_yds", "player_rush_reception_yds",
@@ -94,7 +95,7 @@ NBA_EVENT_FEATURED = [
     "team_totals_h1",
 ]
 # Removed: player_points_q1, player_rebounds_q1, player_assists_q1
-#   (only covered by williamhill_us, which is no longer in BOOKMAKERS)
+#   (only williamhill_us, which is no longer in BOOKMAKERS)
 # Removed: player_first_team_basket, player_method_of_first_basket
 #   (not covered by fanduel or draftkings)
 NBA_PROPS = [
@@ -121,6 +122,7 @@ MLB_EVENT_FEATURED = [
     "h2h_1st_5_innings", "spreads_1st_5_innings", "totals_1st_5_innings",
     "totals_1st_1_innings",
 ]
+# Removed: pitcher_outs (only draftkings, does not meet 2-book threshold)
 MLB_PROPS = [
     "batter_home_runs", "batter_first_home_run",
     "batter_hits", "batter_total_bases", "batter_rbis",
@@ -128,9 +130,9 @@ MLB_PROPS = [
     "batter_singles", "batter_doubles", "batter_triples",
     "batter_walks", "batter_strikeouts", "batter_stolen_bases",
     "pitcher_strikeouts", "pitcher_hits_allowed", "pitcher_walks",
-    "pitcher_earned_runs", "pitcher_outs",
+    "pitcher_earned_runs",
 ]
-# Removed: batter_runs_scored_alternate (not covered by any bookmaker)
+# Removed: batter_runs_scored_alternate (zero coverage)
 MLB_ALT_PROPS = [
     "batter_total_bases_alternate", "batter_home_runs_alternate",
     "batter_hits_alternate", "batter_rbis_alternate",
