@@ -524,7 +524,7 @@ def load_players(engine, season):
     log.info(f"Loading nba.players via playerindex for season {season}")
     url = (
         "https://stats.nba.com/stats/playerindex"
-        f"?Historical=1&LeagueID=00&Season={season}&SeasonType=Regular%20Season&TeamID=0"
+        f"?Historical=0&LeagueID=00&Season={season}&SeasonType=Regular%20Season&TeamID=0"
         "&College=&Country=&DraftPick=&DraftRound=&DraftYear=&Height=&Weight="
     )
     data = _direct_get(url, "playerindex", proxies=get_proxies(), timeout=120)
