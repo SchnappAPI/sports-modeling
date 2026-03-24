@@ -266,16 +266,13 @@ def fetch_history(engine, player_ids, market_keys, as_of_date):
     One row per (player_id, market_key, game_date). No further DB calls
     are needed after this point.
     """
-    # Only fetch markets that have a computable stat expression
     gradeable_markets = [m for m in market_keys if m in MARKET_STAT_MAP]
     if not player_ids or not gradeable_markets:
         return pd.DataFrame()
 
     pid_list = ", ".join(str(int(p)) for p in player_ids)
 
-    # Build one UNION ALL branch per unique stat expression so we touch
-    # nba.player_box_score_stats only once per expression group.
-    # Group markets by their stat expression to minimise union branches.
+    # Group markets by stat expression to minimise UNION ALL branches.
     expr_to_markets: dict[str, list[str]] = {}
     for mkt in gradeable_markets:
         expr = MARKET_STAT_MAP[mkt]
@@ -283,7 +280,6 @@ def fetch_history(engine, player_ids, market_keys, as_of_date):
 
     union_branches = []
     for expr, mkts in expr_to_markets.items():
-        mkt_list = ", ".join(f"'{m}'" for m in mkts)
         union_branches.append(f"""
             SELECT
                 b.player_id,
@@ -359,17 +355,11 @@ def compute_all_hit_rates(props_df, history_df):
     history["stat_value"] = history["stat_value"].astype(float)
     result["line_value"]  = result["line_value"].astype(float)
 
-    # Cross-join history with every distinct line value per (player, market)
-    # then compute hit flag in one vectorized operation.
-    lines = (
-        result[["player_id", "market_key", "line_value"]]
-        .drop_duplicates()
-    )
-
+    lines  = result[["player_id", "market_key", "line_value"]].drop_duplicates()
     merged = history.merge(lines, on=["player_id", "market_key"], how="inner")
     merged["hit"] = (merged["stat_value"] > merged["line_value"]).astype(int)
 
-    # --- 60-day window ---
+    # 60-day window
     g60 = (
         merged
         .groupby(["player_id", "market_key", "line_value"])
@@ -378,7 +368,7 @@ def compute_all_hit_rates(props_df, history_df):
     )
     g60["hit_rate_60"] = g60["hits_60"] / g60["sample_size_60"]
 
-    # --- 20-day window ---
+    # 20-day window
     g20 = (
         merged[merged["in_short_window"] == 1]
         .groupby(["player_id", "market_key", "line_value"])
@@ -387,30 +377,23 @@ def compute_all_hit_rates(props_df, history_df):
     )
     g20["hit_rate_20"] = g20["hits_20"] / g20["sample_size_20"]
 
-    # --- Merge back onto props ---
     result = result.merge(
         g60[["player_id", "market_key", "line_value", "hit_rate_60", "sample_size_60"]],
-        on=["player_id", "market_key", "line_value"],
-        how="left",
+        on=["player_id", "market_key", "line_value"], how="left",
     )
     result = result.merge(
         g20[["player_id", "market_key", "line_value", "hit_rate_20", "sample_size_20"]],
-        on=["player_id", "market_key", "line_value"],
-        how="left",
+        on=["player_id", "market_key", "line_value"], how="left",
     )
 
     result["sample_size_60"] = result["sample_size_60"].fillna(0).astype(int)
     result["sample_size_20"] = result["sample_size_20"].fillna(0).astype(int)
 
-    # --- Weighted grade ---
-    use_blend = (
-        result["sample_size_20"] >= MIN_SAMPLE
-    ) & result["hit_rate_20"].notna()
-
+    use_blend = (result["sample_size_20"] >= MIN_SAMPLE) & result["hit_rate_20"].notna()
     result["weighted_hit_rate"] = result["hit_rate_60"]
     result.loc[use_blend, "weighted_hit_rate"] = (
         WEIGHT_SHORT * result.loc[use_blend, "hit_rate_20"]
-        + WEIGHT_LONG * result.loc[use_blend, "hit_rate_60"]
+        + WEIGHT_LONG  * result.loc[use_blend, "hit_rate_60"]
     )
 
     result["grade"] = result["weighted_hit_rate"].apply(
@@ -432,6 +415,12 @@ def upsert_grades(engine, rows):
         return 0
 
     with engine.begin() as conn:
+        # Drop and recreate the staging table each call so this function is
+        # safe to call multiple times within the same connection lifetime.
+        conn.execute(text("""
+            IF OBJECT_ID('tempdb..#stage_grades') IS NOT NULL
+                DROP TABLE #stage_grades
+        """))
         conn.execute(text("""
             CREATE TABLE #stage_grades (
                 grade_date        DATE,
@@ -508,15 +497,6 @@ def upsert_grades(engine, rows):
 # Core grading logic (shared by both modes)
 # ---------------------------------------------------------------------------
 def grade_props_for_date(engine, grade_date_str, props_df):
-    """
-    Grade all prop lines in props_df for a single game date.
-
-    props_df must have columns:
-        event_id, player_id, player_name, market_key, bookmaker_key,
-        line_value, game_id
-
-    Returns number of rows written.
-    """
     if props_df.empty:
         log.info(f"  {grade_date_str}: no props. Skipping.")
         return 0
