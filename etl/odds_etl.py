@@ -54,6 +54,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 
@@ -214,10 +215,6 @@ NBA_TEAM_NAME_TO_TRICODE = {
 DDL_STATEMENTS = [
     "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'odds') EXEC('CREATE SCHEMA odds')",
 
-    # discover_cursors: one row per sport/season tracking the oldest snapshot
-    # timestamp reached so far in the backward walk. This is the resume cursor
-    # for discover mode. When discover restarts, it picks up from
-    # oldest_snapshot_ts instead of re-walking already-covered history.
     """
     IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
                    WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='discover_cursors')
@@ -231,9 +228,6 @@ DDL_STATEMENTS = [
         CONSTRAINT pk_odds_discover_cursors PRIMARY KEY (sport_key, season_year)
     )
     """,
-
-    # discovered_events: the authoritative event catalog populated by discover
-    # mode. Backfill reads this table instead of calling the discovery endpoint.
     """
     IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
                    WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='discovered_events')
@@ -673,32 +667,8 @@ def _season_date_range(sport, season_year):
 # ---------------------------------------------------------------------------
 # DISCOVER mode
 # ---------------------------------------------------------------------------
-# Strategy: one API call per calendar date, not one per 5-minute snapshot.
-#
-# Every request is pinned to T23:59:59Z on a specific calendar date. The API
-# returns the closest real snapshot at or before that timestamp. After storing
-# events, we extract the calendar date from next_request_iso, subtract 1 day,
-# and pin the next request to T23:59:59Z on that previous date. This means
-# every request always lands at the same time of day with no drift, regardless
-# of the exact seconds in actual_timestamp.
-#
-# Progress is checkpointed in odds.discover_cursors after each date so
-# restarts resume without re-scanning already-covered dates. The cursor stores
-# the next request ISO that would have been made, so on restart the walk
-# continues from exactly where it left off.
-#
-# The walk stops when:
-#   (a) previous_timestamp is absent (reached beginning of history)
-#   (b) actual_timestamp has crossed before the season start date
-#   (c) --snapshots limit (one per date) is reached for this run
-# ---------------------------------------------------------------------------
 
 def _api_discover_snapshot(sport_key, snapshot_ts_iso, api_key, quota_floor):
-    """
-    Call GET /v4/historical/sports/{sport}/events with date=snapshot_ts_iso.
-    Returns the full response dict (timestamp, previous_timestamp,
-    next_timestamp, data) or None on failure.
-    """
     _check_quota(quota_floor)
     data, _ = _request(
         f"{BASE_URL}/v4/historical/sports/{sport_key}/events",
@@ -709,7 +679,6 @@ def _api_discover_snapshot(sport_key, snapshot_ts_iso, api_key, quota_floor):
 
 
 def _load_cursor(engine, sport_key, season_year):
-    """Return the stored oldest_snapshot_ts for this sport/season, or None."""
     rows = _query_rows(
         engine,
         "SELECT oldest_snapshot_ts FROM odds.discover_cursors "
@@ -720,7 +689,6 @@ def _load_cursor(engine, sport_key, season_year):
 
 
 def _save_cursor(engine, sport_key, season_year, oldest_ts_iso, snapshots_delta, events_delta):
-    """Upsert the cursor row, accumulating totals."""
     with engine.begin() as conn:
         conn.execute(text("""
             MERGE odds.discover_cursors AS t
@@ -755,9 +723,6 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
         tzinfo=timezone.utc
     )
 
-    # Resume from cursor if one exists, otherwise start at end of season.
-    # All requests are always pinned to T23:59:59Z so the cursor stores
-    # a clean YYYY-MM-DDT23:59:59Z string that is safe to use directly.
     cursor_ts = _load_cursor(engine, sport_key, season_year)
     if cursor_ts:
         next_request_iso = cursor_ts
@@ -786,7 +751,6 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
 
         print(f"    actual={actual_ts}  events={len(events)}  previous={previous_ts or 'none'}")
 
-        # Store events within the season window.
         season_events = [
             ev for ev in events
             if ev.get("id") and _parse_iso(ev.get("commence_time")) is not None
@@ -810,7 +774,6 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
 
         dates_walked += 1
 
-        # Stopping conditions before computing next jump.
         if not previous_ts:
             print("  No previous_timestamp. Reached beginning of history.")
             _save_cursor(engine, sport_key, season_year, actual_ts or next_request_iso,
@@ -824,21 +787,13 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
                          dates_walked, events_stored)
             break
 
-        # Derive the next request by subtracting exactly 1 calendar day from
-        # the DATE portion of next_request_iso and pinning to T23:59:59Z.
-        # This keeps every request at the same time of day and eliminates the
-        # drift that occurs when subtracting hours from actual_timestamp (which
-        # varies by a few minutes per hop and compounds over many iterations).
         current_date = _parse_iso(next_request_iso)
         if current_date:
             prev_date        = (current_date - timedelta(days=1)).date()
             next_request_iso = f"{prev_date.isoformat()}T23:59:59Z"
         else:
-            # Fallback: use previous_timestamp if we somehow can't parse.
             next_request_iso = previous_ts
 
-        # Checkpoint after each date. Store next_request_iso as the cursor so
-        # a restart begins exactly where we left off.
         _save_cursor(engine, sport_key, season_year, next_request_iso,
                      snapshots_delta=1, events_delta=len(season_events))
 
@@ -907,7 +862,6 @@ def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
 
 
 def _snap_iso(commence_raw):
-    """Return an ISO timestamp 30 minutes before game time, for historical odds calls."""
     if not commence_raw:
         return None
     try:
@@ -918,26 +872,14 @@ def _snap_iso(commence_raw):
 
 
 def _cdt(event):
-    """
-    Return the commence_time of an event as a timezone-aware UTC datetime, or None.
-
-    The event dict may come from two sources:
-      - The Odds API response: commence_time is an ISO string like "2025-10-22T00:00:00Z"
-      - A SQLAlchemy row read back from DATETIME2: commence_time is a naive Python datetime
-
-    In both cases we normalise to an aware UTC datetime so comparisons against
-    PROPS_CUTOFF (which carries tzinfo=timezone.utc) never raise TypeError.
-    """
     raw = event.get("commence_time")
     if not raw:
         return None
     try:
         if isinstance(raw, datetime):
-            # SQLAlchemy returns DATETIME2 as a naive datetime; treat as UTC.
             if raw.tzinfo is None:
                 return raw.replace(tzinfo=timezone.utc)
             return raw.astimezone(timezone.utc)
-        # String path: handles "Z" suffix and "+00:00" offsets.
         dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         if dt.tzinfo is None:
             return dt.replace(tzinfo=timezone.utc)
@@ -1118,10 +1060,6 @@ PROBE_WORST_CASE = {
 
 
 def _probe_select_events(sport, sport_key, api_key, quota_floor):
-    """
-    Walk forward from each candidate date using next_timestamp to find the
-    first real snapshot that has events. Returns up to 5 sample event objects.
-    """
     candidate_dates = PROBE_BEST_CASE[sport] + PROBE_WORST_CASE[sport]
     selected, seen_ids = [], set()
 
@@ -1235,10 +1173,37 @@ def run_probe(sport, api_key, quota_floor, engine):
 # MAPPINGS mode
 # ---------------------------------------------------------------------------
 
+# Suffixes that appear in odds API names but are absent from nba.players,
+# or vice versa. Stripped from both sides before comparison so matching
+# is robust to inconsistent suffix usage across sources.
+_NAME_SUFFIXES = re.compile(
+    r'\b(jr\.?|sr\.?|ii|iii|iv)\s*$',
+    re.IGNORECASE
+)
+
+
 def _normalize_name(name):
+    """
+    Canonical form for player name matching.
+
+    Steps applied to both the odds API name and the nba.players name:
+      1. Unicode NFC normalisation
+      2. Decompose accented characters and strip combining marks
+         (converts e.g. ö -> o, é -> e)
+      3. Lowercase
+      4. Strip generational suffixes (Jr, Sr, II, III, IV)
+      5. Remove all characters except a-z, 0-9, and space
+      6. Collapse whitespace and strip
+    """
     if not name:
         return ""
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", name.lower())).strip()
+    # Decompose accented characters (ö -> o + combining umlaut) then keep only ASCII
+    name = unicodedata.normalize("NFD", name)
+    name = "".join(c for c in name if unicodedata.category(c) != "Mn")
+    name = name.lower()
+    name = _NAME_SUFFIXES.sub("", name)
+    name = re.sub(r"[^a-z0-9 ]", "", name)
+    return re.sub(r"\s+", " ", name).strip()
 
 
 def run_mappings(sport, engine):
@@ -1296,11 +1261,9 @@ def run_mappings(sport, engine):
             print(f"  player_map: {len(pm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
         # event_game_map: match odds events to nba.games via date + home tricode.
-        # Processes ALL events in odds.events, including previously unmatched ones,
-        # so that re-running mappings after fixing data will resolve old failures.
-        # Date matching tries the UTC date first, then UTC-minus-one-day as a
-        # fallback for evening games whose commence_time crosses midnight UTC
-        # but whose game_date in nba.games is stored in local (Eastern) time.
+        # Processes ALL events so re-running mappings retries previously unmatched rows.
+        # Tries UTC date first, then UTC-minus-one-day for evening games whose
+        # commence_time crosses midnight UTC but game_date in nba.games is local time.
         with engine.connect() as conn:
             all_events = conn.execute(
                 text("""
@@ -1347,7 +1310,6 @@ def run_mappings(sport, engine):
                 game_id = None
                 used_date = None
                 if home_tc:
-                    # Try UTC date first, then UTC-minus-one-day for evening games
                     for candidate in [utc_date, utc_prev_date]:
                         if candidate is None:
                             continue
