@@ -15,9 +15,24 @@ Grade formula
   weighted_hit_rate = (0.60 * hit_rate_20) + (0.40 * hit_rate_60)
   grade        = weighted_hit_rate * 100, rounded to 1 decimal
 
-If sample_size_20 < MIN_SAMPLE the weighted blend falls back to hit_rate_60
-only, since 20-game window is too thin to be meaningful. If sample_size_60 is
-also below MIN_SAMPLE the grade is still written but flagged with low sample.
+  If sample_size_20 < MIN_SAMPLE, weighted blend falls back to hit_rate_60
+  only. Grade is always written regardless of sample size so thin-sample
+  rows are visible rather than silently omitted.
+
+Performance design
+------------------
+All hit rate computation is set-based. For each game date being graded the
+script issues exactly three database round trips:
+
+  1. Fetch prop lines for the date (props query).
+  2. Fetch all historical over/under results for every relevant player and
+     market over the prior 60 days in a single bulk query (history query).
+  3. Write all grade rows in one batched upsert.
+
+Hit rates are computed entirely in pandas against the in-memory history
+dataframe using vectorized groupby operations. There are zero per-row
+database calls. This keeps a full-season backfill well within GitHub
+Actions time limits.
 
 Modes
 -----
@@ -34,17 +49,16 @@ Tables written
 
 Tables read
 -----------
-  odds.upcoming_player_props    Today's lines (upcoming mode)
-  odds.player_props             Historical lines (backfill mode)
-  odds.event_game_map           Resolves event_id -> game_id + game_date
+  odds.upcoming_player_props       Today's lines (upcoming mode)
+  odds.player_props                Historical lines (backfill mode)
+  odds.event_game_map              Resolves event_id -> game_id + game_date
   odds.vw_nba_player_prop_results  Resolved over/under outcomes with stat values
-  nba.player_box_score_stats    Used to compute rolling hit rates
 
 Args
 ----
   --mode      upcoming | backfill  (default: upcoming)
   --batch N   Max game dates per run in backfill mode (default: 10)
-  --date      Grade a specific date only (YYYY-MM-DD, overrides batch)
+  --date      Grade a specific date only (YYYY-MM-DD, backfill mode only)
 
 Secrets required
 ----------------
@@ -53,10 +67,9 @@ Secrets required
 
 import argparse
 import os
-import sys
 import time
 import logging
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -74,11 +87,11 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-LOOKBACK_LONG  = 60   # calendar days for full window
-LOOKBACK_SHORT = 20   # calendar days for recent window
-WEIGHT_SHORT   = 0.60 # weight applied to recent 20-game hit rate
-WEIGHT_LONG    = 0.40 # weight applied to full 60-day hit rate
-MIN_SAMPLE     = 5    # minimum games to trust either window
+LOOKBACK_LONG  = 60    # calendar days for full window
+LOOKBACK_SHORT = 20    # calendar days for recent window
+WEIGHT_SHORT   = 0.60  # weight applied to recent 20-day hit rate
+WEIGHT_LONG    = 0.40  # weight applied to full 60-day hit rate
+MIN_SAMPLE     = 5     # minimum games required to use the short window blend
 BATCH_DEFAULT  = 10
 
 
@@ -95,7 +108,7 @@ def get_engine(max_retries=3, retry_wait=60):
         "&Encrypt=yes&TrustServerCertificate=no"
         "&Connection+Timeout=90"
     )
-    # fast_executemany=False: prevents NVARCHAR(MAX) truncation on wide rows
+    # fast_executemany=False prevents NVARCHAR(MAX) truncation on wide rows
     engine = create_engine(conn_str, fast_executemany=False)
     for attempt in range(1, max_retries + 1):
         try:
@@ -115,23 +128,26 @@ def get_engine(max_retries=3, retry_wait=60):
 # Schema setup
 # ---------------------------------------------------------------------------
 def ensure_tables(engine):
+    """
+    Idempotent schema setup. Drops legacy tables from the old threshold-based
+    model if they exist, then creates common.daily_grades if not present.
+    Does NOT drop daily_grades if it already exists so partial backfills
+    are preserved across runs.
+    """
     with engine.begin() as conn:
-        # Drop legacy objects if they exist
         conn.execute(text("""
             IF OBJECT_ID('common.grade_thresholds', 'U') IS NOT NULL
                 DROP TABLE common.grade_thresholds
         """))
         conn.execute(text("""
-            IF OBJECT_ID('common.daily_grades', 'U') IS NOT NULL
-                DROP TABLE common.daily_grades
-        """))
-        # Ensure common schema exists
-        conn.execute(text("""
             IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'common')
                 EXEC('CREATE SCHEMA common')
         """))
-        # Create new daily_grades
         conn.execute(text("""
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = 'common' AND TABLE_NAME = 'daily_grades'
+            )
             CREATE TABLE common.daily_grades (
                 grade_id          INT IDENTITY(1,1) NOT NULL,
                 grade_date        DATE          NOT NULL,
@@ -160,88 +176,172 @@ def ensure_tables(engine):
 
 
 # ---------------------------------------------------------------------------
-# Hit rate computation
+# Bulk history fetch
 # ---------------------------------------------------------------------------
-def compute_hit_rates(engine, player_id, market_key, line_value, as_of_date):
+def fetch_history(engine, player_ids, market_keys, as_of_date):
     """
-    Return (hit_rate_60, sample_size_60, hit_rate_20, sample_size_20)
-    using only games strictly before as_of_date.
+    Single bulk query: load all resolved over/under results for every
+    combination of player_id and market_key over the prior LOOKBACK_LONG days,
+    strictly before as_of_date.
 
-    Pulls directly from vw_nba_player_prop_results which already joins
-    box scores to odds outcomes and resolves over_hit per game.
+    Returns a DataFrame with columns:
+        player_id, market_key, line, game_date, over_hit, in_short_window
 
-    We filter to Over rows only (one row per game per bookmaker at this line)
-    and deduplicate to one result per game_id to avoid double-counting
-    when multiple bookmakers post the same line.
+    One row per (player_id, market_key, line, game_date) after deduplication
+    across bookmakers. This is the only database read for hit rate computation.
     """
-    sql = text("""
-        WITH per_game AS (
+    if not player_ids or not market_keys:
+        return pd.DataFrame()
+
+    # SQL Server does not support binding lists directly so we inline them.
+    # player_ids are integers and market_keys are controlled internal strings
+    # (never user input), so this is safe.
+    pid_list = ", ".join(str(int(p)) for p in player_ids)
+    mkt_list = ", ".join(f"'{m}'" for m in market_keys)
+
+    sql = text(f"""
+        WITH deduped AS (
+            -- One result per (player, market, line, game_date).
+            -- Multiple bookmakers may post the same line; MAX(over_hit)
+            -- collapses them to a single row without losing any hit.
             SELECT
+                player_id,
+                market_key,
+                line,
                 game_date,
                 MAX(over_hit) AS over_hit
             FROM odds.vw_nba_player_prop_results
-            WHERE player_id    = :pid
-              AND market_key   = :mkt
-              AND line         = :line
+            WHERE player_id  IN ({pid_list})
+              AND market_key IN ({mkt_list})
               AND outcome_name = 'Over'
               AND game_date    < :aod
               AND game_date   >= DATEADD(day, -:lb_long, :aod)
-            GROUP BY game_date
+              AND over_hit     IS NOT NULL
+            GROUP BY player_id, market_key, line, game_date
         )
         SELECT
+            player_id,
+            market_key,
+            line,
             game_date,
             over_hit,
-            CASE WHEN game_date >= DATEADD(day, -:lb_short, :aod) THEN 1 ELSE 0 END
-                AS in_short_window
-        FROM per_game
-        WHERE over_hit IS NOT NULL
+            CASE
+                WHEN game_date >= DATEADD(day, -:lb_short, :aod) THEN 1
+                ELSE 0
+            END AS in_short_window
+        FROM deduped
     """)
 
     df = pd.read_sql(
         sql,
         engine,
         params={
-            "pid":      int(player_id),
-            "mkt":      market_key,
-            "line":     float(line_value),
             "aod":      str(as_of_date),
             "lb_long":  LOOKBACK_LONG,
             "lb_short": LOOKBACK_SHORT,
         }
     )
-
-    if df.empty:
-        return None, 0, None, 0
-
-    n60 = len(df)
-    h60 = int(df["over_hit"].sum())
-    hr60 = h60 / n60
-
-    short = df[df["in_short_window"] == 1]
-    n20 = len(short)
-    h20 = int(short["over_hit"].sum()) if n20 > 0 else 0
-    hr20 = (h20 / n20) if n20 > 0 else None
-
-    return hr60, n60, hr20, n20
+    log.info(f"  History loaded: {len(df)} rows for {len(player_ids)} players, "
+             f"{len(market_keys)} markets.")
+    return df
 
 
-def compute_weighted_grade(hr60, n60, hr20, n20):
+# ---------------------------------------------------------------------------
+# In-memory hit rate computation
+# ---------------------------------------------------------------------------
+def compute_all_hit_rates(props_df, history_df):
     """
-    Blend hit rates into a single grade value 0-100.
-    Falls back to hr60 only if short window is too thin.
-    Returns (weighted_hit_rate, grade).
+    Compute hit rates for every (player_id, market_key, line_value)
+    combination in props_df using the pre-loaded history_df.
+
+    Returns props_df with five new columns added:
+        hit_rate_60, sample_size_60, hit_rate_20, sample_size_20,
+        weighted_hit_rate, grade
+
+    No database calls. Pure pandas vectorized operations.
     """
-    if hr60 is None:
-        return None, None
+    if history_df.empty:
+        for col in ("hit_rate_60", "sample_size_60", "hit_rate_20",
+                    "sample_size_20", "weighted_hit_rate", "grade"):
+            props_df[col] = None
+        return props_df
 
-    if hr20 is not None and n20 >= MIN_SAMPLE:
-        whr = (WEIGHT_SHORT * hr20) + (WEIGHT_LONG * hr60)
-    else:
-        # Short window too thin; use long window only
-        whr = hr60
+    # Ensure line types match for the merge
+    history_df = history_df.copy()
+    history_df["line"] = history_df["line"].astype(float)
+    props_df = props_df.copy()
+    props_df["line_value"] = props_df["line_value"].astype(float)
 
-    grade = round(whr * 100, 1)
-    return round(whr, 4), grade
+    # --- 60-day window ---
+    g60 = (
+        history_df
+        .groupby(["player_id", "market_key", "line"])
+        .agg(
+            sample_size_60=("over_hit", "count"),
+            hits_60=("over_hit", "sum"),
+        )
+        .reset_index()
+    )
+    g60["hit_rate_60"] = g60["hits_60"] / g60["sample_size_60"]
+
+    # --- 20-day window ---
+    short = history_df[history_df["in_short_window"] == 1]
+    g20 = (
+        short
+        .groupby(["player_id", "market_key", "line"])
+        .agg(
+            sample_size_20=("over_hit", "count"),
+            hits_20=("over_hit", "sum"),
+        )
+        .reset_index()
+    )
+    g20["hit_rate_20"] = g20["hits_20"] / g20["sample_size_20"]
+
+    # --- Merge onto props ---
+    result = props_df.merge(
+        g60[["player_id", "market_key", "line", "hit_rate_60", "sample_size_60"]],
+        left_on=["player_id", "market_key", "line_value"],
+        right_on=["player_id", "market_key", "line"],
+        how="left",
+    ).drop(columns=["line"])
+
+    result = result.merge(
+        g20[["player_id", "market_key", "line", "hit_rate_20", "sample_size_20"]],
+        left_on=["player_id", "market_key", "line_value"],
+        right_on=["player_id", "market_key", "line"],
+        how="left",
+    ).drop(columns=["line"])
+
+    result["sample_size_60"] = result["sample_size_60"].fillna(0).astype(int)
+    result["sample_size_20"] = result["sample_size_20"].fillna(0).astype(int)
+
+    # --- Weighted hit rate ---
+    # Use blend when short window has enough sample, otherwise fall back to long.
+    use_blend = (result["sample_size_20"] >= MIN_SAMPLE) & result["hit_rate_20"].notna()
+
+    result["weighted_hit_rate"] = None
+    result.loc[result["hit_rate_60"].notna(), "weighted_hit_rate"] = (
+        result.loc[result["hit_rate_60"].notna(), "hit_rate_60"]
+    )
+    result.loc[use_blend, "weighted_hit_rate"] = (
+        WEIGHT_SHORT * result.loc[use_blend, "hit_rate_20"]
+        + WEIGHT_LONG  * result.loc[use_blend, "hit_rate_60"]
+    )
+
+    result["grade"] = result["weighted_hit_rate"].apply(
+        lambda x: round(x * 100, 1) if pd.notna(x) else None
+    )
+    result["weighted_hit_rate"] = result["weighted_hit_rate"].apply(
+        lambda x: round(x, 4) if pd.notna(x) else None
+    )
+    result["hit_rate_60"] = result["hit_rate_60"].apply(
+        lambda x: round(x, 4) if pd.notna(x) else None
+    )
+    result["hit_rate_20"] = result["hit_rate_20"].apply(
+        lambda x: round(x, 4) if pd.notna(x) else None
+    )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +349,7 @@ def compute_weighted_grade(hr60, n60, hr20, n20):
 # ---------------------------------------------------------------------------
 def upsert_grades(engine, rows):
     if not rows:
-        return
+        return 0
 
     with engine.begin() as conn:
         conn.execute(text("""
@@ -271,7 +371,7 @@ def upsert_grades(engine, rows):
             )
         """))
 
-        chunk_size = 200
+        chunk_size = 500
         for i in range(0, len(rows), chunk_size):
             chunk = rows[i:i + chunk_size]
             tuples = [
@@ -302,12 +402,12 @@ def upsert_grades(engine, rows):
             MERGE common.daily_grades AS t
             USING #stage_grades AS s
             ON (
-                t.grade_date    = s.grade_date
-                AND t.event_id  = s.event_id
-                AND t.player_id = s.player_id
-                AND t.market_key     = s.market_key
-                AND t.bookmaker_key  = s.bookmaker_key
-                AND t.line_value     = s.line_value
+                    t.grade_date   = s.grade_date
+                AND t.event_id     = s.event_id
+                AND t.player_id    = s.player_id
+                AND t.market_key   = s.market_key
+                AND t.bookmaker_key = s.bookmaker_key
+                AND t.line_value   = s.line_value
             )
             WHEN MATCHED THEN UPDATE SET
                 t.game_id           = s.game_id,
@@ -330,15 +430,63 @@ def upsert_grades(engine, rows):
             );
         """))
 
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Core grading logic (shared by both modes)
+# ---------------------------------------------------------------------------
+def grade_date(engine, grade_date_str, props_df):
+    """
+    Grade all prop lines in props_df for a single game date.
+
+    props_df must have columns:
+        event_id, player_id, player_name, market_key, bookmaker_key,
+        line_value, game_id
+
+    Returns number of rows written.
+    """
+    if props_df.empty:
+        log.info(f"  {grade_date_str}: no props. Skipping.")
+        return 0
+
+    player_ids  = props_df["player_id"].dropna().unique().tolist()
+    market_keys = props_df["market_key"].dropna().unique().tolist()
+
+    history_df = fetch_history(engine, player_ids, market_keys, grade_date_str)
+
+    graded_df = compute_all_hit_rates(props_df, history_df)
+
+    rows = []
+    for _, r in graded_df.iterrows():
+        pid = r["player_id"]
+        rows.append({
+            "grade_date":        grade_date_str,
+            "event_id":          r["event_id"],
+            "game_id":           r.get("game_id"),
+            "player_id":         int(pid) if pd.notna(pid) else None,
+            "player_name":       r["player_name"],
+            "market_key":        r["market_key"],
+            "bookmaker_key":     r["bookmaker_key"],
+            "line_value":        float(r["line_value"]),
+            "hit_rate_60":       r["hit_rate_60"] if pd.notna(r.get("hit_rate_60")) else None,
+            "hit_rate_20":       r["hit_rate_20"] if pd.notna(r.get("hit_rate_20")) else None,
+            "sample_size_60":    int(r["sample_size_60"]) if pd.notna(r.get("sample_size_60")) else 0,
+            "sample_size_20":    int(r["sample_size_20"]) if pd.notna(r.get("sample_size_20")) else 0,
+            "weighted_hit_rate": r["weighted_hit_rate"] if pd.notna(r.get("weighted_hit_rate")) else None,
+            "grade":             r["grade"] if pd.notna(r.get("grade")) else None,
+        })
+
+    written = upsert_grades(engine, rows)
+    graded  = sum(1 for r in rows if r["grade"] is not None)
+    log.info(f"  {grade_date_str}: {written} rows written, {graded} with grade.")
+    return written
+
 
 # ---------------------------------------------------------------------------
 # Upcoming mode
 # ---------------------------------------------------------------------------
 def run_upcoming(engine):
-    """
-    Grade all lines in odds.upcoming_player_props.
-    Uses today as the as_of_date so only historical games feed the hit rates.
-    """
     today = str(date.today())
     log.info(f"Upcoming mode: grading lines for {today}")
 
@@ -351,11 +499,10 @@ def run_upcoming(engine):
                 up.market_key,
                 up.bookmaker_key,
                 up.outcome_point  AS line_value,
-                egm.game_id,
-                egm.game_date
+                egm.game_id
             FROM odds.upcoming_player_props up
             LEFT JOIN odds.event_game_map egm
-                ON egm.event_id  = up.event_id
+                ON  egm.event_id  = up.event_id
                 AND egm.sport_key = 'basketball_nba'
             WHERE up.sport_key    = 'basketball_nba'
               AND up.outcome_name = 'Over'
@@ -369,52 +516,16 @@ def run_upcoming(engine):
         log.info("No upcoming props found. Nothing to grade.")
         return
 
-    log.info(f"Found {len(props)} upcoming prop lines across "
+    log.info(f"Found {len(props)} prop lines across "
              f"{props['player_id'].nunique()} players.")
 
-    rows = []
-    for _, p in props.iterrows():
-        hr60, n60, hr20, n20 = compute_hit_rates(
-            engine,
-            player_id   = p["player_id"],
-            market_key  = p["market_key"],
-            line_value  = p["line_value"],
-            as_of_date  = today,
-        )
-        whr, grade = compute_weighted_grade(hr60, n60, hr20, n20)
-        rows.append({
-            "grade_date":        today,
-            "event_id":          p["event_id"],
-            "game_id":           p["game_id"],
-            "player_id":         int(p["player_id"]) if p["player_id"] is not None else None,
-            "player_name":       p["player_name"],
-            "market_key":        p["market_key"],
-            "bookmaker_key":     p["bookmaker_key"],
-            "line_value":        float(p["line_value"]),
-            "hit_rate_60":       round(hr60, 4) if hr60 is not None else None,
-            "hit_rate_20":       round(hr20, 4) if hr20 is not None else None,
-            "sample_size_60":    int(n60),
-            "sample_size_20":    int(n20),
-            "weighted_hit_rate": whr,
-            "grade":             grade,
-        })
-
-    upsert_grades(engine, rows)
-    graded = sum(1 for r in rows if r["grade"] is not None)
-    log.info(f"Upcoming grades written: {len(rows)} rows, {graded} with grade.")
+    grade_date(engine, today, props)
 
 
 # ---------------------------------------------------------------------------
 # Backfill mode
 # ---------------------------------------------------------------------------
 def get_backfill_dates(engine, batch_size, specific_date=None):
-    """
-    Return up to batch_size historical game dates that:
-      - have odds in odds.player_props (basketball_nba, Over lines)
-      - have a resolved event_game_map entry
-      - are not yet present in common.daily_grades
-    Oldest first.
-    """
     if specific_date:
         return [specific_date]
 
@@ -423,12 +534,12 @@ def get_backfill_dates(engine, batch_size, specific_date=None):
             SELECT DISTINCT CAST(egm.game_date AS DATE) AS game_date
             FROM odds.player_props pp
             JOIN odds.event_game_map egm
-                ON egm.event_id  = pp.event_id
-               AND egm.game_id   IS NOT NULL
+                ON  egm.event_id = pp.event_id
+                AND egm.game_id  IS NOT NULL
             WHERE pp.sport_key    = 'basketball_nba'
               AND pp.outcome_name = 'Over'
               AND pp.outcome_point IS NOT NULL
-              AND egm.game_date IS NOT NULL
+              AND egm.game_date   IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1 FROM common.daily_grades g
                   WHERE g.grade_date = CAST(egm.game_date AS DATE)
@@ -437,79 +548,7 @@ def get_backfill_dates(engine, batch_size, specific_date=None):
         """),
         engine
     )
-
     return df["game_date"].astype(str).tolist()[:batch_size]
-
-
-def run_backfill_date(engine, game_date):
-    """
-    Grade all player prop lines for a single historical game date.
-    as_of_date is set to game_date itself so only prior games count.
-    """
-    props = pd.read_sql(
-        text("""
-            SELECT DISTINCT
-                pp.event_id,
-                pm.player_id,
-                pp.player_name,
-                pp.market_key,
-                pp.bookmaker_key,
-                pp.outcome_point  AS line_value,
-                egm.game_id,
-                egm.game_date
-            FROM odds.player_props pp
-            JOIN odds.event_game_map egm
-                ON egm.event_id   = pp.event_id
-               AND egm.sport_key  = 'basketball_nba'
-               AND egm.game_id    IS NOT NULL
-            JOIN odds.player_map pm
-                ON pm.odds_player_name = pp.player_name
-               AND pm.sport_key        = pp.sport_key
-               AND pm.player_id        IS NOT NULL
-            WHERE pp.sport_key     = 'basketball_nba'
-              AND pp.outcome_name  = 'Over'
-              AND pp.outcome_point IS NOT NULL
-              AND CAST(egm.game_date AS DATE) = :gd
-        """),
-        engine,
-        params={"gd": game_date}
-    )
-
-    if props.empty:
-        log.info(f"  {game_date}: no props found. Skipping.")
-        return 0
-
-    rows = []
-    for _, p in props.iterrows():
-        hr60, n60, hr20, n20 = compute_hit_rates(
-            engine,
-            player_id  = p["player_id"],
-            market_key = p["market_key"],
-            line_value = p["line_value"],
-            as_of_date = game_date,
-        )
-        whr, grade = compute_weighted_grade(hr60, n60, hr20, n20)
-        rows.append({
-            "grade_date":        game_date,
-            "event_id":          p["event_id"],
-            "game_id":           p["game_id"],
-            "player_id":         int(p["player_id"]),
-            "player_name":       p["player_name"],
-            "market_key":        p["market_key"],
-            "bookmaker_key":     p["bookmaker_key"],
-            "line_value":        float(p["line_value"]),
-            "hit_rate_60":       round(hr60, 4) if hr60 is not None else None,
-            "hit_rate_20":       round(hr20, 4) if hr20 is not None else None,
-            "sample_size_60":    int(n60),
-            "sample_size_20":    int(n20),
-            "weighted_hit_rate": whr,
-            "grade":             grade,
-        })
-
-    upsert_grades(engine, rows)
-    graded = sum(1 for r in rows if r["grade"] is not None)
-    log.info(f"  {game_date}: {len(rows)} rows written, {graded} with grade.")
-    return len(rows)
 
 
 def run_backfill(engine, batch_size, specific_date=None):
@@ -519,12 +558,39 @@ def run_backfill(engine, batch_size, specific_date=None):
         log.info("Backfill: all dates already graded. Nothing to do.")
         return
 
-    log.info(f"Backfill: {len(work_dates)} date(s) to process: "
+    log.info(f"Backfill: {len(work_dates)} date(s): "
              f"{work_dates[0]} to {work_dates[-1]}")
 
     total = 0
     for gd in work_dates:
-        total += run_backfill_date(engine, gd)
+        props = pd.read_sql(
+            text("""
+                SELECT DISTINCT
+                    pp.event_id,
+                    pm.player_id,
+                    pp.player_name,
+                    pp.market_key,
+                    pp.bookmaker_key,
+                    pp.outcome_point AS line_value,
+                    egm.game_id
+                FROM odds.player_props pp
+                JOIN odds.event_game_map egm
+                    ON  egm.event_id  = pp.event_id
+                    AND egm.sport_key = 'basketball_nba'
+                    AND egm.game_id   IS NOT NULL
+                JOIN odds.player_map pm
+                    ON  pm.odds_player_name = pp.player_name
+                    AND pm.sport_key        = pp.sport_key
+                    AND pm.player_id        IS NOT NULL
+                WHERE pp.sport_key     = 'basketball_nba'
+                  AND pp.outcome_name  = 'Over'
+                  AND pp.outcome_point IS NOT NULL
+                  AND CAST(egm.game_date AS DATE) = :gd
+            """),
+            engine,
+            params={"gd": gd}
+        )
+        total += grade_date(engine, gd, props)
 
     log.info(f"Backfill complete. {total} total rows written.")
 
@@ -536,7 +602,6 @@ def main():
     parser = argparse.ArgumentParser(description="NBA prop grading model")
     parser.add_argument(
         "--mode", choices=["upcoming", "backfill"], default="upcoming",
-        help="upcoming: grade today's lines. backfill: process historical dates."
     )
     parser.add_argument(
         "--batch", type=int, default=BATCH_DEFAULT,
@@ -544,7 +609,7 @@ def main():
     )
     parser.add_argument(
         "--date", type=str, default=None,
-        help="Grade a specific date only (YYYY-MM-DD). Backfill mode only."
+        help="Grade a specific date (YYYY-MM-DD). Backfill mode only."
     )
     args = parser.parse_args()
 
