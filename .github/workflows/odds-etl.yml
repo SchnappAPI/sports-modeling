@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "probe = coverage discovery only | backfill = ingest historical odds"
+        description: "probe | backfill | mappings | upcoming"
         required: false
         default: "backfill"
       sport:
@@ -19,6 +19,10 @@ on:
         description: "Max events to process per backfill run"
         required: false
         default: "10"
+      days_ahead:
+        description: "Upcoming mode only: calendar days ahead to fetch lines for. Default 1 = next game day only."
+        required: false
+        default: "1"
       quota_floor:
         description: "Stop if remaining credits fall below this. Default protects ~4.7M of your 5M total."
         required: false
@@ -70,6 +74,7 @@ jobs:
           FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
           FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'all' }}"
           FLAGS="$FLAGS --games ${{ github.event.inputs.games || '10' }}"
+          FLAGS="$FLAGS --days-ahead ${{ github.event.inputs.days_ahead || '1' }}"
           FLAGS="$FLAGS --quota-floor ${{ github.event.inputs.quota_floor || '4700000' }}"
           SEASON="${{ github.event.inputs.season }}"
           [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
