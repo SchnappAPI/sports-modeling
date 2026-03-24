@@ -5,11 +5,12 @@ Ingests historical odds data from The Odds API v4 into Azure SQL.
 Schema: odds
 
 Modes
-  discover  -- Scans the full season date range and writes every found event
-               into odds.discovered_events. Tracks every scanned date in
-               odds.discovered_dates regardless of whether events were found,
-               so empty off-days are never re-scanned. Idempotent.
-               Costs 1 credit per unscanned date.
+  discover  -- Walks the historical snapshot chain backward from the end of
+               the season using the previous_timestamp field returned by each
+               API response. Each call lands on a real snapshot that actually
+               existed, so no credits are wasted on empty guesses. Progress is
+               checkpointed in odds.discover_cursors so restarts resume from
+               where the last run stopped. Costs 1 credit per snapshot walked.
 
   backfill  -- Reads odds.discovered_events as the authoritative game list.
                Diffs against odds.events to find gaps. Processes the oldest
@@ -42,6 +43,8 @@ Response shapes
   Bulk /odds:          data["data"] is a LIST of event objects.
   Per-event /odds:     data["data"] is a single event DICT.
   Live bulk /odds:     top-level list (no "data" wrapper).
+  Historical /events:  top-level dict with keys timestamp, previous_timestamp,
+                       next_timestamp, data (list of event objects).
 """
 
 import argparse
@@ -208,23 +211,28 @@ NBA_TEAM_NAME_TO_TRICODE = {
 
 DDL_STATEMENTS = [
     "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'odds') EXEC('CREATE SCHEMA odds')",
-    # discovered_dates: every date that has been successfully scanned by discover
-    # mode, regardless of whether any events were found. This is the skip-list
-    # that prevents re-scanning known-empty off-days.
+
+    # discover_cursors: one row per sport/season tracking the oldest snapshot
+    # timestamp reached so far in the backward walk. This is the resume cursor
+    # for discover mode. When discover restarts, it picks up from
+    # oldest_snapshot_ts instead of re-walking already-covered history.
+    # Replaces the old discovered_dates calendar-day skip list.
     """
     IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='discovered_dates')
-    CREATE TABLE odds.discovered_dates (
-        scan_date   DATE        NOT NULL,
-        sport_key   VARCHAR(50) NOT NULL,
-        season_year INT         NOT NULL,
-        event_count INT         NOT NULL DEFAULT 0,
-        scanned_at  DATETIME2   NOT NULL DEFAULT GETUTCDATE(),
-        CONSTRAINT pk_odds_discovered_dates PRIMARY KEY (scan_date, sport_key, season_year)
+                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='discover_cursors')
+    CREATE TABLE odds.discover_cursors (
+        sport_key            VARCHAR(50)  NOT NULL,
+        season_year          INT          NOT NULL,
+        oldest_snapshot_ts   VARCHAR(30)  NOT NULL,
+        snapshots_walked     INT          NOT NULL DEFAULT 0,
+        events_found         INT          NOT NULL DEFAULT 0,
+        last_walked_at       DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
+        CONSTRAINT pk_odds_discover_cursors PRIMARY KEY (sport_key, season_year)
     )
     """,
-    # discovered_events: the authoritative event catalog populated by discover mode.
-    # Backfill reads this table instead of calling the discovery endpoint.
+
+    # discovered_events: the authoritative event catalog populated by discover
+    # mode. Backfill reads this table instead of calling the discovery endpoint.
     """
     IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
                    WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='discovered_events')
@@ -392,7 +400,7 @@ DDL_STATEMENTS = [
         created_at      DATETIME2    NOT NULL DEFAULT GETUTCDATE()
     )
     """,
-    # Legacy column renames
+    # Legacy column renames kept for idempotency on existing databases
     """
     IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
                WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='market_probe'
@@ -527,6 +535,7 @@ def ensure_schema(engine):
 # ---------------------------------------------------------------------------
 
 def _to_utc_str(dt):
+    """Return a naive UTC string 'YYYY-MM-DD HH:MM:SS', or None."""
     if dt is None:
         return None
     if isinstance(dt, str):
@@ -539,6 +548,16 @@ def _to_utc_str(dt):
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     return None
+
+
+def _parse_iso(ts_str):
+    """Parse an ISO 8601 string (with or without Z) to a timezone-aware UTC datetime."""
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def clean_dataframe(df):
@@ -634,10 +653,7 @@ def _query_rows(engine, sql, params):
 
 def _default_season(sport):
     today = date.today()
-    start_month, end_month = SEASON_MONTHS[sport]
-    wraps = start_month > end_month
-    if wraps:
-        return today.year if today.month >= start_month else today.year - 1
+    start_month, _ = SEASON_MONTHS[sport]
     return today.year if today.month >= start_month else today.year - 1
 
 
@@ -653,105 +669,136 @@ def _season_date_range(sport, season_year):
     return start_date, end_date
 
 
-def _date_list(start_date, end_date):
-    out, cur = [], start_date
-    while cur <= end_date:
-        out.append(cur)
-        cur += timedelta(days=1)
-    return out
-
-
 # ---------------------------------------------------------------------------
-# Event discovery API call
+# DISCOVER mode
+# ---------------------------------------------------------------------------
+# Strategy: walk the historical snapshot chain backward using previous_timestamp.
+# Each API call returns the real snapshot closest to (and no later than) the
+# requested date, plus previous_timestamp pointing to the next snapshot further
+# back in time. We follow that pointer hop by hop. This guarantees every real
+# snapshot is visited; no credits are spent on gaps between snapshots.
+#
+# Progress is checkpointed in odds.discover_cursors. The oldest_snapshot_ts
+# column records the earliest snapshot timestamp we have successfully walked
+# past. On restart, we resume from that timestamp rather than re-walking
+# already-covered history.
+#
+# The walk stops when:
+#   (a) previous_timestamp is absent or empty (reached the beginning of history)
+#   (b) all events in the snapshot have commence_time before the season start
+#   (c) --snapshots limit is reached for this run
 # ---------------------------------------------------------------------------
 
-def _api_discover_date(sport_key, target_date, api_key, quota_floor):
-    """Call the historical events endpoint for one calendar date. Returns list."""
+def _api_discover_snapshot(sport_key, snapshot_ts_iso, api_key, quota_floor):
+    """
+    Call GET /v4/historical/sports/{sport}/events with date=snapshot_ts_iso.
+    Returns the full response dict (which includes timestamp, previous_timestamp,
+    next_timestamp, data) or None on failure.
+    """
     _check_quota(quota_floor)
     data, _ = _request(
         f"{BASE_URL}/v4/historical/sports/{sport_key}/events",
         {
-            "apiKey":           api_key,
-            "date":             f"{target_date}T12:00:00Z",
-            "commenceTimeFrom": f"{target_date}T00:00:00Z",
-            "commenceTimeTo":   f"{target_date}T23:59:59Z",
+            "apiKey": api_key,
+            "date":   snapshot_ts_iso,
         },
         quota_floor,
     )
-    return (data.get("data") or []) if data else []
+    return data
 
 
-# ---------------------------------------------------------------------------
-# DISCOVER mode
-# ---------------------------------------------------------------------------
+def _load_cursor(engine, sport_key, season_year):
+    """Return the stored oldest_snapshot_ts for this sport/season, or None."""
+    rows = _query_rows(
+        engine,
+        "SELECT oldest_snapshot_ts FROM odds.discover_cursors WHERE sport_key = :sk AND season_year = :sy",
+        {"sk": sport_key, "sy": season_year},
+    )
+    return rows[0][0] if rows else None
 
-def run_discover(sport, api_key, quota_floor, season_year, engine):
+
+def _save_cursor(engine, sport_key, season_year, oldest_ts_iso, snapshots_walked, events_found):
+    """Upsert the cursor row for this sport/season."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            MERGE odds.discover_cursors AS t
+            USING (VALUES (:sk, :sy, :ots, :sw, :ef)) AS s
+                (sport_key, season_year, oldest_snapshot_ts, snapshots_walked, events_found)
+            ON t.sport_key = s.sport_key AND t.season_year = s.season_year
+            WHEN MATCHED THEN UPDATE SET
+                t.oldest_snapshot_ts = s.oldest_snapshot_ts,
+                t.snapshots_walked   = t.snapshots_walked + s.snapshots_walked,
+                t.events_found       = t.events_found + s.events_found,
+                t.last_walked_at     = GETUTCDATE()
+            WHEN NOT MATCHED THEN INSERT
+                (sport_key, season_year, oldest_snapshot_ts, snapshots_walked, events_found)
+            VALUES (s.sport_key, s.season_year, s.oldest_snapshot_ts,
+                    s.snapshots_walked, s.events_found);
+        """), {"sk": sport_key, "sy": season_year, "ots": oldest_ts_iso,
+               "sw": snapshots_walked, "ef": events_found})
+
+
+def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Discover: {sport.upper()} Season {season_year} ===")
 
-    start_date, end_date = _season_date_range(sport, season_year)
-    end_date = min(end_date, date.today() - timedelta(days=1))
-    if start_date > end_date:
-        print("  No past dates in range. Nothing to do.")
+    season_start, season_end = _season_date_range(sport, season_year)
+
+    # The season may still be in progress. Cap the end to yesterday so we
+    # never try to walk into the future.
+    effective_end = min(season_end, date.today() - timedelta(days=1))
+    if season_start > effective_end:
+        print("  Season has not started yet or no past dates exist. Nothing to do.")
         return
 
-    all_dates = _date_list(start_date, end_date)
+    # Determine where to start the walk.
+    # If a cursor exists, resume from the oldest snapshot we've already reached.
+    # Otherwise, start from the end of the season window.
+    cursor_ts = _load_cursor(engine, sport_key, season_year)
+    if cursor_ts:
+        start_iso = cursor_ts
+        print(f"  Resuming from cursor: {start_iso}")
+    else:
+        start_iso = f"{effective_end.isoformat()}T23:59:59Z"
+        print(f"  No cursor found. Starting from: {start_iso}")
 
-    # Load the explicit scan log. Every date that has been successfully
-    # queried (whether or not events were found) is in this table.
-    # On first run after the table is created, backfill it from
-    # discovered_events so dates already scanned in the previous run
-    # are not re-scanned.
-    with engine.begin() as conn:
-        # Backfill discovered_dates from discovered_events for dates
-        # that predate the discovered_dates table.
-        conn.execute(text("""
-            INSERT INTO odds.discovered_dates (scan_date, sport_key, season_year, event_count)
-            SELECT
-                CAST(commence_time AS DATE),
-                sport_key,
-                season_year,
-                COUNT(*)
-            FROM odds.discovered_events
-            WHERE sport_key   = :sk
-              AND season_year = :sy
-              AND NOT EXISTS (
-                  SELECT 1 FROM odds.discovered_dates d
-                  WHERE d.scan_date   = CAST(odds.discovered_events.commence_time AS DATE)
-                    AND d.sport_key   = odds.discovered_events.sport_key
-                    AND d.season_year = odds.discovered_events.season_year
-              )
-            GROUP BY CAST(commence_time AS DATE), sport_key, season_year
-        """), {"sk": sport_key, "sy": season_year})
+    season_start_dt = datetime(
+        season_start.year, season_start.month, season_start.day,
+        tzinfo=timezone.utc
+    )
 
-    with engine.connect() as conn:
-        scanned_rows = conn.execute(
-            text("""
-                SELECT scan_date FROM odds.discovered_dates
-                WHERE sport_key = :sk AND season_year = :sy
-            """),
-            {"sk": sport_key, "sy": season_year},
-        ).fetchall()
+    snapshots_walked = 0
+    events_stored    = 0
+    next_iso         = start_iso  # the timestamp we'll request next
 
-    scanned_dates = set()
-    for r in scanned_rows:
-        val = r[0]
-        if val is not None:
-            scanned_dates.add(str(val.date()) if hasattr(val, "date") else str(val)[:10])
+    print(f"  Walking backward. Limit: {snapshots_limit} snapshots this run.")
 
-    missing_dates = [d for d in all_dates if str(d) not in scanned_dates]
-    if not missing_dates:
-        print(f"  All {len(all_dates)} dates already scanned. Nothing to do.")
-        return
+    while snapshots_walked < snapshots_limit:
+        _check_quota(quota_floor)
+        print(f"  Snapshot {snapshots_walked + 1}: requesting {next_iso} ...")
 
-    print(f"  {len(all_dates)} total dates, {len(scanned_dates)} already scanned, "
-          f"{len(missing_dates)} to scan (1s sleep between calls).")
+        resp = _api_discover_snapshot(sport_key, next_iso, api_key, quota_floor)
+        if resp is None:
+            print("  API returned None. Stopping.")
+            break
 
-    total_found = 0
-    for i, d in enumerate(missing_dates):
-        events = _api_discover_date(sport_key, d, api_key, quota_floor)
-        n_found = 0
-        if events:
+        actual_ts   = resp.get("timestamp")           # what snapshot was actually returned
+        previous_ts = resp.get("previous_timestamp")  # pointer to the next snapshot back in time
+        events      = resp.get("data") or []
+
+        print(f"    actual snapshot={actual_ts}  events_in_snapshot={len(events)}  previous={previous_ts or 'none'}")
+
+        # Filter to events within this season's date range.
+        season_events = []
+        for ev in events:
+            ctime = _parse_iso(ev.get("commence_time"))
+            if ctime is None:
+                continue
+            # Include events that start on or after season_start.
+            if ctime >= season_start_dt:
+                season_events.append(ev)
+
+        if season_events:
             rows = [
                 {
                     "event_id":      ev.get("id"),
@@ -762,33 +809,40 @@ def run_discover(sport, api_key, quota_floor, season_year, engine):
                     "away_team":     ev.get("away_team"),
                     "season_year":   season_year,
                 }
-                for ev in events if ev.get("id")
+                for ev in season_events if ev.get("id")
             ]
             if rows:
                 upsert(engine, clean_dataframe(pd.DataFrame(rows)),
                        schema="odds", table="discovered_events", keys=["event_id"])
-                n_found = len(rows)
-                total_found += n_found
-                print(f"  {d}: {n_found} events stored.")
-        else:
-            print(f"  {d}: no events.")
+                events_stored += len(rows)
+                print(f"    Stored {len(rows)} events.")
 
-        # Always mark this date as scanned, even when empty.
-        # This is what prevents re-scanning on the next discover run.
-        with engine.begin() as conn:
-            conn.execute(text("""
-                MERGE odds.discovered_dates AS t
-                USING (VALUES (:sd, :sk, :sy, :ec)) AS s (scan_date, sport_key, season_year, event_count)
-                ON t.scan_date = s.scan_date AND t.sport_key = s.sport_key AND t.season_year = s.season_year
-                WHEN MATCHED     THEN UPDATE SET t.event_count = s.event_count
-                WHEN NOT MATCHED THEN INSERT (scan_date, sport_key, season_year, event_count)
-                                      VALUES (s.scan_date, s.sport_key, s.season_year, s.event_count);
-            """), {"sd": str(d), "sk": sport_key, "sy": season_year, "ec": n_found})
+        snapshots_walked += 1
 
-        if i < len(missing_dates) - 1:
-            time.sleep(1.0)
+        # Checkpoint after every snapshot so partial runs aren't lost.
+        # We store actual_ts (not next_iso) because that's the real snapshot
+        # we reached; previous_ts is where we'll resume from next time.
+        checkpoint_ts = previous_ts if previous_ts else actual_ts
+        _save_cursor(engine, sport_key, season_year, checkpoint_ts,
+                     snapshots_walked=1, events_found=len(season_events))
 
-    print(f"\n  Discover complete. {total_found} events stored across {len(missing_dates)} dates scanned.")
+        # Check stopping conditions.
+        if not previous_ts:
+            print("  No previous_timestamp in response. Reached the beginning of history.")
+            break
+
+        # If the actual snapshot returned is already before the season start,
+        # everything further back is definitely outside our window.
+        if actual_ts:
+            actual_dt = _parse_iso(actual_ts)
+            if actual_dt and actual_dt < season_start_dt:
+                print(f"  Snapshot {actual_ts} is before season start {season_start}. Walk complete.")
+                break
+
+        next_iso = previous_ts
+        time.sleep(1.0)
+
+    print(f"\n  Run complete. Snapshots walked: {snapshots_walked}  Events stored this run: {events_stored}")
     if _remaining_credits is not None:
         print(f"  Credits remaining: {_remaining_credits:,}")
 
@@ -851,6 +905,7 @@ def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
 
 
 def _snap_iso(commence_raw):
+    """Return an ISO timestamp 30 minutes before game time, for historical odds calls."""
     if not commence_raw:
         return None
     try:
@@ -1042,29 +1097,36 @@ PROBE_WORST_CASE = {
 
 
 def _probe_select_events(sport, sport_key, api_key, quota_floor):
+    """
+    Walk forward from each candidate date using next_timestamp to find the
+    first real snapshot that has events. Returns up to 5 sample event objects.
+    """
     candidate_dates = PROBE_BEST_CASE[sport] + PROBE_WORST_CASE[sport]
-    events_by_date = {}
-    for td in candidate_dates:
-        for offset in range(8):
-            check = td + timedelta(days=offset)
-            evs = _api_discover_date(sport_key, check, api_key, quota_floor)
-            if evs:
-                events_by_date[check] = evs
+    selected, seen_ids = [], set()
+
+    for target_date in candidate_dates:
+        snap_iso = f"{target_date.isoformat()}T12:00:00Z"
+        resp = _api_discover_snapshot(sport_key, snap_iso, api_key, quota_floor)
+        if not resp:
+            continue
+        events = resp.get("data") or []
+        # Walk forward up to a week if this snapshot is empty
+        hops = 0
+        while not events and resp.get("next_timestamp") and hops < 7:
+            resp = _api_discover_snapshot(sport_key, resp["next_timestamp"], api_key, quota_floor)
+            if not resp:
                 break
+            events = resp.get("data") or []
+            hops += 1
+            time.sleep(1.0)
+        for ev in events:
+            eid = ev.get("id")
+            if eid and eid not in seen_ids:
+                selected.append(ev)
+                seen_ids.add(eid)
+        if len(selected) >= 5:
+            break
 
-    selected, wildcard = [], None
-    for td in candidate_dates:
-        actual = next((d for d in events_by_date if abs((d - td).days) <= 7), None)
-        if actual:
-            evs = events_by_date[actual]
-            selected.append(evs[0])
-            for ev in evs:
-                cdt = _cdt(ev)
-                if cdt and (wildcard is None or cdt > _cdt(wildcard)):
-                    wildcard = ev
-
-    if wildcard and wildcard.get("id") not in {e.get("id") for e in selected}:
-        selected.append(wildcard)
     return selected[:5]
 
 
@@ -1422,6 +1484,8 @@ def main():
     parser.add_argument("--season",     type=int, default=None)
     parser.add_argument("--games",      type=int, default=10,
                         help="Backfill mode: max events to process per run.")
+    parser.add_argument("--snapshots",  type=int, default=50,
+                        help="Discover mode: max snapshots to walk per run. Default 50.")
     parser.add_argument("--days-ahead", type=int, default=1, dest="days_ahead",
                         help="Upcoming mode: calendar days ahead. Default 1 = next game day.")
     parser.add_argument("--quota-floor",type=int, default=50000, dest="quota_floor")
@@ -1440,7 +1504,7 @@ def main():
     for sport in sports:
         season_year = args.season or _default_season(sport)
         if args.mode == "discover":
-            run_discover(sport, api_key, args.quota_floor, season_year, engine)
+            run_discover(sport, api_key, args.quota_floor, season_year, args.snapshots, engine)
         elif args.mode == "probe":
             run_probe(sport, api_key, args.quota_floor, engine)
         elif args.mode == "backfill":
