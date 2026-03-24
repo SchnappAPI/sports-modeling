@@ -918,11 +918,30 @@ def _snap_iso(commence_raw):
 
 
 def _cdt(event):
+    """
+    Return the commence_time of an event as a timezone-aware UTC datetime, or None.
+
+    The event dict may come from two sources:
+      - The Odds API response: commence_time is an ISO string like "2025-10-22T00:00:00Z"
+      - A SQLAlchemy row read back from DATETIME2: commence_time is a naive Python datetime
+
+    In both cases we normalise to an aware UTC datetime so comparisons against
+    PROPS_CUTOFF (which carries tzinfo=timezone.utc) never raise TypeError.
+    """
     raw = event.get("commence_time")
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if isinstance(raw, datetime):
+            # SQLAlchemy returns DATETIME2 as a naive datetime; treat as UTC.
+            if raw.tzinfo is None:
+                return raw.replace(tzinfo=timezone.utc)
+            return raw.astimezone(timezone.utc)
+        # String path: handles "Z" suffix and "+00:00" offsets.
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
