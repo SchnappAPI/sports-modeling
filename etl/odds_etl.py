@@ -1295,19 +1295,24 @@ def run_mappings(sport, engine):
                    schema="odds", table="player_map", keys=["odds_player_name", "sport_key"])
             print(f"  player_map: {len(pm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
+        # event_game_map: match odds events to nba.games via date + home tricode.
+        # Processes ALL events in odds.events, including previously unmatched ones,
+        # so that re-running mappings after fixing data will resolve old failures.
+        # Date matching tries the UTC date first, then UTC-minus-one-day as a
+        # fallback for evening games whose commence_time crosses midnight UTC
+        # but whose game_date in nba.games is stored in local (Eastern) time.
         with engine.connect() as conn:
-            unmapped = conn.execute(
+            all_events = conn.execute(
                 text("""
                     SELECT e.event_id, e.commence_time, e.home_team, e.away_team
                     FROM odds.events e
-                    LEFT JOIN odds.event_game_map m ON m.event_id = e.event_id
-                    WHERE e.sport_key = :sk AND m.event_id IS NULL
+                    WHERE e.sport_key = :sk
                 """),
                 {"sk": sport_key},
             ).fetchall()
 
-        if not unmapped:
-            print("  event_game_map: all events already mapped.")
+        if not all_events:
+            print("  event_game_map: no events to map.")
         else:
             with engine.connect() as conn:
                 nba_games = conn.execute(
@@ -1323,23 +1328,49 @@ def run_mappings(sport, engine):
 
             egm_rows = []
             matched = unmatched = 0
-            for eid, ctime, home_name, away_name in unmapped:
+            for eid, ctime, home_name, away_name in all_events:
                 try:
-                    ctime_dt   = datetime.fromisoformat(str(ctime).replace("Z", "+00:00")) if isinstance(ctime, str) else ctime
-                    ctime_date = str(ctime_dt.date()) if hasattr(ctime_dt, "date") else str(ctime_dt)[:10]
+                    ctime_dt = (
+                        datetime.fromisoformat(str(ctime).replace("Z", "+00:00"))
+                        if isinstance(ctime, str) else ctime
+                    )
+                    if hasattr(ctime_dt, "tzinfo") and ctime_dt.tzinfo is None:
+                        ctime_dt = ctime_dt.replace(tzinfo=timezone.utc)
+                    utc_date      = ctime_dt.date() if hasattr(ctime_dt, "date") else None
+                    utc_prev_date = (utc_date - timedelta(days=1)) if utc_date else None
                 except Exception:
-                    ctime_date = None
-                home_tc  = name_to_tc.get(home_name)
-                away_tc  = name_to_tc.get(away_name)
-                game_id  = game_lookup.get((ctime_date, home_tc)) if (ctime_date and home_tc) else None
-                if game_id: matched += 1
-                else:       unmatched += 1
+                    utc_date = utc_prev_date = None
+
+                home_tc = name_to_tc.get(home_name)
+                away_tc = name_to_tc.get(away_name)
+
+                game_id = None
+                used_date = None
+                if home_tc:
+                    # Try UTC date first, then UTC-minus-one-day for evening games
+                    for candidate in [utc_date, utc_prev_date]:
+                        if candidate is None:
+                            continue
+                        game_id = game_lookup.get((str(candidate), home_tc))
+                        if game_id:
+                            used_date = candidate
+                            break
+
+                if game_id:
+                    matched += 1
+                else:
+                    unmatched += 1
+
                 egm_rows.append({
-                    "event_id": eid, "sport_key": sport_key, "game_id": game_id,
-                    "game_date": ctime_date, "home_tricode": home_tc,
+                    "event_id":     eid,
+                    "sport_key":    sport_key,
+                    "game_id":      game_id,
+                    "game_date":    str(used_date) if used_date else (str(utc_date) if utc_date else None),
+                    "home_tricode": home_tc,
                     "away_tricode": away_tc,
                     "match_method": "date_home_tricode" if game_id else "unmatched",
                 })
+
             upsert(engine, clean_dataframe(pd.DataFrame(egm_rows)),
                    schema="odds", table="event_game_map", keys=["event_id"])
             print(f"  event_game_map: {len(egm_rows)} rows ({matched} matched, {unmatched} unmatched).")
