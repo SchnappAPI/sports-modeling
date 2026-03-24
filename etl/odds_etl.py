@@ -57,6 +57,7 @@ import time
 import unicodedata
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _repo_root = str(Path(__file__).resolve().parent.parent)
 if _repo_root not in sys.path:
@@ -72,7 +73,8 @@ from etl.db import get_engine, upsert
 # Constants
 # ---------------------------------------------------------------------------
 
-BASE_URL = "https://api.the-odds-api.com"
+BASE_URL   = "https://api.the-odds-api.com"
+EASTERN_TZ = ZoneInfo("America/New_York")
 
 SPORT_KEYS = {
     "nfl": "americanfootball_nfl",
@@ -174,8 +176,7 @@ ALT_PROP_MARKETS = {"nfl": NFL_ALT_PROPS, "nba": NBA_ALT_PROPS, "mlb": MLB_ALT_P
 
 # Markets that are always team-level, never player-level.
 # The odds API puts the team name in the outcome description for these markets,
-# which would otherwise cause them to be routed to player_props. Force them
-# to game_lines regardless of whether a description field is present.
+# which would otherwise cause them to be misrouted into player_props.
 TEAM_LEVEL_MARKETS = {
     "team_totals", "team_totals_h1", "team_totals_q1",
     "team_totals_h2", "team_totals_q2", "team_totals_q3", "team_totals_q4",
@@ -910,6 +911,13 @@ def _cdt(event):
         return None
 
 
+def _eastern_date(dt_utc):
+    """Convert a UTC-aware datetime to its Eastern calendar date."""
+    if dt_utc is None:
+        return None
+    return dt_utc.astimezone(EASTERN_TZ).date()
+
+
 # ---------------------------------------------------------------------------
 # BACKFILL mode
 # ---------------------------------------------------------------------------
@@ -1209,17 +1217,14 @@ def _normalize_name(name):
     Canonical form for player name matching.
 
     Steps applied to both the odds API name and the nba.players name:
-      1. Unicode NFC normalisation
-      2. Decompose accented characters and strip combining marks
-         (converts e.g. ö -> o, é -> e)
-      3. Lowercase
-      4. Strip generational suffixes (Jr, Sr, II, III, IV)
-      5. Remove all characters except a-z, 0-9, and space
-      6. Collapse whitespace and strip
+      1. Unicode NFD decomposition to strip combining marks (ö -> o, é -> e)
+      2. Lowercase
+      3. Strip generational suffixes (Jr, Sr, II, III, IV)
+      4. Remove all characters except a-z, 0-9, and space
+      5. Collapse whitespace and strip
     """
     if not name:
         return ""
-    # Decompose accented characters (ö -> o + combining umlaut) then keep only ASCII
     name = unicodedata.normalize("NFD", name)
     name = "".join(c for c in name if unicodedata.category(c) != "Mn")
     name = name.lower()
@@ -1282,10 +1287,6 @@ def run_mappings(sport, engine):
                    schema="odds", table="player_map", keys=["odds_player_name", "sport_key"])
             print(f"  player_map: {len(pm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
-        # event_game_map: match odds events to nba.games via date + home tricode.
-        # Processes ALL events so re-running mappings retries previously unmatched rows.
-        # Tries UTC date first, then UTC-minus-one-day for evening games whose
-        # commence_time crosses midnight UTC but game_date in nba.games is local time.
         with engine.connect() as conn:
             all_events = conn.execute(
                 text("""
@@ -1391,6 +1392,16 @@ def _fetch_upcoming_event(sport_key, event_id, markets, api_key, quota_floor):
 
 
 def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
+    """
+    Fetch current pre-game lines for upcoming games.
+
+    Game day scoping uses Eastern time. All NBA games are scheduled on an
+    Eastern calendar date regardless of when they tip off in UTC. A 10 PM ET
+    game has a UTC commence_time of 03:00 the next UTC day, so UTC-based date
+    grouping incorrectly splits same-day games. Converting to Eastern before
+    extracting the date ensures all games on the same slate are grouped
+    together.
+    """
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Upcoming: {sport.upper()} (next {days_ahead} game day(s)) ===")
 
@@ -1404,17 +1415,25 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
         print("  No upcoming events found.")
         return
 
-    now_utc = datetime.now(tz=timezone.utc)
-    cutoff  = now_utc + timedelta(days=days_ahead)
-    in_window = [ev for ev in all_upcoming if _cdt(ev) and _cdt(ev) <= cutoff]
+    now_eastern      = datetime.now(tz=EASTERN_TZ)
+    today_eastern    = now_eastern.date()
+    cutoff_eastern   = today_eastern + timedelta(days=days_ahead - 1)
+
+    # Filter to events whose Eastern game date falls within the window
+    in_window = [
+        ev for ev in all_upcoming
+        if _cdt(ev) and _eastern_date(_cdt(ev)) is not None
+        and today_eastern <= _eastern_date(_cdt(ev)) <= cutoff_eastern
+    ]
+
     if not in_window:
         print("  No events within window.")
         return
 
     if days_ahead <= 1:
-        earliest = min(_cdt(ev).date() for ev in in_window if _cdt(ev))
-        in_window = [ev for ev in in_window if _cdt(ev) and _cdt(ev).date() == earliest]
-        print(f"  Next game day: {earliest} ({len(in_window)} events).")
+        # Scope to today's Eastern date only
+        in_window = [ev for ev in in_window if _eastern_date(_cdt(ev)) == today_eastern]
+        print(f"  Next game day: {today_eastern} ({len(in_window)} events).")
     else:
         print(f"  {len(in_window)} events in window.")
 
@@ -1422,7 +1441,7 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
         for tbl in ("upcoming_player_props", "upcoming_game_lines", "upcoming_events"):
             conn.execute(text(f"DELETE FROM odds.{tbl} WHERE sport_key = :sk"), {"sk": sport_key})
 
-    snap_ts = _to_utc_str(now_utc)
+    snap_ts = _to_utc_str(datetime.now(tz=timezone.utc))
 
     if sport == "nba":
         with engine.connect() as conn:
@@ -1432,7 +1451,7 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
             ).fetchall()}
             future_lookup = {(str(r[1]), r[2]): r[0] for r in conn.execute(
                 text("SELECT game_id, game_date, home_team_tricode FROM nba.schedule WHERE game_date >= :today"),
-                {"today": date.today()},
+                {"today": today_eastern},
             ).fetchall()}
             pid_map = {r[0]: r[1] for r in conn.execute(
                 text("SELECT odds_player_name, player_id FROM odds.player_map WHERE sport_key = :sk AND player_id IS NOT NULL"),
@@ -1443,15 +1462,15 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
 
     gl_total = pp_total = 0
     for event in in_window:
-        eid       = event.get("id")
-        cdt       = _cdt(event)
-        home_name = event.get("home_team")
-        away_name = event.get("away_team")
-        home_tc   = name_to_tc.get(home_name)
-        away_tc   = name_to_tc.get(away_name)
-        cdt_date  = str(cdt.date()) if cdt else None
-        game_id   = future_lookup.get((cdt_date, home_tc)) if (cdt_date and home_tc) else None
-        print(f"\n  {away_name or ''} @ {home_name or ''} ({cdt_date or '?'})")
+        eid          = event.get("id")
+        cdt          = _cdt(event)
+        home_name    = event.get("home_team")
+        away_name    = event.get("away_team")
+        home_tc      = name_to_tc.get(home_name)
+        away_tc      = name_to_tc.get(away_name)
+        eastern_date = _eastern_date(cdt)
+        game_id      = future_lookup.get((str(eastern_date), home_tc)) if (eastern_date and home_tc) else None
+        print(f"\n  {away_name or ''} @ {home_name or ''} ({eastern_date or '?'})")
 
         gl_all, pp_all = [], []
         bulk_data = _fetch_upcoming_bulk(sport_key, BULK_FEATURED_MARKETS, api_key, quota_floor)
@@ -1480,11 +1499,15 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
             time.sleep(1.5)
 
         upsert(engine, clean_dataframe(pd.DataFrame([{
-            "event_id": eid, "sport_key": sport_key,
-            "sport_title": event.get("sport_title"),
+            "event_id":     eid,
+            "sport_key":    sport_key,
+            "sport_title":  event.get("sport_title"),
             "commence_time": _to_utc_str(event.get("commence_time")),
-            "home_team": home_name, "away_team": away_name,
-            "home_tricode": home_tc, "away_tricode": away_tc, "game_id": game_id,
+            "home_team":    home_name,
+            "away_team":    away_name,
+            "home_tricode": home_tc,
+            "away_tricode": away_tc,
+            "game_id":      game_id,
         }])), schema="odds", table="upcoming_events", keys=["event_id"])
 
         if gl_all:
@@ -1522,7 +1545,7 @@ def main():
     parser.add_argument("--snapshots",  type=int, default=50,
                         help="Discover mode: max calendar dates to walk per run. Default 50.")
     parser.add_argument("--days-ahead", type=int, default=1, dest="days_ahead",
-                        help="Upcoming mode: calendar days ahead. Default 1 = next game day.")
+                        help="Upcoming mode: calendar days ahead to fetch.")
     parser.add_argument("--quota-floor",type=int, default=50000, dest="quota_floor")
     args = parser.parse_args()
 
