@@ -6,13 +6,13 @@ Schema: odds
 
 Modes
   discover  -- Walks backward through the historical snapshot chain one
-               calendar date at a time. For each date it requests a single
-               snapshot near the end of that day, stores whatever events are
-               in that snapshot, then jumps back ~23 hours to land on the
-               previous date. This costs 1 credit per calendar date rather
-               than 1 credit per 5-minute interval. Progress is checkpointed
-               in odds.discover_cursors so restarts resume from where the
-               last run stopped.
+               calendar date at a time. For each date it requests a snapshot
+               at T23:59:59Z, stores whatever events are returned, then
+               subtracts exactly 1 calendar day and pins to T23:59:59Z for
+               the next request. This eliminates timestamp drift, costs
+               1 credit per calendar date, and guarantees each request always
+               lands at the same time of day regardless of what the API
+               returned. Progress is checkpointed in odds.discover_cursors.
 
   backfill  -- Reads odds.discovered_events as the authoritative game list.
                Diffs against odds.events to find gaps. Processes the oldest
@@ -675,20 +675,20 @@ def _season_date_range(sport, season_year):
 # ---------------------------------------------------------------------------
 # Strategy: one API call per calendar date, not one per 5-minute snapshot.
 #
-# For each date we request a snapshot at 23:59:59 UTC on that date. The API
-# returns the closest real snapshot at or before that timestamp, which will
-# be the last snapshot of the day. We store whatever events are in it, then
-# subtract 23 hours from actual_timestamp to build the request for the next
-# iteration. Subtracting 23h from a 23:59 timestamp lands us somewhere around
-# 00:59 of the same day, which is comfortably inside the previous calendar
-# date's snapshot window. This means we never request the same date twice and
-# never walk intraday 5-minute intervals.
+# Every request is pinned to T23:59:59Z on a specific calendar date. The API
+# returns the closest real snapshot at or before that timestamp. After storing
+# events, we extract the calendar date from next_request_iso, subtract 1 day,
+# and pin the next request to T23:59:59Z on that previous date. This means
+# every request always lands at the same time of day with no drift, regardless
+# of the exact seconds in actual_timestamp.
 #
 # Progress is checkpointed in odds.discover_cursors after each date so
-# restarts resume without re-scanning already-covered dates.
+# restarts resume without re-scanning already-covered dates. The cursor stores
+# the next request ISO that would have been made, so on restart the walk
+# continues from exactly where it left off.
 #
 # The walk stops when:
-#   (a) previous_timestamp is absent (reached the beginning of history)
+#   (a) previous_timestamp is absent (reached beginning of history)
 #   (b) actual_timestamp has crossed before the season start date
 #   (c) --snapshots limit (one per date) is reached for this run
 # ---------------------------------------------------------------------------
@@ -756,6 +756,8 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
     )
 
     # Resume from cursor if one exists, otherwise start at end of season.
+    # All requests are always pinned to T23:59:59Z so the cursor stores
+    # a clean YYYY-MM-DDT23:59:59Z string that is safe to use directly.
     cursor_ts = _load_cursor(engine, sport_key, season_year)
     if cursor_ts:
         next_request_iso = cursor_ts
@@ -822,17 +824,21 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
                          dates_walked, events_stored)
             break
 
-        # Jump back ~23 hours from the actual snapshot timestamp to land
-        # squarely inside the previous calendar date's snapshot window,
-        # skipping all intraday 5-minute intervals.
-        if actual_dt:
-            jump_dt  = actual_dt - timedelta(hours=23)
-            next_request_iso = jump_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Derive the next request by subtracting exactly 1 calendar day from
+        # the DATE portion of next_request_iso and pinning to T23:59:59Z.
+        # This keeps every request at the same time of day and eliminates the
+        # drift that occurs when subtracting hours from actual_timestamp (which
+        # varies by a few minutes per hop and compounds over many iterations).
+        current_date = _parse_iso(next_request_iso)
+        if current_date:
+            prev_date        = (current_date - timedelta(days=1)).date()
+            next_request_iso = f"{prev_date.isoformat()}T23:59:59Z"
         else:
-            # Fallback: use previous_timestamp directly if we couldn't parse actual_ts.
+            # Fallback: use previous_timestamp if we somehow can't parse.
             next_request_iso = previous_ts
 
-        # Checkpoint after each date.
+        # Checkpoint after each date. Store next_request_iso as the cursor so
+        # a restart begins exactly where we left off.
         _save_cursor(engine, sport_key, season_year, next_request_iso,
                      snapshots_delta=1, events_delta=len(season_events))
 
