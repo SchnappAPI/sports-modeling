@@ -2,16 +2,26 @@
 odds_etl.py
 
 Ingests historical odds data from The Odds API v4 into Azure SQL.
-Schema: odds (events, game_lines, player_props, market_probe)
+Schema: odds
 
 Modes
-  probe     -- Coverage discovery pass. Writes only to odds.market_probe.
-  backfill  -- Incremental ingestion of historical event odds.
-  mappings  -- Builds/refreshes odds.event_game_map, odds.team_map, odds.player_map.
-               Run after backfill to keep mapping tables current.
-  upcoming  -- Fetches current pre-game lines for the next --days-ahead game days.
-               Truncates and reloads odds.upcoming_game_lines and
-               odds.upcoming_player_props on every run.
+  discover  -- Scans the full season date range and writes every found event
+               into odds.discovered_events. Run this once per season (or any
+               time you suspect gaps). Idempotent: safe to re-run. No odds
+               data is fetched. Costs 1 credit per date scanned.
+
+  backfill  -- Reads odds.discovered_events as the authoritative game list.
+               Diffs against odds.events to find gaps. Processes the oldest
+               N missing events (--games N). Never calls the discovery
+               endpoint. Discovery and odds fetching are fully decoupled.
+
+  mappings  -- Builds/refreshes odds.team_map, odds.player_map,
+               odds.event_game_map. Run after backfill.
+
+  upcoming  -- Fetches current pre-game lines for the next --days-ahead game
+               days. Truncates and reloads odds.upcoming_* tables each run.
+
+  probe     -- Coverage discovery pass. Writes to odds.market_probe only.
 
 Featured market routing
   Bulk /odds endpoint:         h2h, spreads, totals only.
@@ -24,16 +34,13 @@ Datetime handling
 
 Parameter binding
   Never use pd.read_sql with named parameters (:name style) against a pyodbc
-  engine. pyodbc only understands ? placeholders; named params cause
-  "SQL contains 0 parameter markers" errors. All parameterised reads use
+  engine. pyodbc only understands ? placeholders. All parameterised reads use
   engine.connect() + text() + SQLAlchemy binding instead.
 
 Response shapes
-  Call 1 (bulk /odds):          data["data"] is a LIST of event objects.
-  Calls 2-4 (per-event /odds):  data["data"] is a single event DICT.
-  Both shapes are handled: bulk iterates the list; per-event passes the dict
-  directly to _parse_bookmakers, which reads event_obj["bookmakers"].
-  Upcoming bulk call:           top-level list (no "data" wrapper).
+  Bulk /odds:          data["data"] is a LIST of event objects.
+  Per-event /odds:     data["data"] is a single event DICT.
+  Live bulk /odds:     top-level list (no "data" wrapper).
 """
 
 import argparse
@@ -73,10 +80,7 @@ SEASON_MONTHS = {
 }
 
 PROPS_CUTOFF = datetime(2023, 5, 3, 5, 30, 0, tzinfo=timezone.utc)
-
-# FanDuel and DraftKings only. BetMGM and William Hill removed: rarely/never
-# used and trimming books cuts per-event credit cost roughly in half.
-BOOKMAKERS = "fanduel,draftkings"
+BOOKMAKERS   = "fanduel,draftkings"
 
 # ---------------------------------------------------------------------------
 # Market constants
@@ -113,14 +117,11 @@ NBA_EVENT_FEATURED = [
     "team_totals_h1",
 ]
 NBA_PROPS = [
-    "player_points",
-    "player_rebounds",
-    "player_assists",
+    "player_points", "player_rebounds", "player_assists",
     "player_threes", "player_blocks", "player_steals",
     "player_points_rebounds_assists", "player_points_rebounds",
     "player_points_assists", "player_rebounds_assists",
-    "player_first_basket",
-    "player_double_double", "player_triple_double",
+    "player_first_basket", "player_double_double", "player_triple_double",
 ]
 NBA_ALT_PROPS = [
     "player_points_alternate", "player_rebounds_alternate",
@@ -165,8 +166,7 @@ PROP_MARKETS     = {"nfl": NFL_PROPS,     "nba": NBA_PROPS,     "mlb": MLB_PROPS
 ALT_PROP_MARKETS = {"nfl": NFL_ALT_PROPS, "nba": NBA_ALT_PROPS, "mlb": MLB_ALT_PROPS}
 
 # ---------------------------------------------------------------------------
-# NBA team name mapping: odds API full name -> nba.teams tricode
-# Used by run_mappings to populate odds.team_map for the NBA.
+# NBA team name mapping
 # ---------------------------------------------------------------------------
 NBA_TEAM_NAME_TO_TRICODE = {
     "Atlanta Hawks":          "ATL",
@@ -202,39 +202,27 @@ NBA_TEAM_NAME_TO_TRICODE = {
 }
 
 # ---------------------------------------------------------------------------
-# NBA market key -> stat column(s) in nba.player_box_score_stats
-# Used in the view DDL to tell Power BI which stat to compare against the line.
-# Only full-game markets are mapped (period='ALL' is the sum across all periods).
-# ---------------------------------------------------------------------------
-NBA_MARKET_STAT_MAP = {
-    "player_points":                    "pts",
-    "player_rebounds":                  "reb",
-    "player_assists":                   "ast",
-    "player_threes":                    "fg3m",
-    "player_blocks":                    "blk",
-    "player_steals":                    "stl",
-    "player_points_rebounds_assists":   "pts_reb_ast",   # derived
-    "player_points_rebounds":           "pts_reb",        # derived
-    "player_points_assists":            "pts_ast",        # derived
-    "player_rebounds_assists":          "reb_ast",        # derived
-    "player_points_alternate":          "pts",
-    "player_rebounds_alternate":        "reb",
-    "player_assists_alternate":         "ast",
-    "player_blocks_alternate":          "blk",
-    "player_steals_alternate":          "stl",
-    "player_threes_alternate":          "fg3m",
-    "player_points_assists_alternate":  "pts_ast",
-    "player_points_rebounds_alternate": "pts_reb",
-    "player_rebounds_assists_alternate":"reb_ast",
-    "player_points_rebounds_assists_alternate": "pts_reb_ast",
-}
-
-# ---------------------------------------------------------------------------
 # DDL
 # ---------------------------------------------------------------------------
 
 DDL_STATEMENTS = [
     "IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'odds') EXEC('CREATE SCHEMA odds')",
+    # discovered_events: the authoritative event catalog populated by discover mode.
+    # Backfill reads this table instead of calling the discovery endpoint.
+    """
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='discovered_events')
+    CREATE TABLE odds.discovered_events (
+        event_id      VARCHAR(50)  NOT NULL PRIMARY KEY,
+        sport_key     VARCHAR(50)  NOT NULL,
+        sport_title   VARCHAR(50)  NULL,
+        commence_time DATETIME2    NOT NULL,
+        home_team     VARCHAR(100) NULL,
+        away_team     VARCHAR(100) NULL,
+        season_year   INT          NULL,
+        discovered_at DATETIME2    NOT NULL DEFAULT GETUTCDATE()
+    )
+    """,
     """
     IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
                    WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='events')
@@ -300,9 +288,6 @@ DDL_STATEMENTS = [
         created_at         DATETIME2    NOT NULL DEFAULT GETUTCDATE()
     )
     """,
-    # ----------------------------------------------------------------
-    # Mapping tables
-    # ----------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
                    WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='team_map')
@@ -341,9 +326,6 @@ DDL_STATEMENTS = [
         created_at    DATETIME2    NOT NULL DEFAULT GETUTCDATE()
     )
     """,
-    # ----------------------------------------------------------------
-    # Upcoming lines tables (truncated and reloaded each run)
-    # ----------------------------------------------------------------
     """
     IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
                    WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_events')
@@ -394,9 +376,7 @@ DDL_STATEMENTS = [
         created_at      DATETIME2    NOT NULL DEFAULT GETUTCDATE()
     )
     """,
-    # ----------------------------------------------------------------
-    # Rename legacy columns if still present
-    # ----------------------------------------------------------------
+    # Legacy column renames
     """
     IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
                WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='market_probe'
@@ -417,50 +397,23 @@ DDL_STATEMENTS = [
     """,
 ]
 
-# View DDL is separate because SQL Server does not allow IF NOT EXISTS around
-# CREATE VIEW inside a multi-statement batch.
-VIEW_DDL = """
+VIEW_DROP = """
 IF OBJECT_ID('odds.vw_nba_player_prop_results', 'V') IS NOT NULL
     DROP VIEW odds.vw_nba_player_prop_results;
 """
 
-VIEW_DDL_CREATE = """
+VIEW_CREATE = """
 CREATE VIEW odds.vw_nba_player_prop_results AS
-/*
-  Joins historical NBA player props to box score actuals.
-
-  Columns of interest:
-    outcome_point  -- the prop line
-    stat_value     -- the player's actual full-game total for the relevant stat
-    over_hit       -- 1 if the player exceeded the line, 0 otherwise
-
-  Derived combination stats (pts_reb_ast, pts_reb, pts_ast, reb_ast) are
-  computed here so the rest of the schema stays clean.
-
-  period = 'ALL' rows are the sum across Q1+Q2+Q3+Q4+OT produced by the
-  aggregation sub-query below.
-*/
 WITH game_totals AS (
-    -- Sum all periods to get full-game totals per player per game.
     SELECT
-        game_id,
-        player_id,
-        SUM(pts)   AS pts,
-        SUM(reb)   AS reb,
-        SUM(ast)   AS ast,
-        SUM(fg3m)  AS fg3m,
-        SUM(blk)   AS blk,
-        SUM(stl)   AS stl,
-        SUM(fgm)   AS fgm,
-        SUM(fga)   AS fga,
-        SUM(ftm)   AS ftm,
-        SUM(fta)   AS fta,
-        SUM(oreb)  AS oreb,
-        SUM(dreb)  AS dreb,
-        SUM(tov)   AS tov,
-        SUM(pf)    AS pf,
-        MAX(game_date)  AS game_date,
-        MAX(team_id)    AS team_id,
+        game_id, player_id,
+        SUM(pts)  AS pts,  SUM(reb)  AS reb,  SUM(ast)  AS ast,
+        SUM(fg3m) AS fg3m, SUM(blk)  AS blk,  SUM(stl)  AS stl,
+        SUM(fgm)  AS fgm,  SUM(fga)  AS fga,  SUM(ftm)  AS ftm,
+        SUM(fta)  AS fta,  SUM(oreb) AS oreb, SUM(dreb) AS dreb,
+        SUM(tov)  AS tov,  SUM(pf)   AS pf,
+        MAX(game_date)    AS game_date,
+        MAX(team_id)      AS team_id,
         MAX(team_tricode) AS team_tricode,
         MAX(player_name)  AS player_name
     FROM nba.player_box_score_stats
@@ -470,28 +423,27 @@ SELECT
     pp.event_id,
     pp.market_key,
     pp.bookmaker_key,
-    pp.player_name                                     AS odds_player_name,
+    pp.player_name        AS odds_player_name,
     pm.player_id,
     pm.matched_name,
     egm.game_id,
     gt.game_date,
     gt.team_tricode,
     pp.outcome_name,
-    pp.outcome_point                                   AS line,
-    -- Resolve the relevant stat based on market_key
+    pp.outcome_point      AS line,
     CASE pp.market_key
-        WHEN 'player_points'                            THEN CAST(gt.pts    AS DECIMAL(8,1))
-        WHEN 'player_points_alternate'                  THEN CAST(gt.pts    AS DECIMAL(8,1))
-        WHEN 'player_rebounds'                          THEN CAST(gt.reb    AS DECIMAL(8,1))
-        WHEN 'player_rebounds_alternate'                THEN CAST(gt.reb    AS DECIMAL(8,1))
-        WHEN 'player_assists'                           THEN CAST(gt.ast    AS DECIMAL(8,1))
-        WHEN 'player_assists_alternate'                 THEN CAST(gt.ast    AS DECIMAL(8,1))
-        WHEN 'player_threes'                            THEN CAST(gt.fg3m   AS DECIMAL(8,1))
-        WHEN 'player_threes_alternate'                  THEN CAST(gt.fg3m   AS DECIMAL(8,1))
-        WHEN 'player_blocks'                            THEN CAST(gt.blk    AS DECIMAL(8,1))
-        WHEN 'player_blocks_alternate'                  THEN CAST(gt.blk    AS DECIMAL(8,1))
-        WHEN 'player_steals'                            THEN CAST(gt.stl    AS DECIMAL(8,1))
-        WHEN 'player_steals_alternate'                  THEN CAST(gt.stl    AS DECIMAL(8,1))
+        WHEN 'player_points'                            THEN CAST(gt.pts  AS DECIMAL(8,1))
+        WHEN 'player_points_alternate'                  THEN CAST(gt.pts  AS DECIMAL(8,1))
+        WHEN 'player_rebounds'                          THEN CAST(gt.reb  AS DECIMAL(8,1))
+        WHEN 'player_rebounds_alternate'                THEN CAST(gt.reb  AS DECIMAL(8,1))
+        WHEN 'player_assists'                           THEN CAST(gt.ast  AS DECIMAL(8,1))
+        WHEN 'player_assists_alternate'                 THEN CAST(gt.ast  AS DECIMAL(8,1))
+        WHEN 'player_threes'                            THEN CAST(gt.fg3m AS DECIMAL(8,1))
+        WHEN 'player_threes_alternate'                  THEN CAST(gt.fg3m AS DECIMAL(8,1))
+        WHEN 'player_blocks'                            THEN CAST(gt.blk  AS DECIMAL(8,1))
+        WHEN 'player_blocks_alternate'                  THEN CAST(gt.blk  AS DECIMAL(8,1))
+        WHEN 'player_steals'                            THEN CAST(gt.stl  AS DECIMAL(8,1))
+        WHEN 'player_steals_alternate'                  THEN CAST(gt.stl  AS DECIMAL(8,1))
         WHEN 'player_points_rebounds_assists'           THEN CAST(gt.pts + gt.reb + gt.ast AS DECIMAL(8,1))
         WHEN 'player_points_rebounds_assists_alternate' THEN CAST(gt.pts + gt.reb + gt.ast AS DECIMAL(8,1))
         WHEN 'player_points_rebounds'                   THEN CAST(gt.pts + gt.reb AS DECIMAL(8,1))
@@ -501,24 +453,23 @@ SELECT
         WHEN 'player_rebounds_assists'                  THEN CAST(gt.reb + gt.ast AS DECIMAL(8,1))
         WHEN 'player_rebounds_assists_alternate'        THEN CAST(gt.reb + gt.ast AS DECIMAL(8,1))
         ELSE NULL
-    END                                                AS stat_value,
-    -- 1 = over hit, 0 = under hit, NULL = stat not mapped
+    END AS stat_value,
     CASE
-        WHEN pp.outcome_name = 'Over'
-             AND pp.outcome_point IS NOT NULL
-             AND CASE pp.market_key
-                WHEN 'player_points'                            THEN CAST(gt.pts    AS DECIMAL(8,1))
-                WHEN 'player_points_alternate'                  THEN CAST(gt.pts    AS DECIMAL(8,1))
-                WHEN 'player_rebounds'                          THEN CAST(gt.reb    AS DECIMAL(8,1))
-                WHEN 'player_rebounds_alternate'                THEN CAST(gt.reb    AS DECIMAL(8,1))
-                WHEN 'player_assists'                           THEN CAST(gt.ast    AS DECIMAL(8,1))
-                WHEN 'player_assists_alternate'                 THEN CAST(gt.ast    AS DECIMAL(8,1))
-                WHEN 'player_threes'                            THEN CAST(gt.fg3m   AS DECIMAL(8,1))
-                WHEN 'player_threes_alternate'                  THEN CAST(gt.fg3m   AS DECIMAL(8,1))
-                WHEN 'player_blocks'                            THEN CAST(gt.blk    AS DECIMAL(8,1))
-                WHEN 'player_blocks_alternate'                  THEN CAST(gt.blk    AS DECIMAL(8,1))
-                WHEN 'player_steals'                            THEN CAST(gt.stl    AS DECIMAL(8,1))
-                WHEN 'player_steals_alternate'                  THEN CAST(gt.stl    AS DECIMAL(8,1))
+        WHEN pp.outcome_name = 'Over' AND pp.outcome_point IS NOT NULL
+        THEN CASE
+            WHEN CASE pp.market_key
+                WHEN 'player_points'                            THEN CAST(gt.pts  AS DECIMAL(8,1))
+                WHEN 'player_points_alternate'                  THEN CAST(gt.pts  AS DECIMAL(8,1))
+                WHEN 'player_rebounds'                          THEN CAST(gt.reb  AS DECIMAL(8,1))
+                WHEN 'player_rebounds_alternate'                THEN CAST(gt.reb  AS DECIMAL(8,1))
+                WHEN 'player_assists'                           THEN CAST(gt.ast  AS DECIMAL(8,1))
+                WHEN 'player_assists_alternate'                 THEN CAST(gt.ast  AS DECIMAL(8,1))
+                WHEN 'player_threes'                            THEN CAST(gt.fg3m AS DECIMAL(8,1))
+                WHEN 'player_threes_alternate'                  THEN CAST(gt.fg3m AS DECIMAL(8,1))
+                WHEN 'player_blocks'                            THEN CAST(gt.blk  AS DECIMAL(8,1))
+                WHEN 'player_blocks_alternate'                  THEN CAST(gt.blk  AS DECIMAL(8,1))
+                WHEN 'player_steals'                            THEN CAST(gt.stl  AS DECIMAL(8,1))
+                WHEN 'player_steals_alternate'                  THEN CAST(gt.stl  AS DECIMAL(8,1))
                 WHEN 'player_points_rebounds_assists'           THEN CAST(gt.pts + gt.reb + gt.ast AS DECIMAL(8,1))
                 WHEN 'player_points_rebounds_assists_alternate' THEN CAST(gt.pts + gt.reb + gt.ast AS DECIMAL(8,1))
                 WHEN 'player_points_rebounds'                   THEN CAST(gt.pts + gt.reb AS DECIMAL(8,1))
@@ -528,48 +479,22 @@ SELECT
                 WHEN 'player_rebounds_assists'                  THEN CAST(gt.reb + gt.ast AS DECIMAL(8,1))
                 WHEN 'player_rebounds_assists_alternate'        THEN CAST(gt.reb + gt.ast AS DECIMAL(8,1))
                 ELSE NULL
-             END IS NOT NULL
-        THEN CASE
-                WHEN CASE pp.market_key
-                        WHEN 'player_points'                            THEN CAST(gt.pts    AS DECIMAL(8,1))
-                        WHEN 'player_points_alternate'                  THEN CAST(gt.pts    AS DECIMAL(8,1))
-                        WHEN 'player_rebounds'                          THEN CAST(gt.reb    AS DECIMAL(8,1))
-                        WHEN 'player_rebounds_alternate'                THEN CAST(gt.reb    AS DECIMAL(8,1))
-                        WHEN 'player_assists'                           THEN CAST(gt.ast    AS DECIMAL(8,1))
-                        WHEN 'player_assists_alternate'                 THEN CAST(gt.ast    AS DECIMAL(8,1))
-                        WHEN 'player_threes'                            THEN CAST(gt.fg3m   AS DECIMAL(8,1))
-                        WHEN 'player_threes_alternate'                  THEN CAST(gt.fg3m   AS DECIMAL(8,1))
-                        WHEN 'player_blocks'                            THEN CAST(gt.blk    AS DECIMAL(8,1))
-                        WHEN 'player_blocks_alternate'                  THEN CAST(gt.blk    AS DECIMAL(8,1))
-                        WHEN 'player_steals'                            THEN CAST(gt.stl    AS DECIMAL(8,1))
-                        WHEN 'player_steals_alternate'                  THEN CAST(gt.stl    AS DECIMAL(8,1))
-                        WHEN 'player_points_rebounds_assists'           THEN CAST(gt.pts + gt.reb + gt.ast AS DECIMAL(8,1))
-                        WHEN 'player_points_rebounds_assists_alternate' THEN CAST(gt.pts + gt.reb + gt.ast AS DECIMAL(8,1))
-                        WHEN 'player_points_rebounds'                   THEN CAST(gt.pts + gt.reb AS DECIMAL(8,1))
-                        WHEN 'player_points_rebounds_alternate'         THEN CAST(gt.pts + gt.reb AS DECIMAL(8,1))
-                        WHEN 'player_points_assists'                    THEN CAST(gt.pts + gt.ast AS DECIMAL(8,1))
-                        WHEN 'player_points_assists_alternate'          THEN CAST(gt.pts + gt.ast AS DECIMAL(8,1))
-                        WHEN 'player_rebounds_assists'                  THEN CAST(gt.reb + gt.ast AS DECIMAL(8,1))
-                        WHEN 'player_rebounds_assists_alternate'        THEN CAST(gt.reb + gt.ast AS DECIMAL(8,1))
-                        ELSE NULL
-                     END > pp.outcome_point
-                THEN 1 ELSE 0
-             END
+            END > pp.outcome_point THEN 1 ELSE 0
+        END
         ELSE NULL
-    END                                                AS over_hit,
+    END AS over_hit,
     pp.snap_ts
-FROM odds.player_props        pp
-JOIN odds.event_game_map      egm ON egm.event_id  = pp.event_id
-JOIN odds.player_map          pm  ON pm.odds_player_name = pp.player_name
-                                 AND pm.sport_key        = pp.sport_key
-                                 AND pm.player_id IS NOT NULL
-JOIN game_totals              gt  ON gt.game_id    = egm.game_id
-                                 AND gt.player_id  = pm.player_id
-WHERE pp.sport_key = 'basketball_nba'
+FROM odds.player_props   pp
+JOIN odds.event_game_map egm ON egm.event_id        = pp.event_id
+JOIN odds.player_map     pm  ON pm.odds_player_name = pp.player_name
+                             AND pm.sport_key        = pp.sport_key
+                             AND pm.player_id IS NOT NULL
+JOIN game_totals         gt  ON gt.game_id   = egm.game_id
+                             AND gt.player_id = pm.player_id
+WHERE pp.sport_key    = 'basketball_nba'
   AND pp.outcome_name IN ('Over', 'Under')
   AND pp.outcome_point IS NOT NULL
-  AND egm.game_id IS NOT NULL
-;
+  AND egm.game_id IS NOT NULL;
 """
 
 
@@ -577,9 +502,8 @@ def ensure_schema(engine):
     with engine.begin() as conn:
         for stmt in DDL_STATEMENTS:
             conn.execute(text(stmt))
-        # Drop and recreate the view so it always reflects latest logic.
-        conn.execute(text(VIEW_DDL))
-        conn.execute(text(VIEW_DDL_CREATE))
+        conn.execute(text(VIEW_DROP))
+        conn.execute(text(VIEW_CREATE))
 
 
 # ---------------------------------------------------------------------------
@@ -682,10 +606,6 @@ def _check_quota(quota_floor):
         sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# Database read helpers
-# ---------------------------------------------------------------------------
-
 def _query_rows(engine, sql, params):
     with engine.connect() as conn:
         result = conn.execute(text(sql), params)
@@ -726,16 +646,17 @@ def _date_list(start_date, end_date):
 
 
 # ---------------------------------------------------------------------------
-# Event discovery
+# Event discovery API call
 # ---------------------------------------------------------------------------
 
-def _discover_events(sport_key, target_date, api_key, quota_floor):
+def _api_discover_date(sport_key, target_date, api_key, quota_floor):
+    """Call the historical events endpoint for one calendar date. Returns list."""
     _check_quota(quota_floor)
     data, _ = _request(
         f"{BASE_URL}/v4/historical/sports/{sport_key}/events",
         {
-            "apiKey": api_key,
-            "date": f"{target_date}T12:00:00Z",
+            "apiKey":           api_key,
+            "date":             f"{target_date}T12:00:00Z",
             "commenceTimeFrom": f"{target_date}T00:00:00Z",
             "commenceTimeTo":   f"{target_date}T23:59:59Z",
         },
@@ -744,16 +665,84 @@ def _discover_events(sport_key, target_date, api_key, quota_floor):
     return (data.get("data") or []) if data else []
 
 
-def _discover_events_with_fallback(sport_key, target_date, api_key, quota_floor, max_walk=7):
-    for offset in range(max_walk + 1):
-        check = target_date + timedelta(days=offset)
-        events = _discover_events(sport_key, check, api_key, quota_floor)
+# ---------------------------------------------------------------------------
+# DISCOVER mode
+# Scans the full season date range and writes every event into
+# odds.discovered_events. This is the only mode that calls the discovery
+# endpoint. It costs 1 credit per date. It is idempotent: already-known
+# dates are skipped so re-running only scans new dates.
+# ---------------------------------------------------------------------------
+
+def run_discover(sport, api_key, quota_floor, season_year, engine):
+    sport_key = SPORT_KEYS[sport]
+    print(f"\n=== Discover: {sport.upper()} Season {season_year} ===")
+
+    start_date, end_date = _season_date_range(sport, season_year)
+    # Only scan past dates -- future games can't have historical odds yet.
+    end_date = min(end_date, date.today() - timedelta(days=1))
+    if start_date > end_date:
+        print("  No past dates in range. Nothing to do.")
+        return
+
+    all_dates = _date_list(start_date, end_date)
+
+    # Find which dates we have already fully scanned.
+    # A date is considered scanned if at least one discovered_events row
+    # has a commence_time on that date. Dates with zero games are indistinguishable
+    # from dates that were skipped due to rate-limiting, so we track scanned
+    # dates explicitly in a separate table.
+    # Simpler approach: any date where we stored at least one event is considered
+    # scanned. For dates with legitimately zero games (rare) we will re-scan on
+    # every discover run, which costs 1 credit and returns nothing -- acceptable.
+    with engine.connect() as conn:
+        scanned_rows = conn.execute(
+            text("""
+                SELECT DISTINCT CAST(commence_time AS DATE)
+                FROM odds.discovered_events
+                WHERE sport_key = :sk AND season_year = :sy
+            """),
+            {"sk": sport_key, "sy": season_year},
+        ).fetchall()
+    scanned_dates = {str(r[0]) for r in scanned_rows if r[0] is not None}
+
+    missing_dates = [d for d in all_dates if str(d) not in scanned_dates]
+    if not missing_dates:
+        print(f"  All {len(all_dates)} dates already scanned. Nothing to do.")
+        return
+
+    print(f"  {len(all_dates)} total dates, {len(scanned_dates)} already scanned, "
+          f"{len(missing_dates)} to scan (1s sleep between calls).")
+
+    total_found = 0
+    for i, d in enumerate(missing_dates):
+        events = _api_discover_date(sport_key, d, api_key, quota_floor)
         if events:
-            if offset:
-                print(f"    No events on {target_date}, found {len(events)} on {check}")
-            return events, check
-    print(f"    No events within {max_walk} days of {target_date}")
-    return [], target_date
+            rows = [
+                {
+                    "event_id":      ev.get("id"),
+                    "sport_key":     sport_key,
+                    "sport_title":   ev.get("sport_title"),
+                    "commence_time": _to_utc_str(ev.get("commence_time")),
+                    "home_team":     ev.get("home_team"),
+                    "away_team":     ev.get("away_team"),
+                    "season_year":   season_year,
+                }
+                for ev in events if ev.get("id")
+            ]
+            if rows:
+                upsert(engine, clean_dataframe(pd.DataFrame(rows)),
+                       schema="odds", table="discovered_events", keys=["event_id"])
+                total_found += len(rows)
+                print(f"  {d}: {len(rows)} events stored.")
+        else:
+            print(f"  {d}: no events (or rate-limited; will retry on next discover run).")
+
+        if i < len(missing_dates) - 1:
+            time.sleep(1.0)
+
+    print(f"\n  Discover complete. {total_found} events stored across {len(missing_dates)} dates scanned.")
+    if _remaining_credits is not None:
+        print(f"  Credits remaining: {_remaining_credits:,}")
 
 
 # ---------------------------------------------------------------------------
@@ -783,65 +772,8 @@ def _fetch_event(sport_key, event_id, snap_iso, markets, api_key, quota_floor):
 
 
 # ---------------------------------------------------------------------------
-# Odds fetching (upcoming / live lines)
-# ---------------------------------------------------------------------------
-
-def _fetch_upcoming_bulk(sport_key, markets, api_key, quota_floor):
-    """
-    Fetch current pre-game lines for all upcoming events.
-    Hits /v4/sports/{sport}/odds (no date param = current lines).
-    Returns a list of event objects (no 'data' wrapper for live endpoint).
-    """
-    _check_quota(quota_floor)
-    data, _ = _request(
-        f"{BASE_URL}/v4/sports/{sport_key}/odds",
-        {"apiKey": api_key, "bookmakers": BOOKMAKERS,
-         "markets": ",".join(markets), "oddsFormat": "american"},
-        quota_floor,
-    )
-    # Live endpoint returns a top-level list, not {"data": [...]}
-    if data is None:
-        return []
-    if isinstance(data, list):
-        return data
-    return data.get("data") or []
-
-
-def _fetch_upcoming_event(sport_key, event_id, markets, api_key, quota_floor):
-    """
-    Fetch current pre-game lines for a single upcoming event.
-    Hits /v4/sports/{sport}/events/{id}/odds (no date param).
-    """
-    _check_quota(quota_floor)
-    data, _ = _request(
-        f"{BASE_URL}/v4/sports/{sport_key}/events/{event_id}/odds",
-        {"apiKey": api_key, "bookmakers": BOOKMAKERS,
-         "markets": ",".join(markets), "oddsFormat": "american"},
-        quota_floor,
-    )
-    if data is None:
-        return None, None
-    # Live single-event endpoint returns the event dict directly at root.
-    if isinstance(data, dict) and "bookmakers" in data:
-        return data, None
-    return data.get("data"), None
-
-
-# ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
-
-def _parse_event_row(event, sport_key, season_year):
-    return {
-        "event_id":      event.get("id"),
-        "sport_key":     sport_key,
-        "sport_title":   event.get("sport_title"),
-        "commence_time": _to_utc_str(event.get("commence_time")),
-        "home_team":     event.get("home_team"),
-        "away_team":     event.get("away_team"),
-        "season_year":   season_year,
-    }
-
 
 def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
     snap_ts = _to_utc_str(snap_ts_raw)
@@ -891,147 +823,9 @@ def _cdt(event):
 
 
 # ---------------------------------------------------------------------------
-# Probe mode
-# ---------------------------------------------------------------------------
-
-PROBE_BEST_CASE = {
-    "nfl": [date(2024, 11, 7),  date(2024, 12, 12)],
-    "nba": [date(2024, 12, 15), date(2025, 2, 15)],
-    "mlb": [date(2024, 6, 15),  date(2024, 8, 15)],
-}
-PROBE_WORST_CASE = {
-    "nfl": [date(2024, 9, 8),   date(2025, 2, 2)],
-    "nba": [date(2024, 10, 22), date(2025, 6, 1)],
-    "mlb": [date(2024, 3, 20),  date(2024, 9, 28)],
-}
-
-
-def _probe_select_events(sport, sport_key, api_key, quota_floor):
-    candidate_dates = PROBE_BEST_CASE[sport] + PROBE_WORST_CASE[sport]
-    events_by_date = {}
-    for td in candidate_dates:
-        evs, actual = _discover_events_with_fallback(sport_key, td, api_key, quota_floor)
-        if evs:
-            events_by_date[actual] = evs
-
-    selected, wildcard = [], None
-    for td in candidate_dates:
-        actual = next((d for d in events_by_date if abs((d - td).days) <= 7), None)
-        if actual:
-            evs = events_by_date[actual]
-            selected.append(evs[0])
-            for ev in evs:
-                cdt = _cdt(ev)
-                if cdt and (wildcard is None or cdt > _cdt(wildcard)):
-                    wildcard = ev
-
-    if wildcard and wildcard.get("id") not in {e.get("id") for e in selected}:
-        selected.append(wildcard)
-
-    return selected[:5]
-
-
-def run_probe(sport, api_key, quota_floor, engine):
-    sport_key = SPORT_KEYS[sport]
-    print(f"\n=== Probe: {sport.upper()} ({sport_key}) ===")
-
-    events = _probe_select_events(sport, sport_key, api_key, quota_floor)
-    if not events:
-        print("  No sample events found. Skipping.")
-        return
-    print(f"  Selected {len(events)} sample events.")
-
-    all_markets  = ALL_FEATURED_MARKETS[sport] + PROP_MARKETS[sport] + ALT_PROP_MARKETS[sport]
-    coverage     = {m: {"bk_set": set(), "outcomes": 0, "hits": 0} for m in all_markets}
-    sample_ids   = [e.get("id") for e in events]
-    sample_dates = []
-
-    for event in events:
-        eid = event.get("id")
-        cdt = _cdt(event)
-        if cdt:
-            sample_dates.append(str(cdt.date()))
-        snap = _snap_iso(event.get("commence_time"))
-        if not snap:
-            continue
-
-        def _tally(event_obj):
-            if not event_obj:
-                return
-            for bk in event_obj.get("bookmakers") or []:
-                for mkt in bk.get("markets") or []:
-                    mk = mkt.get("key")
-                    if mk not in coverage:
-                        continue
-                    outs = mkt.get("outcomes") or []
-                    if outs:
-                        coverage[mk]["bk_set"].add(bk.get("key"))
-                        coverage[mk]["outcomes"] += len(outs)
-                        coverage[mk]["hits"] += 1
-
-        bulk_data, _ = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key, quota_floor)
-        _tally(next((e for e in bulk_data if e.get("id") == eid), None))
-
-        ef_obj, _ = _fetch_event(sport_key, eid, snap, EVENT_FEATURED_MARKETS[sport], api_key, quota_floor)
-        _tally(ef_obj)
-        time.sleep(1.5)
-
-        if cdt and cdt >= PROPS_CUTOFF:
-            prop_obj, _ = _fetch_event(sport_key, eid, snap, PROP_MARKETS[sport], api_key, quota_floor)
-            _tally(prop_obj)
-            time.sleep(1.5)
-
-            alt_obj, _ = _fetch_event(sport_key, eid, snap, ALT_PROP_MARKETS[sport], api_key, quota_floor)
-            _tally(alt_obj)
-            time.sleep(1.5)
-        else:
-            print(f"    {eid}: before props cutoff. Skipping prop calls.")
-
-    probed_at_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    ids_str   = ",".join(str(i) for i in sample_ids if i)[:500]
-    dates_str = ",".join(sorted(set(sample_dates)))[:200]
-
-    rows = []
-    print(f"\n=== {sport.upper()} Market Coverage ({len(events)} events sampled) ===")
-
-    for mkt in all_markets:
-        cov = coverage[mkt]
-        covered = cov["hits"] >= 3
-        bks = sorted(cov["bk_set"])
-        mtype = (
-            "bulk_featured"   if mkt in BULK_FEATURED_MARKETS
-            else "event_featured" if mkt in EVENT_FEATURED_MARKETS[sport]
-            else "alt_prop"       if mkt in ALT_PROP_MARKETS[sport]
-            else "prop"
-        )
-        print(f"  {'COVERED    ' if covered else 'NOT COVERED'} {mkt:<45} "
-              f"{len(bks)} books  {cov['outcomes']} outcomes  {bks}")
-        rows.append({
-            "sport_key":          sport_key,
-            "market_key":         mkt,
-            "market_type":        mtype,
-            "bookmaker_count":    len(bks),
-            "outcome_count":      cov["outcomes"],
-            "is_covered":         1 if covered else 0,
-            "covered_bookmakers": ",".join(bks)[:200],
-            "sample_event_ids":   ids_str,
-            "sample_dates":       dates_str,
-            "probed_at":          probed_at_str,
-        })
-
-    covered_count = sum(1 for r in rows if r["is_covered"])
-    print(f"\n  Summary: {len(rows)} markets, {covered_count} covered, {len(rows)-covered_count} not covered.")
-    if _remaining_credits is not None:
-        print(f"  Credits remaining: {_remaining_credits:,}")
-
-    df = pd.DataFrame(rows)
-    df = clean_dataframe(df)
-    upsert(engine, df, schema="odds", table="market_probe", keys=["sport_key", "market_key"])
-    print(f"  Written to odds.market_probe ({len(rows)} rows).")
-
-
-# ---------------------------------------------------------------------------
-# Backfill mode
+# BACKFILL mode
+# Reads odds.discovered_events as the game list.
+# Never calls the discovery endpoint.
 # ---------------------------------------------------------------------------
 
 def _load_probe_results(engine, sport_key):
@@ -1059,35 +853,6 @@ def _filter_markets(probe, all_markets, label):
     return covered
 
 
-def _existing_event_ids(engine, sport_key, season_year):
-    rows = _query_rows(
-        engine,
-        "SELECT event_id FROM odds.events WHERE sport_key = :sk AND season_year = :sy",
-        {"sk": sport_key, "sy": season_year},
-    )
-    return {str(r[0]) for r in rows}
-
-
-def _latest_loaded_date(engine, sport_key, season_year):
-    rows = _query_rows(
-        engine,
-        """
-        SELECT CAST(MAX(commence_time) AS DATE)
-        FROM odds.events
-        WHERE sport_key = :sk AND season_year = :sy
-        """,
-        {"sk": sport_key, "sy": season_year},
-    )
-    if rows and rows[0][0] is not None:
-        val = rows[0][0]
-        if isinstance(val, str):
-            return date.fromisoformat(val)
-        if hasattr(val, "date"):
-            return val.date()
-        return val
-    return None
-
-
 def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Backfill: {sport.upper()} Season {season_year} ===")
@@ -1097,45 +862,62 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
     prop_markets = _filter_markets(probe, PROP_MARKETS[sport], "prop")
     alt_markets  = _filter_markets(probe, ALT_PROP_MARKETS[sport], "alt_prop")
 
-    start_date, end_date = _season_date_range(sport, season_year)
-    end_date = min(end_date, date.today() - timedelta(days=1))
-    if start_date > end_date:
-        print("  No past dates in range. Nothing to do.")
+    # Load the full discovered event catalog for this sport/season.
+    # This is the only source of truth for what games exist.
+    with engine.connect() as conn:
+        discovered = conn.execute(
+            text("""
+                SELECT event_id, sport_title, commence_time, home_team, away_team
+                FROM odds.discovered_events
+                WHERE sport_key = :sk AND season_year = :sy
+                  AND commence_time < GETUTCDATE()
+            """),
+            {"sk": sport_key, "sy": season_year},
+        ).fetchall()
+
+    if not discovered:
+        print("  odds.discovered_events is empty for this sport/season.")
+        print("  Run --mode discover first to populate the event catalog.")
         return
 
-    # Trim discovery range to start from the latest already-loaded event date
-    # so we don't re-scan the entire season on every incremental run.
-    latest = _latest_loaded_date(engine, sport_key, season_year)
-    discover_from = max(start_date, latest) if latest else start_date
-    print(f"  Season range: {start_date} to {end_date}  |  Discovering from: {discover_from}")
+    # Load already-completed events.
+    with engine.connect() as conn:
+        loaded_ids = {str(r[0]) for r in conn.execute(
+            text("SELECT event_id FROM odds.events WHERE sport_key = :sk AND season_year = :sy"),
+            {"sk": sport_key, "sy": season_year},
+        ).fetchall()}
 
-    all_dates = _date_list(discover_from, end_date)
-    print(f"  Discovering events across {len(all_dates)} dates (0.5s sleep between calls)...")
+    # Build missing list from discovered catalog.
+    missing = [
+        {"event_id": r[0], "sport_title": r[1],
+         "commence_time": r[2], "home_team": r[3], "away_team": r[4]}
+        for r in discovered if str(r[0]) not in loaded_ids
+    ]
 
-    events_by_id = {}
-    for i, d in enumerate(all_dates):
-        for ev in _discover_events(sport_key, d, api_key, quota_floor):
-            eid = ev.get("id")
-            if eid:
-                events_by_id[eid] = ev
-        if i < len(all_dates) - 1:
-            time.sleep(0.5)
-
-    existing = _existing_event_ids(engine, sport_key, season_year)
-    missing  = [events_by_id[eid] for eid in set(events_by_id) - existing]
     if not missing:
-        print("  All events loaded. Nothing to do.")
+        print(f"  All {len(discovered)} discovered events loaded. Nothing to do.")
         return
 
-    missing.sort(key=lambda e: e.get("commence_time", ""))
+    # Sort oldest first and cap at games_limit.
+    missing.sort(key=lambda e: str(e["commence_time"]))
     work = missing[:games_limit]
-    print(f"  {len(missing)} missing. Processing {len(work)} (oldest first).")
+    print(f"  Discovered: {len(discovered)}  Loaded: {len(loaded_ids)}  "
+          f"Missing: {len(missing)}  Processing: {len(work)} (oldest first).")
 
-    for event in work:
-        eid   = event.get("id")
-        cdt   = _cdt(event)
-        snap  = _snap_iso(event.get("commence_time"))
-        label = f"{event.get('away_team','')} @ {event.get('home_team','')} ({cdt.date() if cdt else '?'})"
+    for ev in work:
+        eid   = ev["event_id"]
+        ctime = ev["commence_time"]
+        # Reconstruct a minimal event dict so helpers work unchanged.
+        event = {
+            "id":            eid,
+            "sport_title":   ev["sport_title"],
+            "commence_time": str(ctime) if not isinstance(ctime, str) else ctime,
+            "home_team":     ev["home_team"],
+            "away_team":     ev["away_team"],
+        }
+        cdt  = _cdt(event)
+        snap = _snap_iso(event["commence_time"])
+        label = f"{ev['away_team'] or ''} @ {ev['home_team'] or ''} ({cdt.date() if cdt else '?'})"
         print(f"\n  {label}")
 
         if not snap:
@@ -1166,7 +948,6 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
                     gl, pp = _parse_bookmakers(p_obj, eid, sport_key, p_ts)
                     gl_all.extend(gl); pp_all.extend(pp)
                 time.sleep(1.5)
-
             if alt_markets:
                 a_obj, a_ts = _fetch_event(sport_key, eid, snap, alt_markets, api_key, quota_floor)
                 if a_obj:
@@ -1176,7 +957,17 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         else:
             print("    Before props cutoff. Skipping prop calls.")
 
-        upsert(engine, clean_dataframe(pd.DataFrame([_parse_event_row(event, sport_key, season_year)])),
+        # Write to odds.events -- this is the "mark as loaded" step.
+        upsert(engine,
+               clean_dataframe(pd.DataFrame([{
+                   "event_id":      eid,
+                   "sport_key":     sport_key,
+                   "sport_title":   ev["sport_title"],
+                   "commence_time": _to_utc_str(event["commence_time"]),
+                   "home_team":     ev["home_team"],
+                   "away_team":     ev["away_team"],
+                   "season_year":   season_year,
+               }])),
                schema="odds", table="events", keys=["event_id"])
 
         gl_n = pp_n = 0
@@ -1196,132 +987,203 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
 
 
 # ---------------------------------------------------------------------------
-# Mappings mode
+# PROBE mode
+# ---------------------------------------------------------------------------
+
+PROBE_BEST_CASE = {
+    "nfl": [date(2024, 11, 7),  date(2024, 12, 12)],
+    "nba": [date(2024, 12, 15), date(2025, 2, 15)],
+    "mlb": [date(2024, 6, 15),  date(2024, 8, 15)],
+}
+PROBE_WORST_CASE = {
+    "nfl": [date(2024, 9, 8),   date(2025, 2, 2)],
+    "nba": [date(2024, 10, 22), date(2025, 6, 1)],
+    "mlb": [date(2024, 3, 20),  date(2024, 9, 28)],
+}
+
+
+def _probe_select_events(sport, sport_key, api_key, quota_floor):
+    candidate_dates = PROBE_BEST_CASE[sport] + PROBE_WORST_CASE[sport]
+    events_by_date = {}
+    for td in candidate_dates:
+        for offset in range(8):
+            check = td + timedelta(days=offset)
+            evs = _api_discover_date(sport_key, check, api_key, quota_floor)
+            if evs:
+                events_by_date[check] = evs
+                break
+
+    selected, wildcard = [], None
+    for td in candidate_dates:
+        actual = next((d for d in events_by_date if abs((d - td).days) <= 7), None)
+        if actual:
+            evs = events_by_date[actual]
+            selected.append(evs[0])
+            for ev in evs:
+                cdt = _cdt(ev)
+                if cdt and (wildcard is None or cdt > _cdt(wildcard)):
+                    wildcard = ev
+
+    if wildcard and wildcard.get("id") not in {e.get("id") for e in selected}:
+        selected.append(wildcard)
+    return selected[:5]
+
+
+def run_probe(sport, api_key, quota_floor, engine):
+    sport_key = SPORT_KEYS[sport]
+    print(f"\n=== Probe: {sport.upper()} ({sport_key}) ===")
+    events = _probe_select_events(sport, sport_key, api_key, quota_floor)
+    if not events:
+        print("  No sample events found. Skipping.")
+        return
+    print(f"  Selected {len(events)} sample events.")
+
+    all_markets = ALL_FEATURED_MARKETS[sport] + PROP_MARKETS[sport] + ALT_PROP_MARKETS[sport]
+    coverage    = {m: {"bk_set": set(), "outcomes": 0, "hits": 0} for m in all_markets}
+    sample_ids, sample_dates = [], []
+
+    for event in events:
+        eid = event.get("id")
+        cdt = _cdt(event)
+        if cdt:
+            sample_dates.append(str(cdt.date()))
+        snap = _snap_iso(event.get("commence_time"))
+        if not snap:
+            continue
+        sample_ids.append(eid)
+
+        def _tally(event_obj):
+            if not event_obj:
+                return
+            for bk in event_obj.get("bookmakers") or []:
+                for mkt in bk.get("markets") or []:
+                    mk = mkt.get("key")
+                    if mk in coverage:
+                        outs = mkt.get("outcomes") or []
+                        if outs:
+                            coverage[mk]["bk_set"].add(bk.get("key"))
+                            coverage[mk]["outcomes"] += len(outs)
+                            coverage[mk]["hits"] += 1
+
+        bulk_data, _ = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key, quota_floor)
+        _tally(next((e for e in bulk_data if e.get("id") == eid), None))
+        ef_obj, _ = _fetch_event(sport_key, eid, snap, EVENT_FEATURED_MARKETS[sport], api_key, quota_floor)
+        _tally(ef_obj)
+        time.sleep(1.5)
+        if cdt and cdt >= PROPS_CUTOFF:
+            p_obj, _ = _fetch_event(sport_key, eid, snap, PROP_MARKETS[sport], api_key, quota_floor)
+            _tally(p_obj)
+            time.sleep(1.5)
+            a_obj, _ = _fetch_event(sport_key, eid, snap, ALT_PROP_MARKETS[sport], api_key, quota_floor)
+            _tally(a_obj)
+            time.sleep(1.5)
+        else:
+            print(f"    {eid}: before props cutoff.")
+
+    probed_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ids_str   = ",".join(str(i) for i in sample_ids if i)[:500]
+    dates_str = ",".join(sorted(set(sample_dates)))[:200]
+    rows = []
+    print(f"\n=== {sport.upper()} Coverage ===")
+    for mkt in all_markets:
+        cov = coverage[mkt]
+        covered = cov["hits"] >= 3
+        bks = sorted(cov["bk_set"])
+        mtype = (
+            "bulk_featured" if mkt in BULK_FEATURED_MARKETS
+            else "event_featured" if mkt in EVENT_FEATURED_MARKETS[sport]
+            else "alt_prop" if mkt in ALT_PROP_MARKETS[sport]
+            else "prop"
+        )
+        print(f"  {'COVERED    ' if covered else 'NOT COVERED'} {mkt:<45} "
+              f"{len(bks)} books  {cov['outcomes']} outcomes")
+        rows.append({
+            "sport_key": sport_key, "market_key": mkt, "market_type": mtype,
+            "bookmaker_count": len(bks), "outcome_count": cov["outcomes"],
+            "is_covered": 1 if covered else 0,
+            "covered_bookmakers": ",".join(bks)[:200],
+            "sample_event_ids": ids_str, "sample_dates": dates_str,
+            "probed_at": probed_at,
+        })
+    upsert(engine, clean_dataframe(pd.DataFrame(rows)),
+           schema="odds", table="market_probe", keys=["sport_key", "market_key"])
+    print(f"  Written {len(rows)} rows to odds.market_probe.")
+
+
+# ---------------------------------------------------------------------------
+# MAPPINGS mode
 # ---------------------------------------------------------------------------
 
 def _normalize_name(name):
-    """Lowercase, strip punctuation, collapse whitespace."""
     if not name:
         return ""
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", "", name.lower())).strip()
 
 
 def run_mappings(sport, engine):
-    """
-    Build or refresh odds.team_map, odds.player_map, odds.event_game_map.
-
-    team_map:       hardcoded dict lookup by full team name. Fast, deterministic.
-    player_map:     exact normalized name match against the sport's players table.
-                    Falls back to None player_id with match_method='no_match'
-                    so the row still exists and the miss is visible.
-    event_game_map: join odds.events to the sport's games table on game_date
-                    + home team tricode derived via team_map.
-    """
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Mappings: {sport.upper()} ===")
 
-    # ----------------------------------------------------------------
-    # 1. Team map (NBA only for now; extend for NFL/MLB later)
-    # ----------------------------------------------------------------
     if sport == "nba":
-        rows = []
+        # Team map
         with engine.connect() as conn:
-            team_rows = conn.execute(
+            tricode_to_id = {r[0]: r[1] for r in conn.execute(
                 text("SELECT team_tricode, team_id FROM nba.teams")
-            ).fetchall()
-        tricode_to_id = {r[0]: r[1] for r in team_rows}
+            ).fetchall()}
+        team_rows = [
+            {"odds_team_name": n, "sport_key": sport_key,
+             "team_tricode": tc, "team_id": tricode_to_id.get(tc)}
+            for n, tc in NBA_TEAM_NAME_TO_TRICODE.items()
+        ]
+        upsert(engine, clean_dataframe(pd.DataFrame(team_rows)),
+               schema="odds", table="team_map", keys=["odds_team_name"])
+        print(f"  team_map: {len(team_rows)} rows.")
 
-        for odds_name, tricode in NBA_TEAM_NAME_TO_TRICODE.items():
-            rows.append({
-                "odds_team_name": odds_name,
-                "sport_key":      sport_key,
-                "team_tricode":   tricode,
-                "team_id":        tricode_to_id.get(tricode),
-            })
-        if rows:
-            upsert(engine, clean_dataframe(pd.DataFrame(rows)),
-                   schema="odds", table="team_map", keys=["odds_team_name"])
-            print(f"  team_map: {len(rows)} rows upserted.")
-
-    # ----------------------------------------------------------------
-    # 2. Player map
-    # ----------------------------------------------------------------
-    if sport == "nba":
-        # Load all known players from the database.
+        # Player map
         with engine.connect() as conn:
             db_players = conn.execute(
                 text("SELECT player_id, player_name FROM nba.players")
             ).fetchall()
-        norm_to_pid   = {}
-        norm_to_name  = {}
-        for pid, pname in db_players:
-            norm = _normalize_name(pname)
-            norm_to_pid[norm]  = pid
-            norm_to_name[norm] = pname
+        norm_to_pid  = {_normalize_name(n): pid  for pid, n in db_players}
+        norm_to_name = {_normalize_name(n): n    for _, n  in db_players}
 
-        # All distinct player names that appear in odds.player_props for this sport.
         with engine.connect() as conn:
-            odds_names = conn.execute(
-                text("""
-                    SELECT DISTINCT player_name
-                    FROM odds.player_props
-                    WHERE sport_key = :sk
-                """),
+            hist_names = [r[0] for r in conn.execute(
+                text("SELECT DISTINCT player_name FROM odds.player_props WHERE sport_key = :sk"),
                 {"sk": sport_key},
-            ).fetchall()
-        odds_names = [r[0] for r in odds_names if r[0]]
-
-        # Also pull names from upcoming_player_props if it has rows.
-        with engine.connect() as conn:
-            upcoming_names = conn.execute(
-                text("""
-                    SELECT DISTINCT player_name
-                    FROM odds.upcoming_player_props
-                    WHERE sport_key = :sk
-                """),
+            ).fetchall() if r[0]]
+            upco_names = [r[0] for r in conn.execute(
+                text("SELECT DISTINCT player_name FROM odds.upcoming_player_props WHERE sport_key = :sk"),
                 {"sk": sport_key},
-            ).fetchall()
-        odds_names = list(set(odds_names + [r[0] for r in upcoming_names if r[0]]))
+            ).fetchall() if r[0]]
+        all_names = list(set(hist_names + upco_names))
 
-        rows = []
+        pm_rows = []
         matched = unmatched = 0
-        for oname in odds_names:
-            norm = _normalize_name(oname)
-            pid  = norm_to_pid.get(norm)
+        for oname in all_names:
+            norm  = _normalize_name(oname)
+            pid   = norm_to_pid.get(norm)
             mname = norm_to_name.get(norm)
-            method = "exact" if pid else "no_match"
-            if pid:
-                matched += 1
+            if pid: matched += 1
             else:
                 unmatched += 1
                 print(f"  [no_match] {oname!r}")
-            rows.append({
-                "odds_player_name": oname,
-                "sport_key":        sport_key,
-                "player_id":        pid,
-                "matched_name":     mname,
-                "match_method":     method,
-            })
+            pm_rows.append({"odds_player_name": oname, "sport_key": sport_key,
+                            "player_id": pid, "matched_name": mname,
+                            "match_method": "exact" if pid else "no_match"})
+        if pm_rows:
+            upsert(engine, clean_dataframe(pd.DataFrame(pm_rows)),
+                   schema="odds", table="player_map", keys=["odds_player_name", "sport_key"])
+            print(f"  player_map: {len(pm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
-        if rows:
-            upsert(engine, clean_dataframe(pd.DataFrame(rows)),
-                   schema="odds", table="player_map",
-                   keys=["odds_player_name", "sport_key"])
-            print(f"  player_map: {len(rows)} rows upserted ({matched} matched, {unmatched} unmatched).")
-
-    # ----------------------------------------------------------------
-    # 3. Event-game map
-    # ----------------------------------------------------------------
-    if sport == "nba":
-        # Fetch all unmapped events for this sport.
+        # Event-game map: only unmapped events
         with engine.connect() as conn:
             unmapped = conn.execute(
                 text("""
                     SELECT e.event_id, e.commence_time, e.home_team, e.away_team
                     FROM odds.events e
                     LEFT JOIN odds.event_game_map m ON m.event_id = e.event_id
-                    WHERE e.sport_key = :sk
-                      AND m.event_id IS NULL
+                    WHERE e.sport_key = :sk AND m.event_id IS NULL
                 """),
                 {"sk": sport_key},
             ).fetchall()
@@ -1329,88 +1191,73 @@ def run_mappings(sport, engine):
         if not unmapped:
             print("  event_game_map: all events already mapped.")
         else:
-            # Fetch all NBA games with their dates and team tricodes.
             with engine.connect() as conn:
                 nba_games = conn.execute(
-                    text("""
-                        SELECT game_id, game_date,
-                               home_team_tricode, away_team_tricode
-                        FROM nba.games
-                    """)
+                    text("SELECT game_id, game_date, home_team_tricode, away_team_tricode FROM nba.games")
                 ).fetchall()
+            game_lookup = {(str(gdate), htc): gid for gid, gdate, htc, atc in nba_games}
 
-            # Build lookup: (game_date_str, home_tricode) -> game_id
-            game_lookup = {}
-            for gid, gdate, htc, atc in nba_games:
-                key = (str(gdate), htc)
-                game_lookup[key] = (gid, atc)
-
-            # Load team_map to convert odds home_team name to tricode.
             with engine.connect() as conn:
-                tmap = conn.execute(
-                    text("""
-                        SELECT odds_team_name, team_tricode
-                        FROM odds.team_map
-                        WHERE sport_key = :sk
-                    """),
+                name_to_tc = {r[0]: r[1] for r in conn.execute(
+                    text("SELECT odds_team_name, team_tricode FROM odds.team_map WHERE sport_key = :sk"),
                     {"sk": sport_key},
-                ).fetchall()
-            name_to_tricode = {r[0]: r[1] for r in tmap}
+                ).fetchall()}
 
-            rows = []
+            egm_rows = []
             matched = unmatched = 0
             for eid, ctime, home_name, away_name in unmapped:
-                # Convert commence_time to a date string in UTC.
                 try:
-                    if isinstance(ctime, str):
-                        ctime_dt = datetime.fromisoformat(ctime.replace("Z", "+00:00"))
-                    else:
-                        ctime_dt = ctime
+                    ctime_dt   = datetime.fromisoformat(str(ctime).replace("Z", "+00:00")) if isinstance(ctime, str) else ctime
                     ctime_date = str(ctime_dt.date()) if hasattr(ctime_dt, "date") else str(ctime_dt)[:10]
                 except Exception:
                     ctime_date = None
-
-                home_tricode = name_to_tricode.get(home_name)
-                away_tricode = name_to_tricode.get(away_name)
-                game_info    = game_lookup.get((ctime_date, home_tricode)) if (ctime_date and home_tricode) else None
-                game_id      = game_info[0] if game_info else None
-
-                if game_id:
-                    matched += 1
-                else:
-                    unmatched += 1
-
-                rows.append({
-                    "event_id":     eid,
-                    "sport_key":    sport_key,
-                    "game_id":      game_id,
-                    "game_date":    ctime_date,
-                    "home_tricode": home_tricode,
-                    "away_tricode": away_tricode,
+                home_tc  = name_to_tc.get(home_name)
+                away_tc  = name_to_tc.get(away_name)
+                game_id  = game_lookup.get((ctime_date, home_tc)) if (ctime_date and home_tc) else None
+                if game_id: matched += 1
+                else:       unmatched += 1
+                egm_rows.append({
+                    "event_id": eid, "sport_key": sport_key, "game_id": game_id,
+                    "game_date": ctime_date, "home_tricode": home_tc,
+                    "away_tricode": away_tc,
                     "match_method": "date_home_tricode" if game_id else "unmatched",
                 })
-
-            if rows:
-                upsert(engine, clean_dataframe(pd.DataFrame(rows)),
-                       schema="odds", table="event_game_map", keys=["event_id"])
-                print(f"  event_game_map: {len(rows)} rows upserted ({matched} matched, {unmatched} unmatched).")
-            if unmatched:
-                print(f"  NOTE: {unmatched} unmatched events. These may be pre-season or games not yet in nba.games.")
+            upsert(engine, clean_dataframe(pd.DataFrame(egm_rows)),
+                   schema="odds", table="event_game_map", keys=["event_id"])
+            print(f"  event_game_map: {len(egm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
 
 # ---------------------------------------------------------------------------
-# Upcoming mode
+# UPCOMING mode
 # ---------------------------------------------------------------------------
+
+def _fetch_upcoming_bulk(sport_key, markets, api_key, quota_floor):
+    _check_quota(quota_floor)
+    data, _ = _request(
+        f"{BASE_URL}/v4/sports/{sport_key}/odds",
+        {"apiKey": api_key, "bookmakers": BOOKMAKERS,
+         "markets": ",".join(markets), "oddsFormat": "american"},
+        quota_floor,
+    )
+    if data is None: return []
+    if isinstance(data, list): return data
+    return data.get("data") or []
+
+
+def _fetch_upcoming_event(sport_key, event_id, markets, api_key, quota_floor):
+    _check_quota(quota_floor)
+    data, _ = _request(
+        f"{BASE_URL}/v4/sports/{sport_key}/events/{event_id}/odds",
+        {"apiKey": api_key, "bookmakers": BOOKMAKERS,
+         "markets": ",".join(markets), "oddsFormat": "american"},
+        quota_floor,
+    )
+    if data is None: return None, None
+    if isinstance(data, dict) and "bookmakers" in data: return data, None
+    return data.get("data"), None
+
 
 def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
-    """
-    Fetch current pre-game odds lines for upcoming events within the next
-    `days_ahead` game days. Truncates and reloads the upcoming_* tables on
-    every run so they always reflect the most current available lines.
-
-    Unlike backfill, this does not consume historical credits -- it hits
-    the live /v4/sports endpoint with no `date` parameter.
-    """
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Upcoming: {sport.upper()} (next {days_ahead} game day(s)) ===")
 
@@ -1419,146 +1266,93 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
     prop_markets = _filter_markets(probe, PROP_MARKETS[sport], "prop")
     alt_markets  = _filter_markets(probe, ALT_PROP_MARKETS[sport], "alt_prop")
 
-    # Fetch all upcoming events via the live bulk endpoint.
-    print("  Fetching upcoming event list...")
-    upcoming_events = _fetch_upcoming_bulk(sport_key, ["h2h"], api_key, quota_floor)
-    if not upcoming_events:
+    all_upcoming = _fetch_upcoming_bulk(sport_key, ["h2h"], api_key, quota_floor)
+    if not all_upcoming:
         print("  No upcoming events found.")
         return
 
-    print(f"  {len(upcoming_events)} upcoming events found.")
-
-    # Filter to events within the days_ahead window.
-    now_utc   = datetime.now(tz=timezone.utc)
-    cutoff    = now_utc + timedelta(days=days_ahead)
-
-    # Find the first game day, then keep only events on that same game day
-    # (or within days_ahead calendar days, whichever interpretation you want).
-    # The stated goal is "only lines for the next game" so we find the earliest
-    # game date and keep all events on that date.
-    events_in_window = []
-    for ev in upcoming_events:
-        cdt = _cdt(ev)
-        if cdt and cdt <= cutoff:
-            events_in_window.append(ev)
-
-    if not events_in_window:
-        print("  No events within the upcoming window.")
+    now_utc = datetime.now(tz=timezone.utc)
+    cutoff  = now_utc + timedelta(days=days_ahead)
+    in_window = [ev for ev in all_upcoming if _cdt(ev) and _cdt(ev) <= cutoff]
+    if not in_window:
+        print("  No events within window.")
         return
 
     if days_ahead <= 1:
-        # Restrict to the earliest game date only (true "next game day" behavior).
-        earliest_date = min(_cdt(ev).date() for ev in events_in_window if _cdt(ev))
-        events_in_window = [ev for ev in events_in_window
-                            if _cdt(ev) and _cdt(ev).date() == earliest_date]
-        print(f"  Restricting to next game day: {earliest_date} ({len(events_in_window)} events).")
+        earliest = min(_cdt(ev).date() for ev in in_window if _cdt(ev))
+        in_window = [ev for ev in in_window if _cdt(ev) and _cdt(ev).date() == earliest]
+        print(f"  Next game day: {earliest} ({len(in_window)} events).")
     else:
-        print(f"  {len(events_in_window)} events within {days_ahead}-day window.")
+        print(f"  {len(in_window)} events in window.")
 
-    # Truncate upcoming tables for this sport before reloading.
-    print("  Truncating upcoming tables for this sport...")
     with engine.begin() as conn:
-        conn.execute(text(
-            "DELETE FROM odds.upcoming_player_props WHERE sport_key = :sk"
-        ), {"sk": sport_key})
-        conn.execute(text(
-            "DELETE FROM odds.upcoming_game_lines WHERE sport_key = :sk"
-        ), {"sk": sport_key})
-        conn.execute(text(
-            "DELETE FROM odds.upcoming_events WHERE sport_key = :sk"
-        ), {"sk": sport_key})
+        for tbl in ("upcoming_player_props", "upcoming_game_lines", "upcoming_events"):
+            conn.execute(text(f"DELETE FROM odds.{tbl} WHERE sport_key = :sk"), {"sk": sport_key})
 
-    snap_ts_str = _to_utc_str(now_utc)
-    gl_total = pp_total = 0
+    snap_ts = _to_utc_str(now_utc)
 
-    # Build team name to tricode lookup for resolving game_id.
     if sport == "nba":
         with engine.connect() as conn:
-            tmap_rows = conn.execute(
+            name_to_tc = {r[0]: r[1] for r in conn.execute(
                 text("SELECT odds_team_name, team_tricode FROM odds.team_map WHERE sport_key = :sk"),
                 {"sk": sport_key},
-            ).fetchall()
-        name_to_tricode = {r[0]: r[1] for r in tmap_rows}
-
-        # Also load upcoming schedule to try to resolve game_id for future games.
-        # nba.schedule contains future games; nba.games only has completed ones.
-        with engine.connect() as conn:
-            sched_rows = conn.execute(
-                text("""
-                    SELECT game_id, game_date, home_team_tricode, away_team_tricode
-                    FROM nba.schedule
-                    WHERE game_date >= :today
-                """),
+            ).fetchall()}
+            future_lookup = {(str(r[1]), r[2]): r[0] for r in conn.execute(
+                text("SELECT game_id, game_date, home_team_tricode FROM nba.schedule WHERE game_date >= :today"),
                 {"today": date.today()},
-            ).fetchall()
-        future_game_lookup = {}
-        for gid, gdate, htc, atc in sched_rows:
-            future_game_lookup[(str(gdate), htc)] = gid
+            ).fetchall()}
+            pid_map = {r[0]: r[1] for r in conn.execute(
+                text("SELECT odds_player_name, player_id FROM odds.player_map WHERE sport_key = :sk AND player_id IS NOT NULL"),
+                {"sk": sport_key},
+            ).fetchall()}
     else:
-        name_to_tricode    = {}
-        future_game_lookup = {}
+        name_to_tc = future_lookup = pid_map = {}
 
-    for event in events_in_window:
-        eid        = event.get("id")
-        cdt        = _cdt(event)
-        home_name  = event.get("home_team")
-        away_name  = event.get("away_team")
-        home_tc    = name_to_tricode.get(home_name) if name_to_tricode else None
-        away_tc    = name_to_tricode.get(away_name) if name_to_tricode else None
-        cdt_date   = str(cdt.date()) if cdt else None
-        game_id    = future_game_lookup.get((cdt_date, home_tc)) if (cdt_date and home_tc) else None
-        label      = f"{away_name or ''} @ {home_name or ''} ({cdt_date or '?'})"
-        print(f"\n  {label}")
+    gl_total = pp_total = 0
+    for event in in_window:
+        eid       = event.get("id")
+        cdt       = _cdt(event)
+        home_name = event.get("home_team")
+        away_name = event.get("away_team")
+        home_tc   = name_to_tc.get(home_name)
+        away_tc   = name_to_tc.get(away_name)
+        cdt_date  = str(cdt.date()) if cdt else None
+        game_id   = future_lookup.get((cdt_date, home_tc)) if (cdt_date and home_tc) else None
+        print(f"\n  {away_name or ''} @ {home_name or ''} ({cdt_date or '?'})")
 
         gl_all, pp_all = [], []
-
-        # Call 1: bulk featured markets
         bulk_data = _fetch_upcoming_bulk(sport_key, BULK_FEATURED_MARKETS, api_key, quota_floor)
         ev_obj = next((e for e in bulk_data if e.get("id") == eid), None)
         if ev_obj:
-            gl, pp = _parse_bookmakers(ev_obj, eid, sport_key, snap_ts_str)
+            gl, pp = _parse_bookmakers(ev_obj, eid, sport_key, snap_ts)
             gl_all.extend(gl); pp_all.extend(pp)
-        else:
-            print("    Not found in bulk response.")
         time.sleep(1.5)
-
-        # Call 2: event featured markets
         if event_feat:
             ef_obj, _ = _fetch_upcoming_event(sport_key, eid, event_feat, api_key, quota_floor)
             if ef_obj:
-                gl, pp = _parse_bookmakers(ef_obj, eid, sport_key, snap_ts_str)
+                gl, pp = _parse_bookmakers(ef_obj, eid, sport_key, snap_ts)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
-
-        # Calls 3 + 4: player props
         if prop_markets:
             p_obj, _ = _fetch_upcoming_event(sport_key, eid, prop_markets, api_key, quota_floor)
             if p_obj:
-                gl, pp = _parse_bookmakers(p_obj, eid, sport_key, snap_ts_str)
+                gl, pp = _parse_bookmakers(p_obj, eid, sport_key, snap_ts)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
-
         if alt_markets:
             a_obj, _ = _fetch_upcoming_event(sport_key, eid, alt_markets, api_key, quota_floor)
             if a_obj:
-                gl, pp = _parse_bookmakers(a_obj, eid, sport_key, snap_ts_str)
+                gl, pp = _parse_bookmakers(a_obj, eid, sport_key, snap_ts)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
 
-        # Write upcoming_events row.
-        ev_row = [{
-            "event_id":      eid,
-            "sport_key":     sport_key,
-            "sport_title":   event.get("sport_title"),
+        upsert(engine, clean_dataframe(pd.DataFrame([{
+            "event_id": eid, "sport_key": sport_key,
+            "sport_title": event.get("sport_title"),
             "commence_time": _to_utc_str(event.get("commence_time")),
-            "home_team":     home_name,
-            "away_team":     away_name,
-            "home_tricode":  home_tc,
-            "away_tricode":  away_tc,
-            "game_id":       game_id,
-        }]
-        upsert(engine, clean_dataframe(pd.DataFrame(ev_row)),
-               schema="odds", table="upcoming_events", keys=["event_id"])
+            "home_team": home_name, "away_team": away_name,
+            "home_tricode": home_tc, "away_tricode": away_tc, "game_id": game_id,
+        }])), schema="odds", table="upcoming_events", keys=["event_id"])
 
         if gl_all:
             upsert(engine, clean_dataframe(pd.DataFrame(gl_all)),
@@ -1566,27 +1360,17 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
                    keys=["event_id", "market_key", "bookmaker_key", "outcome_name"])
             gl_total += len(gl_all)
         if pp_all:
-            # Enrich with player_id from player_map.
             pp_df = pd.DataFrame(pp_all)
-            with engine.connect() as conn:
-                pm_rows = conn.execute(
-                    text("""
-                        SELECT odds_player_name, player_id
-                        FROM odds.player_map
-                        WHERE sport_key = :sk AND player_id IS NOT NULL
-                    """),
-                    {"sk": sport_key},
-                ).fetchall()
-            pid_map = {r[0]: r[1] for r in pm_rows}
             pp_df["player_id"] = pp_df["player_name"].map(pid_map)
             upsert(engine, clean_dataframe(pp_df),
                    schema="odds", table="upcoming_player_props",
                    keys=["event_id", "market_key", "bookmaker_key", "player_name", "outcome_name"])
             pp_total += len(pp_all)
 
-        print(f"    game_lines={len(gl_all)}  player_props={len(pp_all)}  game_id={game_id or 'not resolved'}  credits={_remaining_credits}")
+        print(f"    game_lines={len(gl_all)}  player_props={len(pp_all)}  "
+              f"game_id={game_id or 'not resolved'}  credits={_remaining_credits}")
 
-    print(f"\n  Upcoming totals: {len(events_in_window)} events  game_lines={gl_total}  player_props={pp_total}")
+    print(f"\n  Totals: {len(in_window)} events  game_lines={gl_total}  player_props={pp_total}")
 
 
 # ---------------------------------------------------------------------------
@@ -1595,15 +1379,16 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode",        choices=["probe", "backfill", "mappings", "upcoming"],
+    parser.add_argument("--mode",
+                        choices=["discover", "probe", "backfill", "mappings", "upcoming"],
                         default="backfill")
-    parser.add_argument("--sport",       default="all", choices=["nfl", "nba", "mlb", "all"])
-    parser.add_argument("--season",      type=int, default=None)
-    parser.add_argument("--games",       type=int, default=10)
-    parser.add_argument("--days-ahead",  type=int, default=1, dest="days_ahead",
-                        help="Upcoming mode only: number of calendar days ahead to fetch lines for. "
-                             "Default 1 = next game day only.")
-    parser.add_argument("--quota-floor", type=int, default=50000, dest="quota_floor")
+    parser.add_argument("--sport",      default="all", choices=["nfl", "nba", "mlb", "all"])
+    parser.add_argument("--season",     type=int, default=None)
+    parser.add_argument("--games",      type=int, default=10,
+                        help="Backfill mode: max events to process per run.")
+    parser.add_argument("--days-ahead", type=int, default=1, dest="days_ahead",
+                        help="Upcoming mode: calendar days ahead. Default 1 = next game day.")
+    parser.add_argument("--quota-floor",type=int, default=50000, dest="quota_floor")
     args = parser.parse_args()
 
     api_key = os.environ.get("ODDS_API_KEY")
@@ -1618,7 +1403,9 @@ def main():
 
     for sport in sports:
         season_year = args.season or _default_season(sport)
-        if args.mode == "probe":
+        if args.mode == "discover":
+            run_discover(sport, api_key, args.quota_floor, season_year, engine)
+        elif args.mode == "probe":
             run_probe(sport, api_key, args.quota_floor, engine)
         elif args.mode == "backfill":
             run_backfill(sport, api_key, args.quota_floor, args.games, season_year, engine)
