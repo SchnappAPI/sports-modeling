@@ -1,14 +1,20 @@
 name: NBA Grading
 
 on:
+  schedule:
+    - cron: '30 10 * * *'   # UTC 10:30 = 4:30 AM CST / 5:30 AM CDT, after NBA ETL completes
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'upcoming = grade today lines, backfill = process historical dates'
+        required: false
+        default: 'upcoming'
       date:
-        description: 'Grade a specific date (YYYY-MM-DD). Leave blank to process all missing dates.'
+        description: 'Backfill mode only: grade a specific date (YYYY-MM-DD). Leave blank for auto.'
         required: false
         default: ''
       batch:
-        description: 'Max dates to process per run. Use 50+ for backfill, leave blank for default (10).'
+        description: 'Backfill mode only: max dates per run. Default 10, use 50+ for bulk backfill.'
         required: false
         default: ''
 
@@ -42,11 +48,18 @@ jobs:
 
       - name: Run grading
         run: |
-          ARGS=""
-          if [ -n "${{ github.event.inputs.date }}" ]; then
-            ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          MODE="${{ github.event.inputs.mode }}"
+          if [ -z "$MODE" ]; then MODE="upcoming"; fi
+
+          ARGS="--mode $MODE"
+
+          if [ "$MODE" = "backfill" ]; then
+            if [ -n "${{ github.event.inputs.date }}" ]; then
+              ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+            fi
+            if [ -n "${{ github.event.inputs.batch }}" ]; then
+              ARGS="$ARGS --batch ${{ github.event.inputs.batch }}"
+            fi
           fi
-          if [ -n "${{ github.event.inputs.batch }}" ]; then
-            ARGS="$ARGS --batch ${{ github.event.inputs.batch }}"
-          fi
+
           python grading/grade_props.py $ARGS
