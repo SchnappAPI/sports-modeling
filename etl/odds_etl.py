@@ -22,6 +22,12 @@ Parameter binding
   engine. pyodbc only understands ? placeholders; named params cause
   "SQL contains 0 parameter markers" errors. All parameterised reads use
   engine.connect() + text() + SQLAlchemy binding instead.
+
+Response shapes
+  Call 1 (bulk /odds):          data["data"] is a LIST of event objects.
+  Calls 2-4 (per-event /odds):  data["data"] is a single event DICT.
+  Both shapes are handled: bulk iterates the list; per-event passes the dict
+  directly to _parse_bookmakers, which reads event_obj["bookmakers"].
 """
 
 import argparse
@@ -276,12 +282,17 @@ def _to_utc_str(dt):
 
 
 def clean_dataframe(df):
+    # Replace NaN/NaT with None (SQL NULL) first, before any type coercion.
+    # This must happen before the int-conversion lambda because float NaN
+    # cannot be passed to int() and raises ValueError.
     df = df.where(pd.notna(df), other=None)
     for col in df.select_dtypes(include=["int64", "float64"]).columns:
         df[col] = df[col].apply(
             lambda x: None if x is None
-            else int(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and x == int(x)
-            else float(x)
+            else int(x) if isinstance(x, float) and not pd.isna(x) and x == int(x)
+            else int(x) if isinstance(x, int) and not isinstance(x, bool)
+            else float(x) if isinstance(x, float)
+            else x
         )
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
@@ -435,6 +446,14 @@ def _discover_events_with_fallback(sport_key, target_date, api_key, quota_floor,
 
 # ---------------------------------------------------------------------------
 # Odds fetching
+#
+# _fetch_bulk:  hits /v4/historical/sports/{sport}/odds
+#               data["data"] is a LIST of event objects.
+#               The caller filters by event_id to find the specific event.
+#
+# _fetch_event: hits /v4/historical/sports/{sport}/events/{id}/odds
+#               data["data"] is a single event DICT (not a list).
+#               Passed directly to _parse_bookmakers.
 # ---------------------------------------------------------------------------
 
 def _fetch_bulk(sport_key, snap_iso, markets, api_key, quota_floor):
@@ -476,6 +495,16 @@ def _parse_event_row(event, sport_key, season_year):
 
 
 def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
+    """
+    Parse bookmaker/market/outcome data from an event object.
+
+    event_obj is always a single event dict with a "bookmakers" key.
+    For bulk calls, the caller extracts the matching event from the list first.
+    For per-event calls, data["data"] is already that dict.
+
+    Outcomes with a "description" field are player props (player_name = description).
+    Outcomes without "description" are game lines.
+    """
     snap_ts = _to_utc_str(snap_ts_raw)
     game_lines, player_props = [], []
     for bk in event_obj.get("bookmakers") or []:
@@ -751,6 +780,8 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
 
         gl_all, pp_all = [], []
 
+        # Call 1: bulk featured (h2h, spreads, totals)
+        # Returns data["data"] as a list; find this event by ID.
         bulk_data, bulk_ts = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key, quota_floor)
         ev_obj = next((e for e in bulk_data if e.get("id") == eid), None)
         if ev_obj:
@@ -759,6 +790,8 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         else:
             print("    Not found in bulk response.")
 
+        # Call 2: event featured (team totals, halves, quarters)
+        # Returns data["data"] as a single event dict.
         if event_feat:
             ef_obj, ef_ts = _fetch_event(sport_key, eid, snap, event_feat, api_key, quota_floor)
             if ef_obj:
@@ -767,12 +800,17 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
             time.sleep(1.5)
 
         if cdt and cdt >= PROPS_CUTOFF:
+            # Call 3: standard player props
+            # Returns data["data"] as a single event dict.
             if prop_markets:
                 p_obj, p_ts = _fetch_event(sport_key, eid, snap, prop_markets, api_key, quota_floor)
                 if p_obj:
                     gl, pp = _parse_bookmakers(p_obj, eid, sport_key, p_ts)
                     gl_all.extend(gl); pp_all.extend(pp)
                 time.sleep(1.5)
+
+            # Call 4: alternate props
+            # Returns data["data"] as a single event dict.
             if alt_markets:
                 a_obj, a_ts = _fetch_event(sport_key, eid, snap, alt_markets, api_key, quota_floor)
                 if a_obj:
