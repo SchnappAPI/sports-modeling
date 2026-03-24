@@ -15,6 +15,10 @@ on:
         description: "Season year (NBA/NFL = start year, e.g. 2025 for 2025-26). Leave blank for auto-detect."
         required: false
         default: "2025"
+      snapshots:
+        description: "Discover mode: max calendar dates to walk per run. Default 50."
+        required: false
+        default: "50"
       games:
         description: "Backfill mode: max events per run."
         required: false
@@ -64,6 +68,7 @@ jobs:
         run: |
           FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
           FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'nba' }}"
+          FLAGS="$FLAGS --snapshots ${{ github.event.inputs.snapshots || '50' }}"
           FLAGS="$FLAGS --games ${{ github.event.inputs.games || '20' }}"
           FLAGS="$FLAGS --days-ahead ${{ github.event.inputs.days_ahead || '1' }}"
           FLAGS="$FLAGS --quota-floor ${{ github.event.inputs.quota_floor || '4500000' }}"
