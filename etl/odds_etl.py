@@ -172,6 +172,15 @@ EVENT_FEATURED_MARKETS = {
 PROP_MARKETS     = {"nfl": NFL_PROPS,     "nba": NBA_PROPS,     "mlb": MLB_PROPS}
 ALT_PROP_MARKETS = {"nfl": NFL_ALT_PROPS, "nba": NBA_ALT_PROPS, "mlb": MLB_ALT_PROPS}
 
+# Markets that are always team-level, never player-level.
+# The odds API puts the team name in the outcome description for these markets,
+# which would otherwise cause them to be routed to player_props. Force them
+# to game_lines regardless of whether a description field is present.
+TEAM_LEVEL_MARKETS = {
+    "team_totals", "team_totals_h1", "team_totals_q1",
+    "team_totals_h2", "team_totals_q2", "team_totals_q3", "team_totals_q4",
+}
+
 # ---------------------------------------------------------------------------
 # NBA team name mapping
 # ---------------------------------------------------------------------------
@@ -835,12 +844,25 @@ def _fetch_event(sport_key, event_id, snap_iso, markets, api_key, quota_floor):
 # ---------------------------------------------------------------------------
 
 def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
+    """
+    Parse bookmaker odds from an event object into game_lines and player_props rows.
+
+    Routing logic:
+      - Any market in TEAM_LEVEL_MARKETS always goes to game_lines, even if the
+        odds API populates the outcome description field with a team name.
+        (team_totals and team_totals_h1 use description to identify which team
+        the total applies to, which would otherwise cause them to be misrouted
+        into player_props.)
+      - All other markets: outcomes with a description go to player_props;
+        outcomes without a description go to game_lines.
+    """
     snap_ts = _to_utc_str(snap_ts_raw)
     game_lines, player_props = [], []
     for bk in event_obj.get("bookmakers") or []:
         bk_key, bk_title = bk.get("key"), bk.get("title")
         for mkt in bk.get("markets") or []:
             mkt_key = mkt.get("key")
+            is_team_market = mkt_key in TEAM_LEVEL_MARKETS
             for outcome in mkt.get("outcomes") or []:
                 description = outcome.get("description")
                 base = {
@@ -854,7 +876,7 @@ def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
                     "outcome_point":   outcome.get("point"),
                     "snap_ts":         snap_ts,
                 }
-                if description:
+                if description and not is_team_market:
                     player_props.append({**base, "player_name": description})
                 else:
                     game_lines.append(base)
