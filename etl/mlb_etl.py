@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 # Database connection
 # ---------------------------------------------------------------------------
 
-def get_engine():
+def get_engine(max_retries=3, retry_wait=45):
     server   = os.environ["AZURE_SQL_SERVER"]
     database = os.environ["AZURE_SQL_DATABASE"]
     username = os.environ["AZURE_SQL_USERNAME"]
@@ -60,8 +60,24 @@ def get_engine():
     conn_str = (
         f"mssql+pyodbc://{username}:{password}"
         f"@{server}/{database}?driver={driver}"
+        "&Encrypt=yes&TrustServerCertificate=no"
     )
-    return create_engine(conn_str)
+    engine = create_engine(conn_str, fast_executemany=True)
+    for attempt in range(1, max_retries + 1):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            log.info("Database connection established.")
+            return engine
+        except Exception as exc:
+            if attempt < max_retries:
+                log.warning(
+                    "Connection attempt %d/%d failed: %s. Retrying in %ds...",
+                    attempt, max_retries, exc, retry_wait,
+                )
+                time.sleep(retry_wait)
+            else:
+                raise
 
 # ---------------------------------------------------------------------------
 # Helpers
