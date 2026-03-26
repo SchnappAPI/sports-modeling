@@ -17,6 +17,8 @@ export async function ping(): Promise<void> {
 export interface GameRow {
   gameId: string;
   gameDate: string;
+  gameStatus: number | null;
+  gameStatusText: string | null;
   homeTeamId: number;
   awayTeamId: number;
   homeTeamAbbr: string;
@@ -27,10 +29,9 @@ export interface GameRow {
   total: number | null;
 }
 
-// odds.game_lines and odds.upcoming_game_lines store one row per outcome.
-// Spread = outcome_point where outcome_name matches the home team name.
-// Total  = outcome_point for the Over outcome in the totals market.
-// nba.teams uses team_tricode (not abbreviation) and team_name.
+// Source is nba.schedule, not nba.games. nba.games only contains completed games
+// (populated by box score ETL). nba.schedule contains all games regardless of status.
+// game_status: 1 = upcoming, 2 = in progress, 3 = final.
 export async function getGames(sport: string, date: string): Promise<GameRow[]> {
   const pool = await getPool();
   const result = await pool
@@ -75,23 +76,25 @@ export async function getGames(sport: string, date: string): Promise<GameRow[]> 
          GROUP BY event_id
        )
        SELECT
-         g.game_id          AS gameId,
-         CONVERT(VARCHAR(10), g.game_date, 120) AS gameDate,
-         g.home_team_id     AS homeTeamId,
-         g.away_team_id     AS awayTeamId,
+         s.game_id          AS gameId,
+         CONVERT(VARCHAR(10), s.game_date, 120) AS gameDate,
+         s.game_status      AS gameStatus,
+         s.game_status_text AS gameStatusText,
+         s.home_team_id     AS homeTeamId,
+         s.away_team_id     AS awayTeamId,
          ht.team_tricode    AS homeTeamAbbr,
          at.team_tricode    AS awayTeamAbbr,
          ht.team_name       AS homeTeamName,
          at.team_name       AS awayTeamName,
          bl.spread          AS spread,
          bl.total           AS total
-       FROM nba.games g
-       JOIN nba.teams ht ON ht.team_id = g.home_team_id
-       JOIN nba.teams at ON at.team_id = g.away_team_id
-       LEFT JOIN odds.event_game_map egm ON egm.game_id = g.game_id
+       FROM nba.schedule s
+       JOIN nba.teams ht ON ht.team_id = s.home_team_id
+       JOIN nba.teams at ON at.team_id = s.away_team_id
+       LEFT JOIN odds.event_game_map egm ON egm.game_id = s.game_id
        LEFT JOIN best_lines bl ON bl.event_id = egm.event_id
-       WHERE CONVERT(VARCHAR(10), g.game_date, 120) = @date
-       ORDER BY g.game_date`
+       WHERE CONVERT(VARCHAR(10), s.game_date, 120) = @date
+       ORDER BY s.game_date`
     );
   return result.recordset;
 }
@@ -151,6 +154,8 @@ export interface PlayerAverageRow {
   avg3pm: number | null;
 }
 
+// Joins nba.games (completed games only) intentionally — box scores only exist
+// for finished games, so averaging against nba.schedule would not add anything.
 export async function getPlayerAverages(
   gameId: string,
   lastN: number
