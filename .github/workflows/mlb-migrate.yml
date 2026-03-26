@@ -1,0 +1,41 @@
+name: MLB Batting Stats Migration
+
+on:
+  workflow_dispatch:
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install sqlcmd
+        run: |
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+            | sudo gpg --batch --yes --dearmor \
+            -o /usr/share/keyrings/microsoft-prod.gpg
+          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y mssql-tools18 unixodbc-dev
+          echo "/opt/mssql-tools18/bin" >> $GITHUB_PATH
+
+      - name: Run migration
+        run: |
+          sqlcmd \
+            -S "$AZURE_SQL_SERVER" \
+            -d "$AZURE_SQL_DATABASE" \
+            -U "$AZURE_SQL_USERNAME" \
+            -P "$AZURE_SQL_PASSWORD" \
+            -C \
+            -i etl/mlb_batting_stats_migration.sql \
+            -b
+          echo "Migration complete."
