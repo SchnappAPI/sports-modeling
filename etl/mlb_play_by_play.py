@@ -57,7 +57,7 @@ SEASONS = [2025]
 DEFAULT_BATCH = 50
 API_PAUSE = 0.25
 API_BASE  = "https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics"
-FLUSH_EVERY = 10  # games per DB write; each game ~300 rows = ~3000 rows per flush
+FLUSH_EVERY = 5  # games per DB write; each game ~300 rows = ~3000 rows per flush
 
 # Explicit column types for to_sql. Prevents pandas from inferring VARCHAR(N)
 # from batch data, which causes right-truncation when a later row is longer.
