@@ -30,8 +30,7 @@ export interface GameRow {
 // odds.game_lines and odds.upcoming_game_lines store one row per outcome.
 // Spread = outcome_point where outcome_name matches the home team name.
 // Total  = outcome_point for the Over outcome in the totals market.
-// We union upcoming_game_lines (current dates) with game_lines (historical),
-// join the home_team name before aggregating so there is no subquery inside MAX.
+// nba.teams uses team_tricode (not abbreviation) and team_name.
 export async function getGames(sport: string, date: string): Promise<GameRow[]> {
   const pool = await getPool();
   const result = await pool
@@ -76,16 +75,16 @@ export async function getGames(sport: string, date: string): Promise<GameRow[]> 
          GROUP BY event_id
        )
        SELECT
-         g.game_id        AS gameId,
+         g.game_id          AS gameId,
          CONVERT(VARCHAR(10), g.game_date, 120) AS gameDate,
-         g.home_team_id   AS homeTeamId,
-         g.away_team_id   AS awayTeamId,
-         ht.abbreviation  AS homeTeamAbbr,
-         at.abbreviation  AS awayTeamAbbr,
-         ht.team_name     AS homeTeamName,
-         at.team_name     AS awayTeamName,
-         bl.spread        AS spread,
-         bl.total         AS total
+         g.home_team_id     AS homeTeamId,
+         g.away_team_id     AS awayTeamId,
+         ht.team_tricode    AS homeTeamAbbr,
+         at.team_tricode    AS awayTeamAbbr,
+         ht.team_name       AS homeTeamName,
+         at.team_name       AS awayTeamName,
+         bl.spread          AS spread,
+         bl.total           AS total
        FROM nba.games g
        JOIN nba.teams ht ON ht.team_id = g.home_team_id
        JOIN nba.teams at ON at.team_id = g.away_team_id
@@ -110,6 +109,8 @@ export interface RosterRow {
   isStarter: boolean;
 }
 
+// nba.players has no position column — returning NULL until that changes.
+// nba.teams uses team_tricode not abbreviation.
 export async function getRoster(gameId: string): Promise<RosterRow[]> {
   const pool = await getPool();
   const result = await pool
@@ -117,15 +118,15 @@ export async function getRoster(gameId: string): Promise<RosterRow[]> {
     .input('gameId', mssql.VarChar, gameId)
     .query<RosterRow>(
       `SELECT
-         dl.player_id   AS playerId,
-         p.player_name  AS playerName,
-         dl.team_id     AS teamId,
-         t.abbreviation AS teamAbbr,
-         p.position     AS position,
-         dl.is_starter  AS isStarter
+         dl.player_id      AS playerId,
+         p.player_name     AS playerName,
+         dl.team_id        AS teamId,
+         t.team_tricode    AS teamAbbr,
+         NULL              AS position,
+         dl.is_starter     AS isStarter
        FROM nba.daily_lineups dl
        JOIN nba.players p ON p.player_id = dl.player_id
-       JOIN nba.teams  t ON t.team_id = dl.team_id
+       JOIN nba.teams   t ON t.team_id   = dl.team_id
        WHERE dl.game_id = @gameId
        ORDER BY dl.team_id, dl.is_starter DESC, p.player_name`
     );
@@ -281,15 +282,15 @@ export async function getPlayerGames(
          pbs.game_id       AS gameId,
          CONVERT(VARCHAR(10), g.game_date, 120) AS gameDate,
          CASE WHEN g.home_team_id = pbs.team_id
-              THEN at.abbreviation
-              ELSE ht.abbreviation
+              THEN at.team_tricode
+              ELSE ht.team_tricode
          END               AS opponentAbbr,
          CASE WHEN g.home_team_id = pbs.team_id THEN 1 ELSE 0 END AS isHome,
          pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk,
          pbs.tov, pbs.min, pbs.fg3m, pbs.fgm, pbs.fga,
          pbs.ftm, pbs.fta
        FROM nba.player_box_score_stats pbs
-       JOIN nba.games g  ON g.game_id = pbs.game_id
+       JOIN nba.games g  ON g.game_id  = pbs.game_id
        JOIN nba.teams ht ON ht.team_id = g.home_team_id
        JOIN nba.teams at ON at.team_id = g.away_team_id
        WHERE pbs.player_id = @playerId
