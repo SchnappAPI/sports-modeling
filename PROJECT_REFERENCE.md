@@ -45,11 +45,11 @@ Three layers:
 - Deploy workflow: `.github/workflows/azure-static-web-apps-red-smoke-0bbe1fb10.yml`
 - Deploy secret: `AZURE_STATIC_WEB_APPS_API_TOKEN_RED_SMOKE_0BBE1FB10` (auto-provisioned by Azure)
 - Triggers on push to `main`; `app_location: /web`, api and output locations blank
-- Next.js 15.2.4, React 19
-- Built-in auth: GitHub/Microsoft/Google as identity providers, zero code, configured via `staticwebapp.config.json`
+- Next.js 15.2.8, React 19
+- Built-in auth: GitHub identity provider, configured in `staticwebapp.config.json` — all routes require `authenticated` role, 401 redirects to GitHub login
 - DB connection string in SWA application settings (not in code/repo) — env var name: `AZURE_SQL_CONNECTION_STRING`
 - Next.js API routes auto-deploy as managed Azure Functions — no separate Functions app needed
-- Status: SCAFFOLD DEPLOYED (step 5 done). API routes returning mock data. Step 6 is wiring stubs to real SQL.
+- Status: SCAFFOLD DEPLOYED. API routes returning mock data. Step 7 is wiring stubs to real SQL.
 
 ### Windows VM
 - Manual tasks only. PFF Selenium script runs here when PFF grade data is needed.
@@ -109,17 +109,17 @@ web/
     nba/
       page.tsx         # NBA game view placeholder
       grades/page.tsx  # At a Glance placeholder
-      player/[playerId]/page.tsx  # Player detail placeholder
+      player/[playerId]/page.tsx  # Player detail placeholder (async params — Next.js 15 pattern)
     api/
-      ping/route.ts    # SELECT 1 stub (static mock — step 6 will wire to DB)
-      games/route.ts   # Mock stub
-      roster/route.ts  # Mock stub
-      player-averages/route.ts  # Mock stub
-      boxscore/route.ts         # Mock stub
-      player/route.ts           # Mock stub
-      grades/route.ts           # Mock stub
-      live/route.ts             # Mock stub
-      contextual/route.ts       # Mock stub
+      ping/route.ts    # SELECT 1 stub — WIRED (step 7)
+      games/route.ts   # Mock stub — TO WIRE
+      roster/route.ts  # Mock stub — TO WIRE
+      player-averages/route.ts  # Mock stub — TO WIRE
+      boxscore/route.ts         # Mock stub — TO WIRE
+      player/route.ts           # Mock stub — TO WIRE
+      grades/route.ts           # Mock stub — TO WIRE
+      live/route.ts             # Mock stub — TO BUILD (step 11)
+      contextual/route.ts       # Mock stub — TO BUILD (step 12)
   lib/
     db.ts              # mssql singleton pool reading AZURE_SQL_CONNECTION_STRING
     queries.ts         # All parameterized SQL functions
@@ -127,7 +127,7 @@ web/
   tailwind.config.ts
   postcss.config.mjs
   next.config.mjs      # serverExternalPackages: ['mssql']
-  package.json         # next 15.2.4, react 19, mssql ^11, tailwindcss ^3
+  package.json         # next 15.2.8, react 19, mssql ^11, tailwindcss ^3
   tsconfig.json
 ```
 
@@ -395,7 +395,7 @@ Runs every 15 min UTC 16:00–03:00. Fetches lineups for unconfirmed games start
 - **Data:** ACTIVE. Box scores, PT stats, lineups, players, teams, schedule loading. 2025-26 season backfill in progress.
 - **Odds:** ACTIVE. Nightly cron UTC 10:00 upcoming mode.
 - **Grading:** FUNCTIONAL (hit rate only). Nightly cron UTC 10:30.
-- **Web app:** Scaffold deployed. API routes return mock data. Step 6 is wiring to real SQL.
+- **Web app:** Scaffold deployed (next 15.2.8). API routes return mock data. Step 7 is wiring to real SQL.
 - **Outstanding:** `nba.player_box_score_detail` (ESPN source) not populated. `common.dim_stat` seed (57 rows) incomplete. `flags` + component columns not yet added to `common.daily_grades`.
 
 ### MLB
@@ -415,9 +415,9 @@ Runs every 15 min UTC 16:00–03:00. Fetches lineups for unconfirmed games start
 2. ~~**Add upcoming cron to odds-etl.yml**~~ — DONE.
 3. ~~**Set up Azure Static Web Apps**~~ — DONE. URL: `https://red-smoke-0bbe1fb10.2.azurestaticapps.net`. Placeholder live.
 4. **Install Node.js locally** — ThreatLocker learning mode session, whitelist by hash.
-5. ~~**Build Next.js scaffold**~~ — DONE. Full routing, lib/db.ts, lib/queries.ts, all API stubs, staticwebapp.config.json, Tailwind. Deployed and live.
+5. ~~**Build Next.js scaffold**~~ — DONE. Full routing, lib/db.ts, lib/queries.ts, all API stubs, staticwebapp.config.json, Tailwind. Deployed and live on next 15.2.8.
 6. ~~**Add `AZURE_SQL_CONNECTION_STRING` to SWA application settings**~~ — DONE (prior session).
-7. **Build and validate all API routes** — wire each stub to real SQL against live Azure SQL. Validate responses.
+7. **Build and validate all API routes** — wire each stub to real SQL against live Azure SQL. Validate responses. Start with `/api/ping` then `/api/games`.
 8. **Build NBA web app views** — View 1 through 4. Persistent game strip first, then game research, then player detail, then At a Glance.
 9. **Add keep-alive workflow** — GHA cron every 45 min during active hours.
 10. **Build pregame-refresh.yml + lineup-poll.yml + lineup_poll.py.**
@@ -485,3 +485,4 @@ Runs every 15 min UTC 16:00–03:00. Fetches lineups for unconfirmed games start
 | One `requirements.txt` for all sports | Simpler. Split only if a library conflict arises. |
 | `fast_executemany=False` in grading engine | `True` causes NVARCHAR(MAX) truncation on wide rows. |
 | `mssql` as `serverExternalPackages` in next.config.mjs | Prevents Next.js from bundling mssql, which has native bindings that fail in the SWA build environment. |
+| Next.js dynamic route params typed as `Promise<{...}>` and awaited | Required in Next.js 15 — sync params type causes TypeScript build failure. |
