@@ -358,7 +358,7 @@ def load_play_by_play(engine, seasons, batch_size):
 
     work        = new_games[:batch_size]
     flush_rows  = []
-    flush_every = 25
+    flush_every = 5
 
     for i, (game_pk, game_date) in enumerate(work, 1):
         game_json = fetch_game_json(game_pk)
