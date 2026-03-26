@@ -15,6 +15,9 @@ Incremental logic:
   - Delta = desired minus existing.
   - Oldest --batch games processed per run to stay within GitHub Actions time limits.
 
+Uses get_engine_slow (fast_executemany=False) because the description columns can
+exceed the buffer width that pyodbc pre-calculates under fast_executemany=True.
+
 Backfill scope:
   Currently configured for 2025 only. Extend SEASONS list to go further back.
 
@@ -35,11 +38,7 @@ _repo_root = str(Path(__file__).resolve().parent.parent)
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from etl.db import get_engine, upsert
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+from etl.db import get_engine_slow, upsert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,20 +47,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-SEASONS = [2025]    # Extend to [2023, 2024, 2025] for full historical backfill
-DEFAULT_BATCH = 50  # games per run; raise for backfill, lower for nightly
-API_PAUSE = 0.25    # seconds between game fetches
+SEASONS = [2025]
+DEFAULT_BATCH = 50
+API_PAUSE = 0.25
 API_BASE  = "https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics"
 
-# Explicit SQLAlchemy types for free-text columns whose real-world length
-# can exceed what pandas infers from a single batch of data. Without this,
-# to_sql creates the staging temp table with VARCHAR(N) where N = max string
-# length seen in that batch, which causes right-truncation errors when a
-# longer value appears in a later batch.
 STAGING_DTYPES = {
     "result_description":     VARCHAR(1000),
     "play_event_description": VARCHAR(1000),
@@ -75,10 +65,6 @@ STAGING_DTYPES = {
     "pitch_type_code":        VARCHAR(5),
     "count_balls_strikes":    VARCHAR(5),
 }
-
-# ---------------------------------------------------------------------------
-# DDL
-# ---------------------------------------------------------------------------
 
 DDL_CREATE = """
 IF NOT EXISTS (
@@ -176,10 +162,6 @@ def ensure_table(engine):
     log.info("mlb.play_by_play table ensured.")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def safe_int(val):
     try:
         return int(val) if val is not None else None
@@ -225,10 +207,6 @@ def fetch_game_json(game_pk, retries=3, pause=5):
                 time.sleep(pause)
     return None
 
-
-# ---------------------------------------------------------------------------
-# Parse a single game JSON into play_by_play rows
-# ---------------------------------------------------------------------------
 
 def parse_play_by_play(game_json, game_pk, game_date):
     try:
@@ -341,10 +319,6 @@ def parse_play_by_play(game_json, game_pk, game_date):
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Main load function
-# ---------------------------------------------------------------------------
-
 def load_play_by_play(engine, seasons, batch_size):
     season_list = ", ".join(str(s) for s in seasons)
     with engine.connect() as conn:
@@ -415,24 +389,18 @@ def load_play_by_play(engine, seasons, batch_size):
     log.info("play_by_play load complete.")
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch",   type=int, default=DEFAULT_BATCH,
-                        help="Max games to process per run (default: 50).")
-    parser.add_argument("--seasons", type=int, nargs="+", default=None,
-                        help="Override season list. E.g. --seasons 2023 2024 2025.")
+    parser.add_argument("--batch",   type=int, default=DEFAULT_BATCH)
+    parser.add_argument("--seasons", type=int, nargs="+", default=None)
     args = parser.parse_args()
 
     seasons = args.seasons or SEASONS
     log.info("=== MLB Play-by-Play ETL started ===")
     log.info("Seasons: %s  Batch: %d", seasons, args.batch)
 
-    engine = get_engine()
+    engine = get_engine_slow()
     ensure_table(engine)
     load_play_by_play(engine, seasons, args.batch)
 

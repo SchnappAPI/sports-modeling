@@ -4,8 +4,8 @@ import time
 from sqlalchemy import create_engine, text
 
 
-def get_engine(max_retries=3, retry_wait=45):
-    conn_str = (
+def _build_conn_str():
+    return (
         f"mssql+pyodbc://{os.environ['AZURE_SQL_USERNAME']}:"
         f"{os.environ['AZURE_SQL_PASSWORD']}@"
         f"{os.environ['AZURE_SQL_SERVER']}/"
@@ -14,8 +14,38 @@ def get_engine(max_retries=3, retry_wait=45):
         "&Encrypt=yes&TrustServerCertificate=no"
     )
 
-    engine = create_engine(conn_str, fast_executemany=True)
 
+def get_engine(max_retries=3, retry_wait=45):
+    """
+    Returns a SQLAlchemy engine with fast_executemany=True.
+    Use for all normal upserts where column widths are numeric or
+    short fixed-width strings that pandas infers correctly.
+    """
+    engine = create_engine(_build_conn_str(), fast_executemany=True)
+    for i in range(max_retries):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return engine
+        except Exception:
+            if i == max_retries - 1:
+                raise
+            time.sleep(retry_wait)
+
+
+def get_engine_slow(max_retries=3, retry_wait=45):
+    """
+    Returns a SQLAlchemy engine with fast_executemany=False.
+
+    Use when inserting into staging tables that contain long VARCHAR columns
+    (e.g. mlb.play_by_play description fields). fast_executemany=True causes
+    pyodbc to pre-calculate buffer sizes from the first row in each batch and
+    ignores SQLAlchemy dtype overrides, producing right-truncation errors when
+    a later row in the same batch contains a longer string.
+
+    Also required for NVARCHAR(MAX) columns (see grading engine notes).
+    """
+    engine = create_engine(_build_conn_str(), fast_executemany=False)
     for i in range(max_retries):
         try:
             with engine.connect() as conn:
@@ -31,20 +61,14 @@ def upsert(engine, df, schema, table, keys, dtype=None):
     """
     Upsert a DataFrame into a permanent table using a SQL Server MERGE statement.
 
-    dtype (optional): dict mapping column name -> SQLAlchemy type, passed directly
-    to to_sql. Use this to override pandas' inferred column types on the staging
-    table when the inferred size would be too narrow for the actual data.
-    Example: {"result_description": sqlalchemy.types.VARCHAR(1000)}
+    dtype (optional): dict mapping column name -> SQLAlchemy type, passed to
+    to_sql for staging table creation. Only effective when engine was created
+    with fast_executemany=False (use get_engine_slow for wide VARCHAR tables).
 
     Staging pattern:
-      1. Explicitly drop the temp table if it exists from a previous call in
-         this session. This avoids SQLAlchemy's reflection path, which cannot
-         see SQL Server temp tables and raises InvalidRequestError when
-         if_exists='replace' is used.
-      2. Create the temp table fresh via to_sql with if_exists='append'.
-         The table does not exist at this point, so 'append' behaves identically
-         to 'replace' but skips the reflect-and-drop step entirely.
-      3. MERGE from the staging table into the destination table.
+      1. Drop temp table if it exists from a previous call in this session.
+      2. Create fresh via to_sql with if_exists='append'.
+      3. MERGE from staging into destination.
     """
     staging = f"#stage_{table}"
 
