@@ -1,6 +1,8 @@
 name: Odds ETL
 
 on:
+  schedule:
+    - cron: '0 10 * * *'   # UTC 10:00 = 4:00 AM CST / 5:00 AM CDT, 30 min before grading
   workflow_dispatch:
     inputs:
       mode:
@@ -66,14 +68,20 @@ jobs:
       - name: Build CLI flags
         id: flags
         run: |
-          FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
-          FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'nba' }}"
-          FLAGS="$FLAGS --snapshots ${{ github.event.inputs.snapshots || '50' }}"
-          FLAGS="$FLAGS --games ${{ github.event.inputs.games || '20' }}"
-          FLAGS="$FLAGS --days-ahead ${{ github.event.inputs.days_ahead || '1' }}"
-          FLAGS="$FLAGS --quota-floor ${{ github.event.inputs.quota_floor || '4500000' }}"
-          SEASON="${{ github.event.inputs.season }}"
-          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
+          # Scheduled runs always execute upcoming mode for NBA.
+          # Manual dispatch uses the provided inputs.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            FLAGS="--mode upcoming --sport nba --days-ahead 1 --quota-floor 4500000"
+          else
+            FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
+            FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'nba' }}"
+            FLAGS="$FLAGS --snapshots ${{ github.event.inputs.snapshots || '50' }}"
+            FLAGS="$FLAGS --games ${{ github.event.inputs.games || '20' }}"
+            FLAGS="$FLAGS --days-ahead ${{ github.event.inputs.days_ahead || '1' }}"
+            FLAGS="$FLAGS --quota-floor ${{ github.event.inputs.quota_floor || '4500000' }}"
+            SEASON="${{ github.event.inputs.season }}"
+            [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
+          fi
           echo "flags=$FLAGS" >> $GITHUB_OUTPUT
 
       - name: Run Odds ETL
