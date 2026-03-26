@@ -197,7 +197,7 @@ def safe_float(val):
 def safe_bool(val):
     if val is None:
         return None
-    if isinstance(val, (bool, int)):
+    if isinstance(val, (bool, int, float)):
         return 1 if val else 0
     if isinstance(val, str):
         return 1 if val.lower() in ("true", "1", "yes") else 0
