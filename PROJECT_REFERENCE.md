@@ -55,8 +55,8 @@ The system has three layers:
 .github/workflows/
   nba-etl.yml          # Scheduled nightly + manual dispatch. Status: ACTIVE
   mlb-etl.yml          # Manual dispatch only. Status: INCOMPLETE
-  odds-etl.yml         # Manual dispatch only (modes: discover/probe/backfill/mappings/upcoming). Status: ACTIVE
-  grading.yml          # Grading model. Status: EXISTS, needs scheduling review
+  odds-etl.yml         # Nightly cron (UTC 10:00, upcoming/nba) + manual dispatch. Status: ACTIVE
+  grading.yml          # Nightly cron (UTC 10:30) + manual dispatch. Status: ACTIVE
   nba-clear.yml        # Utility: clears NBA tables. Manual only.
   db_inventory.yml     # Utility: DB inventory. Manual only.
   grades_sample.yml    # Prototype. Not production.
@@ -67,7 +67,7 @@ etl/
   nba_etl.py           # NBA ETL. Status: ACTIVE, 2025-26 season backfill in progress
   mlb_etl.py           # MLB ETL. Status: INCOMPLETE
   nfl_etl.py           # NFL ETL script exists but no workflow file. Status: BUILT, NOT AUTOMATED
-  odds_etl.py          # Odds ETL (The Odds API). Status: ACTIVE, manual-only
+  odds_etl.py          # Odds ETL (The Odds API). Status: ACTIVE, nightly cron for upcoming mode
   nba_clear.py         # Utility: truncates NBA tables
   nba_add_indexes.sql  # Index DDL for NBA tables
   db_inventory.py      # Inventory script
@@ -159,9 +159,8 @@ All writes go through `etl/db.py:upsert()`. Creates a `#stage_{table}` temp tabl
 ### Odds ETL Specifics
 - Source: The Odds API (`ODDS_API_KEY` secret)
 - Modes: `discover` (walk calendar), `probe` (fetch lines for known events), `backfill` (historical props), `mappings` (build player name map), `upcoming` (today's lines)
-- No cron schedule — currently manual dispatch only
-- `upcoming` mode must be run before each day's grading to populate `odds.upcoming_player_props`
-- Needs a nightly cron added to run `upcoming` mode automatically each morning before grading
+- Nightly cron: UTC 10:00 (4:00 AM CST / 5:00 AM CDT), runs `upcoming` mode for NBA, 30 minutes before grading
+- Manual dispatch: all modes available with full input controls
 
 ---
 
@@ -258,14 +257,14 @@ Not yet decided. Three separate files (one per sport) is simpler to build and de
 
 ### NBA
 - **Data:** Active. Box scores, PT stats, lineups, players, teams, schedule all loading. 2025-26 season backfill in progress.
-- **Odds:** Active manually. `upcoming` mode needs nightly cron.
-- **Grading:** Functional for hit rate component. Runs on grading.yml (needs scheduling review).
+- **Odds:** Active. Nightly cron running `upcoming` mode at UTC 10:00.
+- **Grading:** Functional for hit rate component. Nightly cron at UTC 10:30.
 - **Dashboard:** Not started. Build here first.
 - **Outstanding:** `nba.player_box_score_detail` (ESPN source) not yet populated. `common.dim_stat` seed (57 rows) not complete — blocks `player_box_score_stats` FK if enabled.
 
 ### MLB
 - **Data:** Historical data loaded. ETL script exists (`mlb_etl.py`) but marked incomplete. No automated schedule.
-- **Odds:** Same as NBA — manual only.
+- **Odds:** Manual only.
 - **Grading:** Not yet wired up (grading script is NBA-only currently).
 - **Dashboard:** Not started. Comes after NBA.
 - **Outstanding:** ETL needs completion and a workflow file with cron.
@@ -273,7 +272,7 @@ Not yet decided. Three separate files (one per sport) is simpler to build and de
 ### NFL
 - **Data:** ETL script (`nfl_etl.py`) built using `nflreadpy`. Schema created. No workflow file — not automated.
 - **PFF grades:** Require manual Selenium script on Windows VM. CSV column headers not yet confirmed — DDL cannot be finalized until confirmed.
-- **Odds:** Same as NBA — manual only.
+- **Odds:** Manual only.
 - **Grading:** Not yet wired up.
 - **Dashboard:** Not started. Comes after NBA and MLB.
 - **Outstanding:** Create `nfl-etl.yml`. Confirm PFF CSV columns before finalizing DDL.
@@ -285,7 +284,7 @@ Not yet decided. Three separate files (one per sport) is simpler to build and de
 This is the order that minimizes rework and delivers usable value fastest.
 
 1. **Stabilize NBA data pipeline** — confirm backfill is current, `upcoming` mode running reliably, grading workflow scheduled correctly.
-2. **Add `upcoming` cron to odds-etl.yml** — needs to run each morning before grading so `odds.upcoming_player_props` is populated.
+2. ~~**Add `upcoming` cron to odds-etl.yml**~~ — DONE. Nightly cron at UTC 10:00 runs `upcoming` mode for NBA before grading.
 3. **Build NBA dashboard pages** — Page 1 through 4 in Power BI against live NBA + odds data.
 4. **Expand grading model** — add matchup defense, recent trend, regression metric as additional grade columns in `common.daily_grades`. Add composite weighted grade.
 5. **Complete MLB ETL** — finish script, add `mlb-etl.yml` with cron, backfill.
@@ -301,7 +300,7 @@ This is the order that minimizes rework and delivers usable value fastest.
 | Issue | Status |
 |-------|--------|
 | Webshare proxy returns 502 for `nba_api` wrapper calls | Workaround in place: eliminated proxy dependency for teams, players, game discovery. Proxy only used for box score calls via monkey-patch. |
-| Odds ETL has no nightly cron | Needs `upcoming` mode added to a schedule so props are ready each morning before grading runs |
+| ~~Odds ETL has no nightly cron~~ | RESOLVED. Nightly cron at UTC 10:00 runs `upcoming` mode for NBA before grading. |
 | NFL workflow file missing | `nfl_etl.py` exists but `.github/workflows/nfl-etl.yml` does not |
 | PFF DDL not finalized | Pending confirmation of actual CSV column headers from Selenium script run on VM |
 | Power BI has zero measures | All pages and calculations still need to be built |
@@ -322,3 +321,4 @@ This is the order that minimizes rework and delivers usable value fastest.
 | DELETE not TRUNCATE in teardown scripts | TRUNCATE blocked by FK constraints even on empty child tables in SQL Server |
 | FanDuel as sole grading bookmaker | Reference bookmaker; most complete prop line coverage. Schema retains `bookmaker_key` for future extension. |
 | One `requirements.txt` for all sports | Simpler; create sport-specific file only if a library conflict arises |
+| Odds ETL cron uses `github.event_name == 'schedule'` branch in flags step | Scheduled runs hard-wire `upcoming/nba/days-ahead=1`; manual dispatch retains full input control without a separate job |
