@@ -1,7 +1,7 @@
 """
 mlb_etl.py
 
-Loads all MLB data from the mlb-statsapi library into Azure SQL in a single pass.
+Loads all MLB data from the MLB Stats API into Azure SQL in a single pass.
 
 Load order (respects foreign key dependencies):
     1. mlb.teams                  - Team reference. Truncate and reload each run.
@@ -12,13 +12,25 @@ Load order (respects foreign key dependencies):
     6. mlb.player_season_batting  - Season cumulative batting snapshot. Truncate and reload.
     7. mlb.pitcher_season_stats   - Season cumulative pitching snapshot. Truncate and reload.
 
+Source endpoint for box scores (steps 3-5):
+    https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics
+
+    Using /withMetrics instead of the statsapi.boxscore_data wrapper gives us
+    access to liveData.boxscore.teams.{side}.players, which contains additional
+    per-batter fields not available in the summary endpoint:
+      fly_outs, ground_outs, air_outs, pop_outs, line_outs,
+      total_bases, games_played, plate_appearances
+
+    The migration script etl/mlb_batting_stats_migration.sql must be run once
+    before deploying this version to add those columns to the table.
+
 Teams and players are always fully rebuilt from the API. Foreign key constraints on
 the child tables (games, batting_stats, pitching_stats, season snapshots) have been
 dropped via drop_mlb_fk_constraints.sql, so teams and players can be reloaded without
 clearing box score history.
 
-Box score tables use upsert logic. Games already present in batting_stats are skipped,
-so only new games are fetched from the API on each run.
+Box score tables use upsert logic. Games already present in mlb.batting_stats are
+skipped, so only new games are fetched from the API on each run.
 
 Historical box score load: 2023, 2024, and current season.
 Season snapshot tables always reflect the current season only.
@@ -28,13 +40,22 @@ Credentials are injected as environment variables from GitHub Secrets.
 """
 
 import os
+import sys
 import time
 import logging
 from datetime import date, datetime
+from pathlib import Path
 
 import pandas as pd
+import requests
 import statsapi
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+
+_repo_root = str(Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from etl.db import get_engine, upsert
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -46,38 +67,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Database connection
-# ---------------------------------------------------------------------------
-
-def get_engine(max_retries=3, retry_wait=45):
-    server   = os.environ["AZURE_SQL_SERVER"]
-    database = os.environ["AZURE_SQL_DATABASE"]
-    username = os.environ["AZURE_SQL_USERNAME"]
-    password = os.environ["AZURE_SQL_PASSWORD"]
-    driver   = "ODBC+Driver+18+for+SQL+Server"
-    conn_str = (
-        f"mssql+pyodbc://{username}:{password}"
-        f"@{server}/{database}?driver={driver}"
-        "&Encrypt=yes&TrustServerCertificate=no"
-    )
-    engine = create_engine(conn_str, fast_executemany=True)
-    for attempt in range(1, max_retries + 1):
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            log.info("Database connection established.")
-            return engine
-        except Exception as exc:
-            if attempt < max_retries:
-                log.warning(
-                    "Connection attempt %d/%d failed: %s. Retrying in %ds...",
-                    attempt, max_retries, exc, retry_wait,
-                )
-                time.sleep(retry_wait)
-            else:
-                raise
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,6 +82,22 @@ def api_get(endpoint, params, retries=3, pause=5):
             if attempt < retries:
                 time.sleep(pause)
     raise RuntimeError(f"API call to {endpoint} failed after {retries} attempts.")
+
+
+def fetch_game_json(game_pk, retries=3, pause=5):
+    """Fetch the full /withMetrics JSON for a game. Returns None on failure."""
+    url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics"
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            log.warning("withMetrics fetch failed for game_pk %d (attempt %d/%d): %s",
+                        game_pk, attempt, retries, exc)
+            if attempt < retries:
+                time.sleep(pause)
+    return None
 
 
 def safe_int(val):
@@ -128,11 +133,6 @@ def parse_innings_pitched(ip_str):
 
 
 def validate_dataframe(df, required_cols, context):
-    """
-    Return True if df is non-empty and contains all required columns.
-    Logs a descriptive warning and returns False otherwise.
-    Called before any dropna or load operation.
-    """
     if df.empty:
         log.warning("No data returned for %s, skipping load.", context)
         return False
@@ -144,52 +144,6 @@ def validate_dataframe(df, required_cols, context):
         )
         return False
     return True
-
-
-def upsert(engine, df, schema, table, key_cols):
-    """
-    Upsert rows from df into schema.table.
-    Rows matching key_cols are updated. New rows are inserted.
-    Uses a named staging table in dbo that is dropped after the MERGE.
-    """
-    if df.empty:
-        log.info("Upsert skipped: empty dataframe for %s.%s", schema, table)
-        return
-
-    staging_name = f"stage_{table}"
-    full_table   = f"[{schema}].[{table}]"
-
-    df.to_sql(
-        staging_name,
-        engine,
-        schema="dbo",
-        if_exists="replace",
-        index=False,
-        chunksize=200,
-    )
-
-    non_key_cols = [c for c in df.columns if c not in key_cols and c != "created_at"]
-    key_join     = " AND ".join(f"t.[{c}] = s.[{c}]" for c in key_cols)
-    update_set   = ", ".join(f"t.[{c}] = s.[{c}]" for c in non_key_cols)
-    insert_cols  = ", ".join(f"[{c}]" for c in df.columns if c != "created_at")
-    insert_vals  = ", ".join(f"s.[{c}]" for c in df.columns if c != "created_at")
-
-    merge_sql = f"""
-        MERGE {full_table} AS t
-        USING [dbo].[{staging_name}] AS s
-            ON {key_join}
-        WHEN MATCHED THEN
-            UPDATE SET {update_set}
-        WHEN NOT MATCHED BY TARGET THEN
-            INSERT ({insert_cols})
-            VALUES ({insert_vals});
-    """
-
-    with engine.begin() as conn:
-        conn.execute(text(merge_sql))
-        conn.execute(text(f"DROP TABLE IF EXISTS [dbo].[{staging_name}]"))
-
-    log.info("Upserted %d rows into %s.%s", len(df), schema, table)
 
 
 def truncate_and_load(engine, df, schema, table):
@@ -296,7 +250,7 @@ def load_players(engine, seasons):
     truncate_and_load(engine, df, "mlb", "players")
 
 # ---------------------------------------------------------------------------
-# 3 + 4 + 5. Games, batting_stats, pitching_stats in a single pass per season
+# 3 + 4 + 5. Games, batting_stats, pitching_stats via /withMetrics
 # ---------------------------------------------------------------------------
 
 def build_game_row(game, team_abbr, away_pitcher_id, home_pitcher_id):
@@ -350,90 +304,145 @@ def build_game_row(game, team_abbr, away_pitcher_id, home_pitcher_id):
     }
 
 
-def parse_boxscore(game, boxscore):
+def _clean_float(val):
+    """Return None for dashes/empty, otherwise float."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if s in ("", "-", ".---", "-.--"):
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_boxscore_from_json(game, game_json):
     """
-    Extract pitcher IDs, batter rows, and pitcher rows from a boxscore_data result.
-    Starting pitcher IDs come from the first non-header row in each pitcher list.
+    Extract pitcher IDs, batter rows, and pitcher rows from the full /withMetrics JSON.
+
+    Batting data sourced from liveData.boxscore.teams.{side}.players — richer than
+    the summary boxscore endpoint. Includes fly_outs, ground_outs, air_outs, pop_outs,
+    line_outs, total_bases, games_played, plate_appearances.
+
+    Pitching data sourced from liveData.boxscore.teams.{side}.pitchers list.
+
     Returns (away_starter_id, home_starter_id, batter_rows, pitcher_rows).
     """
     game_pk   = game["game_id"]
     game_date = game["game_date"]
 
+    try:
+        live_boxscore = game_json["liveData"]["boxscore"]["teams"]
+    except (KeyError, TypeError):
+        log.warning("game_pk %d: liveData.boxscore not found in /withMetrics response.", game_pk)
+        return None, None, [], []
+
     batter_rows  = []
     pitcher_rows = []
-
     away_starter_id = None
     home_starter_id = None
 
-    for side_key, is_away in [("awayPitchers", True), ("homePitchers", False)]:
-        for p in boxscore.get(side_key, []):
-            if p.get("personId", 0) != 0:
-                if is_away:
-                    away_starter_id = p["personId"]
-                else:
-                    home_starter_id = p["personId"]
-                break
+    sides = [
+        ("away", game["away_id"], "A"),
+        ("home", game["home_id"], "H"),
+    ]
 
-    for side_key, team_id_key, side_label in [
-        ("awayPitchers", "away_id", "A"),
-        ("homePitchers", "home_id", "H"),
-    ]:
-        team_id = game[team_id_key]
-        for p in boxscore.get(side_key, []):
-            if p.get("personId", 0) == 0:
+    for side_key, team_id, side_label in sides:
+        side_data = live_boxscore.get(side_key, {})
+        players   = side_data.get("players", {})  # dict keyed by "ID{player_id}"
+        pitchers  = side_data.get("pitchers", [])  # list of player_id ints
+
+        # Starting pitcher = first pitcher_id in the list
+        starter_id = pitchers[0] if pitchers else None
+        if side_label == "A":
+            away_starter_id = starter_id
+        else:
+            home_starter_id = starter_id
+
+        # --- Batters ---
+        for player_key, player_data in players.items():
+            batting_order = player_data.get("battingOrder")
+            if batting_order is None:
+                continue  # pitchers and bench-only players have no batting order
+
+            stats   = player_data.get("stats", {}).get("batting", {})
+            person  = player_data.get("person", {})
+            pos     = player_data.get("position", {})
+            pid     = person.get("id")
+            if not pid:
                 continue
-            pitcher_rows.append({
-                "pitcher_game_id": f"{p['personId']}-{game_pk}",
+
+            batter_rows.append({
+                "batter_game_id":  f"{pid}-{game_pk}-{team_id}",
                 "game_pk":         game_pk,
                 "game_date":       game_date,
-                "player_id":       p["personId"],
+                "player_id":       pid,
                 "team_id":         team_id,
                 "side":            side_label,
-                "innings_pitched": parse_innings_pitched(p.get("ip")),
-                "hits_allowed":    safe_int(p.get("h")),
-                "runs_allowed":    safe_int(p.get("r")),
-                "earned_runs":     safe_int(p.get("er")),
-                "walks":           safe_int(p.get("bb")),
-                "strikeouts":      safe_int(p.get("k")),
-                "hr_allowed":      safe_int(p.get("hr")),
-                "era":             safe_float(p.get("era")),
-                "pitches":         safe_int(p.get("p")),
-                "strikes":         safe_int(p.get("s")),
-                "note":            p.get("note", "").strip() or None,
+                "position":        pos.get("abbreviation"),
+                "batting_order":   safe_int(batting_order),
+                "games_played":    safe_int(stats.get("gamesPlayed")),
+                "plate_appearances": safe_int(stats.get("plateAppearances")),
+                "at_bats":         safe_int(stats.get("atBats")),
+                "runs":            safe_int(stats.get("runs")),
+                "hits":            safe_int(stats.get("hits")),
+                "doubles":         safe_int(stats.get("doubles")),
+                "triples":         safe_int(stats.get("triples")),
+                "home_runs":       safe_int(stats.get("homeRuns")),
+                "total_bases":     safe_int(stats.get("totalBases")),
+                "rbi":             safe_int(stats.get("rbi")),
+                "stolen_bases":    safe_int(stats.get("stolenBases")),
+                "walks":           safe_int(stats.get("baseOnBalls")),
+                "intentional_walks": safe_int(stats.get("intentionalWalks")),
+                "strikeouts":      safe_int(stats.get("strikeOuts")),
+                "hit_by_pitch":    safe_int(stats.get("hitByPitch")),
+                "left_on_base":    safe_int(stats.get("leftOnBase")),
+                "sac_bunts":       safe_int(stats.get("sacBunts")),
+                "sac_flies":       safe_int(stats.get("sacFlies")),
+                "fly_outs":        safe_int(stats.get("flyOuts")),
+                "ground_outs":     safe_int(stats.get("groundOuts")),
+                "air_outs":        safe_int(stats.get("airOuts")),
+                "pop_outs":        safe_int(stats.get("popOuts")),
+                "line_outs":       safe_int(stats.get("lineOuts")),
+                "batting_avg":     _clean_float(stats.get("avg")),
+                "obp":             _clean_float(stats.get("obp")),
+                "slg":             _clean_float(stats.get("slg")),
+                "ops":             _clean_float(stats.get("ops")),
             })
 
-    for side_key, team_id_key, side_label in [
-        ("awayBatters", "away_id", "A"),
-        ("homeBatters", "home_id", "H"),
-    ]:
-        team_id = game[team_id_key]
-        for b in boxscore.get(side_key, []):
-            if b.get("personId", 0) == 0:
+        # --- Pitchers ---
+        # Pitcher stats are in the same players dict, but we use the pitchers list
+        # to identify who pitched and in what order.
+        for pid in pitchers:
+            pkey  = f"ID{pid}"
+            pdata = players.get(pkey, {})
+            if not pdata:
                 continue
-            batter_rows.append({
-                "batter_game_id":  f"{b['personId']}-{game_pk}-{team_id}",
+            stats = pdata.get("stats", {}).get("pitching", {})
+
+            note = pdata.get("gameStatus", {})
+            # Determine if starter (first in list) for the note field
+            is_starter = (pid == starter_id)
+
+            pitcher_rows.append({
+                "pitcher_game_id": f"{pid}-{game_pk}",
                 "game_pk":         game_pk,
                 "game_date":       game_date,
-                "player_id":       b["personId"],
+                "player_id":       pid,
                 "team_id":         team_id,
                 "side":            side_label,
-                "position":        b.get("position"),
-                "batting_order":   safe_int(b.get("battingOrder")),
-                "at_bats":         safe_int(b.get("ab")),
-                "runs":            safe_int(b.get("r")),
-                "hits":            safe_int(b.get("h")),
-                "doubles":         safe_int(b.get("doubles")),
-                "triples":         safe_int(b.get("triples")),
-                "home_runs":       safe_int(b.get("hr")),
-                "rbi":             safe_int(b.get("rbi")),
-                "stolen_bases":    safe_int(b.get("sb")),
-                "walks":           safe_int(b.get("bb")),
-                "strikeouts":      safe_int(b.get("k")),
-                "left_on_base":    safe_int(b.get("lob")),
-                "batting_avg":     safe_float(b.get("avg")),
-                "obp":             safe_float(b.get("obp")),
-                "slg":             safe_float(b.get("slg")),
-                "ops":             safe_float(b.get("ops")),
+                "innings_pitched": parse_innings_pitched(stats.get("inningsPitched")),
+                "hits_allowed":    safe_int(stats.get("hits")),
+                "runs_allowed":    safe_int(stats.get("runs")),
+                "earned_runs":     safe_int(stats.get("earnedRuns")),
+                "walks":           safe_int(stats.get("baseOnBalls")),
+                "strikeouts":      safe_int(stats.get("strikeOuts")),
+                "hr_allowed":      safe_int(stats.get("homeRuns")),
+                "era":             _clean_float(stats.get("era")),
+                "pitches":         safe_int(stats.get("numberOfPitches")),
+                "strikes":         safe_int(stats.get("strikes")),
+                "note":            "SP" if is_starter else None,
             })
 
     return away_starter_id, home_starter_id, batter_rows, pitcher_rows
@@ -441,9 +450,9 @@ def parse_boxscore(game, boxscore):
 
 def load_games_and_box_scores(engine, seasons, team_abbr):
     """
-    For each season, fetch the schedule and boxscore for every Final regular season game.
-    In a single pass per game, upsert into mlb.games, mlb.batting_stats, and mlb.pitching_stats.
-    Games already present in mlb.batting_stats are skipped to avoid redundant API calls.
+    For each season, fetch the schedule and /withMetrics JSON for every Final
+    regular season game not yet loaded. Upsert into mlb.games, mlb.batting_stats,
+    and mlb.pitching_stats in batches.
     """
     with engine.connect() as conn:
         existing_game_pks = set(
@@ -457,9 +466,8 @@ def load_games_and_box_scores(engine, seasons, team_abbr):
         games     = fetch_schedule_months(season)
         new_games = [g for g in games if g["game_id"] not in existing_game_pks]
 
-        # Deduplicate: API can return the same game_pk in multiple month chunks
-        seen_ids  = set()
-        deduped   = []
+        seen_ids = set()
+        deduped  = []
         for g in new_games:
             if g["game_id"] not in seen_ids:
                 seen_ids.add(g["game_id"])
@@ -478,24 +486,31 @@ def load_games_and_box_scores(engine, seasons, team_abbr):
 
         for i, game in enumerate(new_games, 1):
             game_pk = game["game_id"]
-            try:
-                boxscore = statsapi.boxscore_data(game_pk)
-                away_id, home_id, batters, pitchers = parse_boxscore(game, boxscore)
-                game_rows.append(build_game_row(game, team_abbr, away_id, home_id))
-                batter_rows.extend(batters)
-                pitcher_rows.extend(pitchers)
-            except Exception as exc:
-                log.warning("Boxscore fetch failed for game_pk %d: %s", game_pk, exc)
+            game_json = fetch_game_json(game_pk)
+            if game_json is None:
+                log.warning("Skipping game_pk %d: /withMetrics returned no data.", game_pk)
+                time.sleep(0.25)
+                continue
+
+            away_id, home_id, batters, pitchers = parse_boxscore_from_json(game, game_json)
+            game_rows.append(build_game_row(game, team_abbr, away_id, home_id))
+            batter_rows.extend(batters)
+            pitcher_rows.extend(pitchers)
 
             if i % batch_size == 0 or i == len(new_games):
                 if game_rows:
-                    upsert(engine, pd.DataFrame(game_rows), "mlb", "games", ["game_pk"])
+                    upsert(engine, pd.DataFrame(game_rows).where(pd.notna(pd.DataFrame(game_rows)), other=None),
+                           "mlb", "games", ["game_pk"])
                     game_rows = []
                 if batter_rows:
-                    upsert(engine, pd.DataFrame(batter_rows), "mlb", "batting_stats", ["batter_game_id"])
+                    df = pd.DataFrame(batter_rows)
+                    upsert(engine, df.where(pd.notna(df), other=None),
+                           "mlb", "batting_stats", ["batter_game_id"])
                     batter_rows = []
                 if pitcher_rows:
-                    upsert(engine, pd.DataFrame(pitcher_rows), "mlb", "pitching_stats", ["pitcher_game_id"])
+                    df = pd.DataFrame(pitcher_rows)
+                    upsert(engine, df.where(pd.notna(df), other=None),
+                           "mlb", "pitching_stats", ["pitcher_game_id"])
                     pitcher_rows = []
                 log.info(
                     "Flushed batch at game %d of %d for season %d",
@@ -694,16 +709,9 @@ def main():
     current_season     = date.today().year
     historical_seasons = [2023, 2024, 2025, current_season]
 
-    # Steps 1 and 2: rebuild reference tables fresh every run.
-    # FK constraints on child tables have been dropped via drop_mlb_fk_constraints.sql,
-    # so reloading teams and players does not affect box score history.
     team_abbr = load_teams(engine, season=current_season)
     load_players(engine, seasons=historical_seasons)
-
-    # Steps 3, 4, 5: upsert only new games. Already-loaded game_pks are skipped.
     load_games_and_box_scores(engine, historical_seasons, team_abbr)
-
-    # Steps 6 and 7: season snapshots for current season only.
     load_player_season_batting(engine, season=current_season)
     load_pitcher_season_stats(engine, season=current_season)
 
