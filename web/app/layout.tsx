@@ -1,12 +1,20 @@
-export const metadata = {
+import type { Metadata } from 'next';
+import './globals.css';
+
+export const metadata: Metadata = {
   title: 'Sports Modeling',
-  description: 'NBA, MLB, NFL prop research',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body className="bg-gray-950 text-gray-100 min-h-screen">
+        {children}
+      </body>
     </html>
   );
 }
