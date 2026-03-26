@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getBoxscore } from '@/lib/queries';
 
 export async function GET(req: NextRequest) {
   const gameId = req.nextUrl.searchParams.get('gameId');
@@ -6,6 +7,11 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'gameId required' }, { status: 400 });
   }
 
-  // TODO step 6: replace with real query
-  return NextResponse.json({ gameId, rows: [] });
+  try {
+    const rows = await getBoxscore(gameId);
+    return NextResponse.json({ gameId, rows });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }
