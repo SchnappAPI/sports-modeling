@@ -6,20 +6,24 @@ Loads pitch-level play-by-play data for MLB games into mlb.play_by_play.
 Source: https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics
 
 One row per play event (pitch, pickoff attempt, stolen base, etc.) per game.
-The composite key is play_event_id = '{game_pk}-{at_bat_number}-{play_event_index}'.
+Key: play_event_id = '{game_pk}-{at_bat_number}-{play_event_index}'
+
+Write strategy:
+  Since we diff against existing game_pks before the loop, every game processed
+  is guaranteed new — there is nothing to update. We write directly to the
+  permanent table via to_sql(if_exists='append') with fast_executemany=True,
+  bypassing the staging/MERGE pattern entirely. This is ~10x faster than MERGE
+  through a slow engine.
+
+  VARCHAR column widths are set explicitly via the dtype parameter so pandas
+  does not infer them from the batch data (which would cause right-truncation
+  errors when a later row is longer than the first).
 
 Incremental logic:
-  - Desired game_pk set: all Final regular season games for the configured seasons
-    pulled from the mlb.games table already loaded by mlb_etl.py.
-  - Existing game_pk set: SELECT DISTINCT game_pk FROM mlb.play_by_play.
-  - Delta = desired minus existing.
-  - Oldest --batch games processed per run to stay within GitHub Actions time limits.
-
-Uses get_engine_slow (fast_executemany=False) because the description columns can
-exceed the buffer width that pyodbc pre-calculates under fast_executemany=True.
-
-Backfill scope:
-  Currently configured for 2025 only. Extend SEASONS list to go further back.
+  1. Load desired game_pk set from mlb.games (Final regular season games).
+  2. Load existing game_pk set from mlb.play_by_play.
+  3. Diff: only process games not already loaded.
+  4. Process oldest --batch games per run.
 
 Runs exclusively in GitHub Actions. Credentials injected as environment variables.
 """
@@ -31,14 +35,16 @@ import logging
 import requests
 import pandas as pd
 from sqlalchemy import text
-from sqlalchemy.types import VARCHAR
+from sqlalchemy.types import (
+    VARCHAR, Integer, Date, SmallInteger, Float, Boolean, NVARCHAR
+)
 
 from pathlib import Path
 _repo_root = str(Path(__file__).resolve().parent.parent)
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from etl.db import get_engine_slow, upsert
+from etl.db import get_engine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,19 +57,30 @@ SEASONS = [2025]
 DEFAULT_BATCH = 50
 API_PAUSE = 0.25
 API_BASE  = "https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics"
+FLUSH_EVERY = 10  # games per DB write; each game ~300 rows = ~3000 rows per flush
 
-STAGING_DTYPES = {
-    "result_description":     VARCHAR(1000),
-    "play_event_description": VARCHAR(1000),
+# Explicit column types for to_sql. Prevents pandas from inferring VARCHAR(N)
+# from batch data, which causes right-truncation when a later row is longer.
+INSERT_DTYPES = {
+    "play_event_id":          VARCHAR(50),
+    "game_date":              VARCHAR(10),
     "result_event_type":      VARCHAR(50),
+    "result_description":     VARCHAR(1000),
+    "batter_hand_code":       VARCHAR(1),
     "batter_split":           VARCHAR(30),
+    "pitcher_hand_code":      VARCHAR(1),
     "pitcher_split":          VARCHAR(30),
+    "play_id":                VARCHAR(50),
     "play_event_type":        VARCHAR(30),
-    "hit_trajectory":         VARCHAR(30),
-    "hit_hardness":           VARCHAR(20),
     "pitch_call_code":        VARCHAR(5),
     "pitch_type_code":        VARCHAR(5),
+    "play_event_description": VARCHAR(1000),
     "count_balls_strikes":    VARCHAR(5),
+    "hit_trajectory":         VARCHAR(30),
+    "hit_hardness":           VARCHAR(20),
+    "at_bat_end_time":        VARCHAR(30),
+    "play_end_time":          VARCHAR(30),
+    "play_event_end_time":    VARCHAR(30),
 }
 
 DDL_CREATE = """
@@ -202,7 +219,8 @@ def fetch_game_json(game_pk, retries=3, pause=5):
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:
-            log.warning("Fetch failed for game_pk %d (attempt %d/%d): %s", game_pk, attempt, retries, exc)
+            log.warning("Fetch failed for game_pk %d (attempt %d/%d): %s",
+                        game_pk, attempt, retries, exc)
             if attempt < retries:
                 time.sleep(pause)
     return None
@@ -319,6 +337,25 @@ def parse_play_by_play(game_json, game_pk, game_date):
     return rows
 
 
+def flush(engine, rows):
+    """
+    Write accumulated rows directly to mlb.play_by_play via INSERT.
+    All games in the batch are new (diffed before the loop), so MERGE is
+    unnecessary. Direct INSERT with fast_executemany=True is ~10x faster.
+    """
+    df = pd.DataFrame(rows)
+    df = df.where(pd.notna(df), other=None)
+    df.to_sql(
+        "play_by_play",
+        engine,
+        schema="mlb",
+        if_exists="append",
+        index=False,
+        chunksize=500,
+        dtype=INSERT_DTYPES,
+    )
+
+
 def load_play_by_play(engine, seasons, batch_size):
     season_list = ", ".join(str(s) for s in seasons)
     with engine.connect() as conn:
@@ -356,9 +393,8 @@ def load_play_by_play(engine, seasons, batch_size):
         log.info("No new games to process. Done.")
         return
 
-    work        = new_games[:batch_size]
-    flush_rows  = []
-    flush_every = 5
+    work       = new_games[:batch_size]
+    flush_rows = []
 
     for i, (game_pk, game_date) in enumerate(work, 1):
         game_json = fetch_game_json(game_pk)
@@ -376,12 +412,9 @@ def load_play_by_play(engine, seasons, batch_size):
         flush_rows.extend(rows)
         log.info("game_pk %d: %d events parsed (%d/%d).", game_pk, len(rows), i, len(work))
 
-        if i % flush_every == 0 or i == len(work):
-            df = pd.DataFrame(flush_rows)
-            df = df.where(pd.notna(df), other=None)
-            upsert(engine, df, schema="mlb", table="play_by_play",
-                   keys=["play_event_id"], dtype=STAGING_DTYPES)
-            log.info("Flushed %d rows after game %d of %d.", len(flush_rows), i, len(work))
+        if i % FLUSH_EVERY == 0 or i == len(work):
+            flush(engine, flush_rows)
+            log.info("Wrote %d rows after game %d of %d.", len(flush_rows), i, len(work))
             flush_rows = []
 
         time.sleep(API_PAUSE)
@@ -400,7 +433,7 @@ def main():
     log.info("=== MLB Play-by-Play ETL started ===")
     log.info("Seasons: %s  Batch: %d", seasons, args.batch)
 
-    engine = get_engine_slow()
+    engine = get_engine()
     ensure_table(engine)
     load_play_by_play(engine, seasons, args.batch)
 
