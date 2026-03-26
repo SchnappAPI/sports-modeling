@@ -27,13 +27,63 @@ export interface GameRow {
   total: number | null;
 }
 
+// odds.game_lines and odds.upcoming_game_lines store one row per outcome.
+// Spread = outcome_point for the home team outcome in the 'spreads' market.
+// Total = outcome_point for the Over outcome in the 'totals' market.
+// We check upcoming_game_lines first (populated by nightly odds ETL for current
+// dates), then fall back to game_lines for historical dates.
 export async function getGames(sport: string, date: string): Promise<GameRow[]> {
   const pool = await getPool();
   const result = await pool
     .request()
     .input('date', mssql.VarChar, date)
     .query<GameRow>(
-      `SELECT
+      `WITH lines AS (
+         SELECT
+           event_id,
+           MAX(CASE WHEN market_key = 'spreads'
+                    AND bookmaker_key = 'fanduel'
+                    AND outcome_name = (
+                          SELECT TOP 1 ue.home_team
+                          FROM odds.upcoming_events ue
+                          WHERE ue.event_id = ugl.event_id
+                        )
+               THEN CAST(outcome_point AS FLOAT) END) AS spread,
+           MAX(CASE WHEN market_key = 'totals'
+                    AND bookmaker_key = 'fanduel'
+                    AND outcome_name = 'Over'
+               THEN CAST(outcome_point AS FLOAT) END) AS total
+         FROM odds.upcoming_game_lines ugl
+         GROUP BY event_id
+
+         UNION ALL
+
+         SELECT
+           event_id,
+           MAX(CASE WHEN market_key = 'spreads'
+                    AND bookmaker_key = 'fanduel'
+                    AND outcome_name = (
+                          SELECT TOP 1 e.home_team
+                          FROM odds.events e
+                          WHERE e.event_id = gl.event_id
+                        )
+               THEN CAST(outcome_point AS FLOAT) END) AS spread,
+           MAX(CASE WHEN market_key = 'totals'
+                    AND bookmaker_key = 'fanduel'
+                    AND outcome_name = 'Over'
+               THEN CAST(outcome_point AS FLOAT) END) AS total
+         FROM odds.game_lines gl
+         GROUP BY event_id
+       ),
+       best_lines AS (
+         SELECT
+           event_id,
+           MAX(spread) AS spread,
+           MAX(total)  AS total
+         FROM lines
+         GROUP BY event_id
+       )
+       SELECT
          g.game_id        AS gameId,
          CONVERT(VARCHAR(10), g.game_date, 120) AS gameDate,
          g.home_team_id   AS homeTeamId,
@@ -42,16 +92,13 @@ export async function getGames(sport: string, date: string): Promise<GameRow[]> 
          at.abbreviation  AS awayTeamAbbr,
          ht.team_name     AS homeTeamName,
          at.team_name     AS awayTeamName,
-         gl.spread        AS spread,
-         gl.total         AS total
+         bl.spread        AS spread,
+         bl.total         AS total
        FROM nba.games g
        JOIN nba.teams ht ON ht.team_id = g.home_team_id
        JOIN nba.teams at ON at.team_id = g.away_team_id
        LEFT JOIN odds.event_game_map egm ON egm.game_id = g.game_id
-       LEFT JOIN odds.game_lines gl
-         ON gl.event_id = egm.event_id
-        AND gl.market_key = 'spreads'
-        AND gl.bookmaker_key = 'fanduel'
+       LEFT JOIN best_lines bl ON bl.event_id = egm.event_id
        WHERE CONVERT(VARCHAR(10), g.game_date, 120) = @date
        ORDER BY g.game_date`
     );
