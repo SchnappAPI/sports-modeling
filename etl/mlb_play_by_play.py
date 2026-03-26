@@ -36,7 +36,7 @@ import requests
 import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.types import (
-    VARCHAR, Integer, Date, SmallInteger, Float, Boolean, NVARCHAR
+    VARCHAR, Integer, Date, SmallInteger, Float, Boolean, NVARCHAR, DATETIME
 )
 
 from pathlib import Path
@@ -63,7 +63,7 @@ FLUSH_EVERY = 5  # games per DB write; each game ~300 rows = ~3000 rows per flus
 # from batch data, which causes right-truncation when a later row is longer.
 INSERT_DTYPES = {
     "play_event_id":          VARCHAR(50),
-    "game_date":              VARCHAR(10),
+    "game_date":              Date(),           # FIX: was VARCHAR(10); table column is DATE
     "result_event_type":      VARCHAR(50),
     "result_description":     VARCHAR(1000),
     "batter_hand_code":       VARCHAR(1),
@@ -78,9 +78,9 @@ INSERT_DTYPES = {
     "count_balls_strikes":    VARCHAR(5),
     "hit_trajectory":         VARCHAR(30),
     "hit_hardness":           VARCHAR(20),
-    "at_bat_end_time":        VARCHAR(30),
-    "play_end_time":          VARCHAR(30),
-    "play_event_end_time":    VARCHAR(30),
+    "at_bat_end_time":        DATETIME(),       # FIX: was VARCHAR(30); table column is DATETIME2
+    "play_end_time":          DATETIME(),       # FIX: was VARCHAR(30); table column is DATETIME2
+    "play_event_end_time":    DATETIME(),       # FIX: was VARCHAR(30); table column is DATETIME2
 }
 
 DDL_CREATE = """
@@ -195,6 +195,12 @@ def safe_float(val):
 
 
 def safe_bool(val):
+    """
+    Return 1/0/None for BIT columns.
+    FIX: added float to the isinstance check — the API sometimes returns
+    numeric 0.0/1.0 for boolean fields, which SQL Server rejects as an
+    invalid cast to BIT when sent as a Python float.
+    """
     if val is None:
         return None
     if isinstance(val, (bool, int, float)):
@@ -202,6 +208,20 @@ def safe_bool(val):
     if isinstance(val, str):
         return 1 if val.lower() in ("true", "1", "yes") else 0
     return None
+
+
+def safe_datetime(val):
+    """
+    Parse ISO timestamp strings from the API into Python datetime objects.
+    Returns None on any parse failure so the column lands as NULL rather
+    than an unconverted string being implicitly cast by SQL Server.
+    """
+    if val is None:
+        return None
+    try:
+        return pd.Timestamp(val).to_pydatetime()
+    except Exception:
+        return None
 
 
 def trunc(val, max_len):
@@ -274,7 +294,8 @@ def parse_play_by_play(game_json, game_pk, game_date):
             rows.append({
                 "play_event_id":          f"{game_pk}-{at_bat_num}-{ev_index}",
                 "game_pk":                game_pk,
-                "game_date":              str(game_date) if game_date else None,
+                # FIX: store as date object, not string, to match DATE column type
+                "game_date":              pd.Timestamp(game_date).date() if game_date else None,
                 "at_bat_number":          at_bat_num,
                 "play_event_index":       ev_index,
                 "inning":                 safe_int(about.get("inning")),
@@ -291,8 +312,9 @@ def parse_play_by_play(game_json, game_pk, game_date):
                 "at_bat_is_complete":     safe_bool(about.get("isComplete"))     if is_last else None,
                 "at_bat_is_scoring_play": safe_bool(about.get("isScoringPlay"))  if is_last else None,
                 "at_bat_has_out":         safe_bool(about.get("hasOut"))         if is_last else None,
-                "at_bat_end_time":        about.get("endTime")                   if is_last else None,
-                "play_end_time":          play.get("playEndTime")                if is_last else None,
+                # FIX: parse timestamp strings to datetime objects for DATETIME2 columns
+                "at_bat_end_time":        safe_datetime(about.get("endTime"))    if is_last else None,
+                "play_end_time":          safe_datetime(play.get("playEndTime")) if is_last else None,
                 "is_at_bat":              is_ab                                  if is_last else None,
                 "is_plate_appearance":    is_pa                                  if is_last else None,
                 "batter_id":              batter_id,
@@ -305,6 +327,7 @@ def parse_play_by_play(game_json, game_pk, game_date):
                 "play_event_type":        trunc(event.get("type"), 30),
                 "is_pitch":               safe_bool(event.get("isPitch")),
                 "is_base_running_play":   safe_bool(event.get("isBaseRunningPlay")),
+                # FIX: use safe_int; API can return pitchNumber as float (e.g. 1.0)
                 "pitch_number":           safe_int(event.get("pitchNumber")),
                 "pitch_call_code":        trunc(details.get("call", {}).get("code") if isinstance(details.get("call"), dict) else None, 5),
                 "pitch_type_code":        trunc(details.get("type", {}).get("code") if isinstance(details.get("type"), dict) else None, 5),
@@ -317,7 +340,8 @@ def parse_play_by_play(game_json, game_pk, game_date):
                 "count_balls_strikes":    f"{count.get('balls', '')}-{count.get('strikes', '')}" if count else None,
                 "count_outs":             safe_int(count.get("outs")),
                 "is_last_pitch":          safe_bool(is_last),
-                "play_event_end_time":    event.get("endTime"),
+                # FIX: parse timestamp string to datetime object for DATETIME2 column
+                "play_event_end_time":    safe_datetime(event.get("endTime")),
                 "pitch_start_speed":      safe_float(pitch_data.get("startSpeed")),
                 "pitch_end_speed":        safe_float(pitch_data.get("endSpeed")),
                 "pitch_zone":             safe_int(pitch_data.get("zone")),
@@ -342,9 +366,13 @@ def flush(engine, rows):
     Write accumulated rows directly to mlb.play_by_play via INSERT.
     All games in the batch are new (diffed before the loop), so MERGE is
     unnecessary. Direct INSERT with fast_executemany=True is ~10x faster.
+
+    FIX: use .astype(object) before the NaN replacement so numpy integer
+    columns with missing values do not leave numpy.nan in the buffer,
+    which pyodbc rejects for typed columns.
     """
     df = pd.DataFrame(rows)
-    df = df.where(pd.notna(df), other=None)
+    df = df.astype(object).where(pd.notna(df), other=None)
     df.to_sql(
         "play_by_play",
         engine,
