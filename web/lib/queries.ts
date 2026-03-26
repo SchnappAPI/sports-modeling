@@ -28,59 +28,51 @@ export interface GameRow {
 }
 
 // odds.game_lines and odds.upcoming_game_lines store one row per outcome.
-// Spread = outcome_point for the home team outcome in the 'spreads' market.
-// Total = outcome_point for the Over outcome in the 'totals' market.
-// We check upcoming_game_lines first (populated by nightly odds ETL for current
-// dates), then fall back to game_lines for historical dates.
+// Spread = outcome_point where outcome_name matches the home team name.
+// Total  = outcome_point for the Over outcome in the totals market.
+// We union upcoming_game_lines (current dates) with game_lines (historical),
+// join the home_team name before aggregating so there is no subquery inside MAX.
 export async function getGames(sport: string, date: string): Promise<GameRow[]> {
   const pool = await getPool();
   const result = await pool
     .request()
     .input('date', mssql.VarChar, date)
     .query<GameRow>(
-      `WITH lines AS (
+      `WITH all_lines AS (
          SELECT
-           event_id,
-           MAX(CASE WHEN market_key = 'spreads'
-                    AND bookmaker_key = 'fanduel'
-                    AND outcome_name = (
-                          SELECT TOP 1 ue.home_team
-                          FROM odds.upcoming_events ue
-                          WHERE ue.event_id = ugl.event_id
-                        )
-               THEN CAST(outcome_point AS FLOAT) END) AS spread,
-           MAX(CASE WHEN market_key = 'totals'
-                    AND bookmaker_key = 'fanduel'
-                    AND outcome_name = 'Over'
-               THEN CAST(outcome_point AS FLOAT) END) AS total
+           ugl.event_id,
+           ue.home_team,
+           ugl.market_key,
+           ugl.bookmaker_key,
+           ugl.outcome_name,
+           CAST(ugl.outcome_point AS FLOAT) AS outcome_point
          FROM odds.upcoming_game_lines ugl
-         GROUP BY event_id
+         JOIN odds.upcoming_events ue ON ue.event_id = ugl.event_id
 
          UNION ALL
 
          SELECT
-           event_id,
-           MAX(CASE WHEN market_key = 'spreads'
-                    AND bookmaker_key = 'fanduel'
-                    AND outcome_name = (
-                          SELECT TOP 1 e.home_team
-                          FROM odds.events e
-                          WHERE e.event_id = gl.event_id
-                        )
-               THEN CAST(outcome_point AS FLOAT) END) AS spread,
-           MAX(CASE WHEN market_key = 'totals'
-                    AND bookmaker_key = 'fanduel'
-                    AND outcome_name = 'Over'
-               THEN CAST(outcome_point AS FLOAT) END) AS total
+           gl.event_id,
+           e.home_team,
+           gl.market_key,
+           gl.bookmaker_key,
+           gl.outcome_name,
+           CAST(gl.outcome_point AS FLOAT) AS outcome_point
          FROM odds.game_lines gl
-         GROUP BY event_id
+         JOIN odds.events e ON e.event_id = gl.event_id
        ),
        best_lines AS (
          SELECT
            event_id,
-           MAX(spread) AS spread,
-           MAX(total)  AS total
-         FROM lines
+           MAX(CASE WHEN market_key = 'spreads'
+                    AND bookmaker_key = 'fanduel'
+                    AND outcome_name = home_team
+               THEN outcome_point END) AS spread,
+           MAX(CASE WHEN market_key = 'totals'
+                    AND bookmaker_key = 'fanduel'
+                    AND outcome_name = 'Over'
+               THEN outcome_point END) AS total
+         FROM all_lines
          GROUP BY event_id
        )
        SELECT
