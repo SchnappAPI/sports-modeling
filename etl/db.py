@@ -27,9 +27,14 @@ def get_engine(max_retries=3, retry_wait=45):
             time.sleep(retry_wait)
 
 
-def upsert(engine, df, schema, table, keys):
+def upsert(engine, df, schema, table, keys, dtype=None):
     """
     Upsert a DataFrame into a permanent table using a SQL Server MERGE statement.
+
+    dtype (optional): dict mapping column name -> SQLAlchemy type, passed directly
+    to to_sql. Use this to override pandas' inferred column types on the staging
+    table when the inferred size would be too narrow for the actual data.
+    Example: {"result_description": sqlalchemy.types.VARCHAR(1000)}
 
     Staging pattern:
       1. Explicitly drop the temp table if it exists from a previous call in
@@ -46,7 +51,7 @@ def upsert(engine, df, schema, table, keys):
     with engine.begin() as conn:
         conn.execute(text(f"IF OBJECT_ID('tempdb..{staging}') IS NOT NULL DROP TABLE {staging}"))
 
-    df.to_sql(staging, engine, index=False, if_exists="append", chunksize=200)
+    df.to_sql(staging, engine, index=False, if_exists="append", chunksize=200, dtype=dtype)
 
     set_clause  = ", ".join(f"t.{c} = s.{c}" for c in df.columns if c not in keys)
     key_clause  = " AND ".join(f"t.{k} = s.{k}" for k in keys)

@@ -28,6 +28,7 @@ import logging
 import requests
 import pandas as pd
 from sqlalchemy import text
+from sqlalchemy.types import VARCHAR
 
 from pathlib import Path
 _repo_root = str(Path(__file__).resolve().parent.parent)
@@ -56,13 +57,28 @@ DEFAULT_BATCH = 50  # games per run; raise for backfill, lower for nightly
 API_PAUSE = 0.25    # seconds between game fetches
 API_BASE  = "https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics"
 
+# Explicit SQLAlchemy types for free-text columns whose real-world length
+# can exceed what pandas infers from a single batch of data. Without this,
+# to_sql creates the staging temp table with VARCHAR(N) where N = max string
+# length seen in that batch, which causes right-truncation errors when a
+# longer value appears in a later batch.
+STAGING_DTYPES = {
+    "result_description":     VARCHAR(1000),
+    "play_event_description": VARCHAR(1000),
+    "result_event_type":      VARCHAR(50),
+    "batter_split":           VARCHAR(30),
+    "pitcher_split":          VARCHAR(30),
+    "play_event_type":        VARCHAR(30),
+    "hit_trajectory":         VARCHAR(30),
+    "hit_hardness":           VARCHAR(20),
+    "pitch_call_code":        VARCHAR(5),
+    "pitch_type_code":        VARCHAR(5),
+    "count_balls_strikes":    VARCHAR(5),
+}
+
 # ---------------------------------------------------------------------------
 # DDL
 # ---------------------------------------------------------------------------
-
-# VARCHAR(1000) for any free-text description column — real values have exceeded 500.
-# ensure_table() also widens these columns if the table was previously created with
-# the old VARCHAR(500) definition.
 
 DDL_CREATE = """
 IF NOT EXISTS (
@@ -134,7 +150,6 @@ CREATE TABLE mlb.play_by_play (
 );
 """
 
-# Widen description columns if the table was created with the old VARCHAR(500) limit.
 DDL_ALTER_DESCRIPTIONS = """
 IF EXISTS (
     SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
@@ -183,9 +198,7 @@ def safe_float(val):
 def safe_bool(val):
     if val is None:
         return None
-    if isinstance(val, bool):
-        return 1 if val else 0
-    if isinstance(val, int):
+    if isinstance(val, (bool, int)):
         return 1 if val else 0
     if isinstance(val, str):
         return 1 if val.lower() in ("true", "1", "yes") else 0
@@ -193,7 +206,6 @@ def safe_bool(val):
 
 
 def trunc(val, max_len):
-    """Truncate a string to max_len characters. Returns None if val is None."""
     if val is None:
         return None
     s = str(val)
@@ -393,7 +405,8 @@ def load_play_by_play(engine, seasons, batch_size):
         if i % flush_every == 0 or i == len(work):
             df = pd.DataFrame(flush_rows)
             df = df.where(pd.notna(df), other=None)
-            upsert(engine, df, schema="mlb", table="play_by_play", keys=["play_event_id"])
+            upsert(engine, df, schema="mlb", table="play_by_play",
+                   keys=["play_event_id"], dtype=STAGING_DTYPES)
             log.info("Flushed %d rows after game %d of %d.", len(flush_rows), i, len(work))
             flush_rows = []
 
