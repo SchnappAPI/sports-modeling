@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 
@@ -45,17 +45,15 @@ function fmtPct(val: number | null): string {
   return `${(val * 100).toFixed(0)}%`;
 }
 
-// Format an American odds integer: +120, -110, etc.
 function fmtOdds(price: number | null): string {
   if (price == null) return '-';
   return price >= 0 ? `+${price}` : `${price}`;
 }
 
-// Colour the odds: grey for standard juice (-105 to -115), lighter for long shots.
 function oddsColor(price: number | null): string {
   if (price == null) return 'text-gray-600';
   if (price > 0) return 'text-gray-400';
-  if (price >= -115) return 'text-gray-500';  // standard juice
+  if (price >= -115) return 'text-gray-500';
   return 'text-gray-400';
 }
 
@@ -69,13 +67,17 @@ export default function GradesPageInner() {
   const [grades, setGrades] = useState<GradeRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedMarket, setSelectedMarket] = useState<string>('');
 
   const backGameId = searchParams.get('gameId');
   const gradeDate = searchParams.get('date') ?? todayLocal();
-
   const backHref = backGameId ? `/nba?gameId=${backGameId}` : '/nba';
 
   useEffect(() => {
+    setLoading(true);
+    setError(null);
+    setSelectedMarket('');
+
     const url = backGameId
       ? `/api/grades?date=${gradeDate}&gameId=${backGameId}`
       : `/api/grades?date=${gradeDate}`;
@@ -90,7 +92,16 @@ export default function GradesPageInner() {
       .finally(() => setLoading(false));
   }, [gradeDate, backGameId]);
 
-  const displayDate = gradeDate;
+  // Sorted unique market keys present in the loaded data.
+  const marketOptions = useMemo(() => {
+    const keys = Array.from(new Set(grades.map((r) => r.marketKey))).sort();
+    return keys;
+  }, [grades]);
+
+  const filtered = useMemo(
+    () => (selectedMarket ? grades.filter((r) => r.marketKey === selectedMarket) : grades),
+    [grades, selectedMarket]
+  );
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -101,10 +112,24 @@ export default function GradesPageInner() {
         <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
           At a Glance
         </span>
-        <span className="text-xs text-gray-600">{displayDate}</span>
+        <span className="text-xs text-gray-600">{gradeDate}</span>
+        {!loading && !error && grades.length > 0 && (
+          <select
+            value={selectedMarket}
+            onChange={(e) => setSelectedMarket(e.target.value)}
+            className="ml-3 bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded px-2 py-1 focus:outline-none focus:border-gray-500"
+          >
+            <option value="">All markets</option>
+            {marketOptions.map((key) => (
+              <option key={key} value={key}>
+                {formatMarket(key)}
+              </option>
+            ))}
+          </select>
+        )}
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
-            {grades.length} props
+            {filtered.length}{selectedMarket ? ` / ${grades.length}` : ''} props
           </span>
         )}
       </div>
@@ -114,7 +139,7 @@ export default function GradesPageInner() {
         {error && <div className="text-sm text-red-400">Error: {error}</div>}
         {!loading && !error && grades.length === 0 && (
           <div className="text-sm text-gray-500">
-            No grades available for {displayDate}. Grades populate nightly after the ETL runs.
+            No grades available for {gradeDate}. Grades populate nightly after the ETL runs.
           </div>
         )}
         {!loading && !error && grades.length > 0 && (
@@ -134,7 +159,7 @@ export default function GradesPageInner() {
                 </tr>
               </thead>
               <tbody>
-                {grades.map((row) => (
+                {filtered.map((row) => (
                   <tr key={row.gradeId} className="border-b border-gray-800">
                     <td className="py-1.5 pr-3">
                       <Link
