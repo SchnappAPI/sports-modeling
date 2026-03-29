@@ -562,16 +562,22 @@ export async function getMatchupDefense(
     .input('oppTeamId', mssql.Int, oppTeamId)
     .input('posGroup', mssql.VarChar, posGroup)
     .query(
-      `-- Build full-game totals for every player-game this season, with opponent
-       -- team ID and position.
+      `-- Season start: October 1 of the current NBA season year.
+       -- If today is before October, the season started in the prior calendar year.
        WITH season_start AS (
-         SELECT CAST('2024-10-01' AS DATE) AS dt
+         SELECT CAST(
+           CAST(
+             CASE WHEN MONTH(GETUTCDATE()) < 10
+               THEN YEAR(GETUTCDATE()) - 1
+               ELSE YEAR(GETUTCDATE())
+             END
+           AS VARCHAR(4)) + '-10-01'
+         AS DATE) AS dt
        ),
        game_totals AS (
          SELECT
            pbs.player_id,
            pbs.game_id,
-           -- Opponent is whoever is NOT the player's team in this game
            CASE
              WHEN pbs.team_id = s.home_team_id THEN s.away_team_id
              ELSE s.home_team_id
@@ -588,29 +594,26 @@ export async function getMatchupDefense(
          WHERE s.game_date >= (SELECT dt FROM season_start)
          GROUP BY pbs.player_id, pbs.game_id, pbs.team_id, s.home_team_id, s.away_team_id
        ),
-       -- Join position; filter to players whose primary position matches posGroup
        pos_filtered AS (
          SELECT gt.*
          FROM game_totals gt
          JOIN nba.players p ON p.player_id = gt.player_id
          WHERE LEFT(p.position, 1) = @posGroup
        ),
-       -- Aggregate per defending team
        team_defense AS (
          SELECT
            opp_team_id,
-           COUNT(*)            AS games_defended,
-           AVG(CAST(pts  AS FLOAT)) AS avg_pts,
-           AVG(CAST(reb  AS FLOAT)) AS avg_reb,
-           AVG(CAST(ast  AS FLOAT)) AS avg_ast,
-           AVG(CAST(stl  AS FLOAT)) AS avg_stl,
-           AVG(CAST(blk  AS FLOAT)) AS avg_blk,
-           AVG(CAST(fg3m AS FLOAT)) AS avg_fg3m,
-           AVG(CAST(tov  AS FLOAT)) AS avg_tov
+           COUNT(*)                    AS games_defended,
+           AVG(CAST(pts  AS FLOAT))    AS avg_pts,
+           AVG(CAST(reb  AS FLOAT))    AS avg_reb,
+           AVG(CAST(ast  AS FLOAT))    AS avg_ast,
+           AVG(CAST(stl  AS FLOAT))    AS avg_stl,
+           AVG(CAST(blk  AS FLOAT))    AS avg_blk,
+           AVG(CAST(fg3m AS FLOAT))    AS avg_fg3m,
+           AVG(CAST(tov  AS FLOAT))    AS avg_tov
          FROM pos_filtered
          GROUP BY opp_team_id
        ),
-       -- Rank all teams (1 = most allowed = best matchup for overs)
        ranked AS (
          SELECT
            opp_team_id,
@@ -645,7 +648,7 @@ export async function getMatchupDefense(
 
   const line = (avg: number, rank: number, gd: number): MatchupStatLine => ({ avg, rank, gamesDefended: gd });
   return {
-    oppTeamId:  row.oppTeamId,
+    oppTeamId:   row.oppTeamId,
     oppTeamAbbr: row.oppTeamAbbr,
     position,
     gamesDefended: row.gamesDefended,
