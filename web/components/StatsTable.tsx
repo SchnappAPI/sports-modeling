@@ -9,6 +9,7 @@ interface PlayerAvg {
   playerName: string;
   teamId: number;
   teamAbbr: string;
+  starterStatus: string | null;
   games: number;
   avgPts: number | null;
   avgReb: number | null;
@@ -44,10 +45,11 @@ const PERIOD_OPTIONS = [
 ] as const;
 
 const N_OPTIONS = [
-  { label: 'L10',  value: '10' },
-  { label: 'L20',  value: '20' },
-  { label: 'L40',  value: '40' },
-  { label: 'All',  value: 'all' },
+  { label: 'L10',   value: '10' },
+  { label: 'L20',   value: '20' },
+  { label: 'L40',   value: '40' },
+  { label: 'All',   value: 'all' },
+  { label: 'vs Opp', value: 'opp' },
 ];
 
 function TeamStatsTable({
@@ -65,6 +67,40 @@ function TeamStatsTable({
 }) {
   const searchParams = useSearchParams();
   const tab = searchParams.get('tab') ?? 'stats';
+
+  const starters = players.filter((p) => p.starterStatus === 'Starter');
+  const bench    = players.filter((p) => p.starterStatus !== 'Starter');
+  const hasLineup = players.some((p) => p.starterStatus != null);
+
+  const renderRow = (p: PlayerAvg) => (
+    <tr key={p.playerId} className="border-b border-gray-800">
+      <td className="py-1.5 pr-3">
+        <Link
+          href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}&date=${selectedDate}`}
+          className="text-gray-100 hover:text-blue-400 transition-colors"
+        >
+          {p.playerName}
+        </Link>
+      </td>
+      <td className="py-1.5 px-2 text-right text-gray-500 text-xs">{p.games}</td>
+      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgMin)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgAst)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgStl)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgBlk)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgTov)}</td>
+      <td className="py-1.5 pl-2 text-right text-gray-300">{fmt(p.avg3pm)}</td>
+    </tr>
+  );
+
+  const sectionHeader = (label: string) => (
+    <tr>
+      <td colSpan={10} className="pt-3 pb-1 text-xs text-gray-600 font-semibold uppercase tracking-wider">
+        {label}
+      </td>
+    </tr>
+  );
 
   return (
     <div className="overflow-x-auto">
@@ -85,27 +121,16 @@ function TeamStatsTable({
           </tr>
         </thead>
         <tbody>
-          {players.map((p) => (
-            <tr key={p.playerId} className="border-b border-gray-800">
-              <td className="py-1.5 pr-3">
-                <Link
-                  href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}&date=${selectedDate}`}
-                  className="text-gray-100 hover:text-blue-400 transition-colors"
-                >
-                  {p.playerName}
-                </Link>
-              </td>
-              <td className="py-1.5 px-2 text-right text-gray-500 text-xs">{p.games}</td>
-              <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgMin)}</td>
-              <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
-              <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
-              <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgAst)}</td>
-              <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgStl)}</td>
-              <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgBlk)}</td>
-              <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgTov)}</td>
-              <td className="py-1.5 pl-2 text-right text-gray-300">{fmt(p.avg3pm)}</td>
-            </tr>
-          ))}
+          {hasLineup ? (
+            <>
+              {starters.length > 0 && sectionHeader('Starters')}
+              {starters.map(renderRow)}
+              {bench.length > 0 && sectionHeader('Bench')}
+              {bench.map(renderRow)}
+            </>
+          ) : (
+            players.map(renderRow)
+          )}
         </tbody>
       </table>
     </div>
@@ -142,13 +167,19 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
     url.searchParams.set('homeTeamId', String(homeTeamId));
     url.searchParams.set('awayTeamId', String(awayTeamId));
     url.searchParams.set('context', nGames);
+    url.searchParams.set('gameId', gameId);  // for starter status lookup
     if (periodsParam) url.searchParams.set('periods', periodsParam);
+    // vs Opp mode: pass opponent abbreviations so the API can filter matchup column.
+    // Away team's opponent is the home team; home team's opponent is the away team.
+    if (nGames === 'opp') {
+      url.searchParams.set('opp', `${awayTeamAbbr},${homeTeamAbbr}`);
+    }
     fetch(url.toString())
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((data) => setPlayers(data.players ?? []))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [homeTeamId, awayTeamId, nGames, activePeriods]);
+  }, [homeTeamId, awayTeamId, nGames, activePeriods, gameId, homeTeamAbbr, awayTeamAbbr]);
 
   useEffect(() => { fetchStats(); }, [fetchStats]);
 
