@@ -2,6 +2,7 @@
 
 import { useRouter, useSearchParams } from 'next/navigation';
 import RosterTable from './RosterTable';
+import StatsTable from './StatsTable';
 
 interface Props {
   gameId: string;
@@ -47,7 +48,7 @@ export default function GameTabs({ gameId }: Props) {
       </div>
 
       {activeTab === 'roster' && <RosterTable gameId={gameId} />}
-      {activeTab === 'stats' && <div className="text-sm text-gray-500">Stats coming soon.</div>}
+      {activeTab === 'stats' && <StatsTable gameId={gameId} />}
       {activeTab === 'boxscore' && <div className="text-sm text-gray-500">Box score coming soon.</div>}
     </div>
   );
