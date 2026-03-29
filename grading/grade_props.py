@@ -14,6 +14,7 @@ DB round trips per grade date
 ------------------------------
   1. Fetch FanDuel prop lines for the date.
   2. Fetch 60-day hit-rate history (bulk, all players + markets at once).
+     Now also returns opp_team_id per game row via nba.schedule join.
   3. Fetch full-season game totals (bulk, all players at once).
   4. Fetch matchup defense ranks (one query for all opp/position pairs).
   5. Fetch opponent/position info per player (one query).
@@ -283,6 +284,8 @@ def ensure_tables(engine):
                 matchup_grade     FLOAT         NULL,
                 regression_grade  FLOAT         NULL,
                 composite_grade   FLOAT         NULL,
+                hit_rate_opp      FLOAT         NULL,
+                sample_size_opp   INT           NULL,
                 created_at        DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
                 CONSTRAINT pk_daily_grades PRIMARY KEY (grade_id),
                 CONSTRAINT uq_daily_grades UNIQUE (
@@ -291,8 +294,7 @@ def ensure_tables(engine):
                 )
             )
         """))
-        # Idempotent migrations: add component columns when they are missing
-        # (existing databases created before Step 13 won't have them).
+        # Idempotent migrations for all component + opp columns.
         for col, dtype in [
             ("trend_grade",      "FLOAT"),
             ("momentum_grade",   "FLOAT"),
@@ -300,6 +302,8 @@ def ensure_tables(engine):
             ("matchup_grade",    "FLOAT"),
             ("regression_grade", "FLOAT"),
             ("composite_grade",  "FLOAT"),
+            ("hit_rate_opp",     "FLOAT"),
+            ("sample_size_opp",  "INT"),
         ]:
             conn.execute(text(f"""
                 IF NOT EXISTS (
@@ -316,6 +320,13 @@ def ensure_tables(engine):
 # DB fetches
 # ---------------------------------------------------------------------------
 def fetch_history(engine, player_ids, market_keys, as_of_date):
+    """
+    Fetch per-game stat history for hit rate computation.
+    Returns one row per (player_id, market_key, game_id) with:
+      stat_value, in_short_window, opp_team_id.
+    The opp_team_id column enables vs-opponent hit rate computation
+    without a separate DB round trip.
+    """
     gradeable = [m for m in market_keys if m in MARKET_STAT_MAP]
     if not player_ids or not gradeable:
         return pd.DataFrame()
@@ -330,18 +341,23 @@ def fetch_history(engine, player_ids, market_keys, as_of_date):
         mkt_vals = ", ".join(f"('{m}')" for m in mkts)
         branches.append(f"""
             SELECT b.player_id, m.market_key, b.game_date, b.game_id,
-                   {expr} AS stat_value
+                   {expr} AS stat_value,
+                   CASE WHEN b.team_id = s.home_team_id
+                        THEN s.away_team_id ELSE s.home_team_id
+                   END AS opp_team_id
             FROM nba.player_box_score_stats b
+            JOIN nba.schedule s ON s.game_id = b.game_id
             CROSS JOIN (SELECT market_key FROM (VALUES {mkt_vals}) AS t(market_key)) m
             WHERE b.player_id IN ({pid_list})
               AND b.game_date < :aod
               AND b.game_date >= DATEADD(day, -:lb_long, :aod)
-            GROUP BY b.player_id, b.game_id, b.game_date, m.market_key
+            GROUP BY b.player_id, b.game_id, b.game_date, b.team_id,
+                     s.home_team_id, s.away_team_id, m.market_key
         """)
 
     union_sql = "\nUNION ALL\n".join(branches)
     sql = text(f"""
-        SELECT player_id, market_key, game_date, stat_value,
+        SELECT player_id, market_key, game_date, stat_value, opp_team_id,
                CASE WHEN game_date >= DATEADD(day, -:lb_short, :aod) THEN 1 ELSE 0 END
                    AS in_short_window
         FROM ({union_sql}) AS combined
@@ -516,10 +532,6 @@ def build_standard_props(posted_df):
     if std.empty:
         return pd.DataFrame()
 
-    # Deduplicate posted rows to one per (player_id, market_key) before
-    # expanding the bracket. Multiple snapshots in odds.player_props can
-    # produce duplicate posted lines; without this the bracket rows would
-    # duplicate and cause MERGE conflicts.
     std = std.drop_duplicates(subset=["player_id", "market_key"])
 
     rows = []
@@ -626,12 +638,21 @@ def fetch_event_map_today(engine, grade_date_str):
 # ---------------------------------------------------------------------------
 # Hit rate computation
 # ---------------------------------------------------------------------------
-def compute_all_hit_rates(props_df, history_df):
+def compute_all_hit_rates(props_df, history_df, opp_info):
+    """
+    Compute hit_rate_60, hit_rate_20, weighted_hit_rate, grade (existing),
+    and hit_rate_opp, sample_size_opp (new: vs today's opponent only).
+
+    history_df must contain an opp_team_id column (added in fetch_history).
+    opp_info is the dict {player_id: {opp_team_id, position}} from fetch_opp_info.
+    """
     result = props_df.copy()
-    grade_cols = ("hit_rate_60", "sample_size_60", "hit_rate_20",
-                  "sample_size_20", "weighted_hit_rate", "grade")
+    all_grade_cols = (
+        "hit_rate_60", "sample_size_60", "hit_rate_20", "sample_size_20",
+        "weighted_hit_rate", "grade", "hit_rate_opp", "sample_size_opp",
+    )
     if history_df.empty:
-        for col in grade_cols:
+        for col in all_grade_cols:
             result[col] = None
         return result
 
@@ -643,6 +664,7 @@ def compute_all_hit_rates(props_df, history_df):
     merged = history.merge(lines, on=["player_id", "market_key"], how="inner")
     merged["hit"] = (merged["stat_value"] > merged["line_value"]).astype(int)
 
+    # --- 60-day and 20-day hit rates (unchanged) ---
     g60 = (merged.groupby(["player_id", "market_key", "line_value"])
            .agg(sample_size_60=("hit", "count"), hits_60=("hit", "sum")).reset_index())
     g60["hit_rate_60"] = g60["hits_60"] / g60["sample_size_60"]
@@ -672,6 +694,49 @@ def compute_all_hit_rates(props_df, history_df):
         lambda x: round(x * 100, 1) if pd.notna(x) else None)
     for col in ("weighted_hit_rate", "hit_rate_60", "hit_rate_20"):
         result[col] = result[col].apply(lambda x: round(x, 4) if pd.notna(x) else None)
+
+    # --- vs-opponent hit rate ---
+    # Build a lookup: player_id -> today's opp_team_id
+    player_opp = {
+        pid: int(info["opp_team_id"])
+        for pid, info in opp_info.items()
+        if info.get("opp_team_id") is not None
+    }
+
+    if player_opp and "opp_team_id" in merged.columns:
+        # Keep only history rows where the player faced today's opponent
+        merged["today_opp"] = merged["player_id"].map(player_opp)
+        opp_rows = merged[
+            merged["today_opp"].notna() &
+            (merged["opp_team_id"] == merged["today_opp"])
+        ]
+        if not opp_rows.empty:
+            g_opp = (
+                opp_rows.groupby(["player_id", "market_key", "line_value"])
+                .agg(sample_size_opp=("hit", "count"), hits_opp=("hit", "sum"))
+                .reset_index()
+            )
+            g_opp["hit_rate_opp"] = (
+                g_opp["hits_opp"] / g_opp["sample_size_opp"]
+            ).apply(lambda x: round(x, 4) if pd.notna(x) else None)
+            result = result.merge(
+                g_opp[["player_id", "market_key", "line_value",
+                        "hit_rate_opp", "sample_size_opp"]],
+                on=["player_id", "market_key", "line_value"], how="left"
+            )
+            result["sample_size_opp"] = result["sample_size_opp"].fillna(0).astype(int)
+        else:
+            result["hit_rate_opp"]   = None
+            result["sample_size_opp"] = 0
+    else:
+        result["hit_rate_opp"]   = None
+        result["sample_size_opp"] = 0
+
+    # Replace 0-sample opp rows with NULL for cleaner display
+    if "sample_size_opp" in result.columns:
+        result.loc[result["sample_size_opp"] == 0, "hit_rate_opp"]   = None
+        result.loc[result["sample_size_opp"] == 0, "sample_size_opp"] = None
+
     return result
 
 
@@ -847,9 +912,6 @@ def upsert_grades(engine, rows):
     if not rows:
         return 0
 
-    # Deduplicate on the MERGE key before staging. SQL Server's MERGE requires
-    # each source row to match at most one target row; duplicates in the source
-    # cause error 8672. The last occurrence wins (consistent with re-grade semantics).
     seen = {}
     for r in rows:
         k = (r["grade_date"], r["event_id"], r["player_id"],
@@ -872,13 +934,14 @@ def upsert_grades(engine, rows):
                 sample_size_60 INT, sample_size_20 INT,
                 weighted_hit_rate FLOAT, grade FLOAT,
                 trend_grade FLOAT, momentum_grade FLOAT, pattern_grade FLOAT,
-                matchup_grade FLOAT, regression_grade FLOAT, composite_grade FLOAT
+                matchup_grade FLOAT, regression_grade FLOAT, composite_grade FLOAT,
+                hit_rate_opp FLOAT, sample_size_opp INT
             )
         """))
         for i in range(0, len(rows), 500):
             chunk = rows[i:i + 500]
             conn.exec_driver_sql(
-                "INSERT INTO #stage_grades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO #stage_grades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r["grade_date"], r["event_id"], r["game_id"],
                   r["player_id"], r["player_name"], r["market_key"],
                   r["bookmaker_key"], r["line_value"],
@@ -886,7 +949,8 @@ def upsert_grades(engine, rows):
                   r["sample_size_60"], r["sample_size_20"],
                   r["weighted_hit_rate"], r["grade"],
                   r["trend_grade"], r["momentum_grade"], r["pattern_grade"],
-                  r["matchup_grade"], r["regression_grade"], r["composite_grade"])
+                  r["matchup_grade"], r["regression_grade"], r["composite_grade"],
+                  r["hit_rate_opp"], r["sample_size_opp"])
                  for r in chunk]
             )
         conn.execute(text("""
@@ -902,19 +966,22 @@ def upsert_grades(engine, rows):
                 t.weighted_hit_rate = s.weighted_hit_rate, t.grade = s.grade,
                 t.trend_grade = s.trend_grade, t.momentum_grade = s.momentum_grade,
                 t.pattern_grade = s.pattern_grade, t.matchup_grade = s.matchup_grade,
-                t.regression_grade = s.regression_grade, t.composite_grade = s.composite_grade
+                t.regression_grade = s.regression_grade, t.composite_grade = s.composite_grade,
+                t.hit_rate_opp = s.hit_rate_opp, t.sample_size_opp = s.sample_size_opp
             WHEN NOT MATCHED THEN INSERT (
                 grade_date, event_id, game_id, player_id, player_name,
                 market_key, bookmaker_key, line_value,
                 hit_rate_60, hit_rate_20, sample_size_60, sample_size_20,
                 weighted_hit_rate, grade, trend_grade, momentum_grade,
-                pattern_grade, matchup_grade, regression_grade, composite_grade
+                pattern_grade, matchup_grade, regression_grade, composite_grade,
+                hit_rate_opp, sample_size_opp
             ) VALUES (
                 s.grade_date, s.event_id, s.game_id, s.player_id, s.player_name,
                 s.market_key, s.bookmaker_key, s.line_value,
                 s.hit_rate_60, s.hit_rate_20, s.sample_size_60, s.sample_size_20,
                 s.weighted_hit_rate, s.grade, s.trend_grade, s.momentum_grade,
-                s.pattern_grade, s.matchup_grade, s.regression_grade, s.composite_grade
+                s.pattern_grade, s.matchup_grade, s.regression_grade, s.composite_grade,
+                s.hit_rate_opp, s.sample_size_opp
             );
         """))
     return len(rows)
@@ -928,7 +995,6 @@ def grade_props_for_date(engine, grade_date_str, props_df):
         log.info(f"  {grade_date_str}: no props.")
         return 0
 
-    # Deduplicate input on the MERGE key before any computation.
     props_df = props_df.drop_duplicates(
         subset=["player_id", "market_key", "line_value"]
     ).copy()
@@ -949,8 +1015,9 @@ def grade_props_for_date(engine, grade_date_str, props_df):
             matchup_pairs.append((int(info["opp_team_id"]), pg))
     matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
 
-    graded_df = compute_all_hit_rates(props_df, history_df)
-    pm_grades = precompute_player_market_grades(season_df, graded_df)
+    # Pass opp_info so compute_all_hit_rates can compute vs-opp rates
+    graded_df   = compute_all_hit_rates(props_df, history_df, opp_info)
+    pm_grades   = precompute_player_market_grades(season_df, graded_df)
     line_grades = precompute_line_grades(season_df, graded_df)
 
     rows = []
@@ -977,6 +1044,11 @@ def grade_props_for_date(engine, grade_date_str, props_df):
         matchup    = compute_matchup_grade(mkt, opp_id, position, matchup_cache)
         composite  = compute_composite(whr, trend, momentum, pattern, matchup, regression)
 
+        hr_opp  = r.get("hit_rate_opp")
+        hr_opp  = hr_opp if pd.notna(hr_opp) else None
+        n_opp   = r.get("sample_size_opp")
+        n_opp   = int(n_opp) if pd.notna(n_opp) and n_opp else None
+
         rows.append({
             "grade_date":        grade_date_str,
             "event_id":          r["event_id"],
@@ -998,11 +1070,14 @@ def grade_props_for_date(engine, grade_date_str, props_df):
             "matchup_grade":     matchup,
             "regression_grade":  regression,
             "composite_grade":   composite,
+            "hit_rate_opp":      hr_opp,
+            "sample_size_opp":   n_opp,
         })
 
     written = upsert_grades(engine, rows)
     graded  = sum(1 for r in rows if r["composite_grade"] is not None)
-    log.info(f"  {grade_date_str}: {written} rows written, {graded} with composite.")
+    with_opp = sum(1 for r in rows if r["hit_rate_opp"] is not None)
+    log.info(f"  {grade_date_str}: {written} rows written, {graded} with composite, {with_opp} with opp rate.")
     return written
 
 
