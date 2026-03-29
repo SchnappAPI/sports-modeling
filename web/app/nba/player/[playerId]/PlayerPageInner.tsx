@@ -9,6 +9,7 @@ interface GameLogRow {
   gameDate: string;
   opponentAbbr: string;
   isHome: boolean;
+  dnp: boolean;
   pts: number | null;
   reb: number | null;
   ast: number | null;
@@ -43,45 +44,41 @@ function fmtShooting(made: number | null, att: number | null): string {
 export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const searchParams = useSearchParams();
   const [log, setLog] = useState<GameLogRow[]>([]);
-  const [playerName, setPlayerName] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const backGameId = searchParams.get('gameId');
   const backTab = searchParams.get('tab') ?? 'stats';
-  const backHref = backGameId
-    ? `/nba?gameId=${backGameId}&tab=${backTab}`
-    : '/nba';
+  const backHref = backGameId ? `/nba?gameId=${backGameId}&tab=${backTab}` : '/nba';
 
   useEffect(() => {
-    fetch(`/api/player?playerId=${playerId}&games=20&sport=nba`)
+    // Request full season: 100 games is more than a full NBA season
+    fetch(`/api/player?playerId=${playerId}&games=100&sport=nba`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
-      .then((data) => {
-        const rows: GameLogRow[] = data.log ?? [];
-        setLog(rows);
-        if (rows.length > 0) {
-          // Player name isn't in the log rows directly, use the API name field if present
-        }
-      })
+      .then((data) => setLog(data.log ?? []))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [playerId]);
 
+  const played = log.filter((r) => !r.dnp);
+
   return (
     <div className="flex flex-col min-h-screen">
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3">
-        <Link
-          href={backHref}
-          className="text-gray-400 hover:text-gray-200 text-sm"
-        >
-          ← Back
+        <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">
+          &#8592; Back
         </Link>
         <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
           Player Game Log
         </span>
+        {!loading && !error && (
+          <span className="text-xs text-gray-600 ml-auto">
+            {played.length} GP / {log.length} team games
+          </span>
+        )}
       </div>
 
       <div className="flex-1 px-4 py-4">
@@ -92,7 +89,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         )}
         {!loading && !error && log.length > 0 && (
           <div className="overflow-x-auto">
-            <div className="text-xs text-gray-500 mb-3">Last {log.length} games</div>
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-xs text-gray-500 border-b border-gray-800">
@@ -112,21 +108,35 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               </thead>
               <tbody>
                 {log.map((row) => (
-                  <tr key={row.gameId} className="border-b border-gray-800">
+                  <tr
+                    key={row.gameId}
+                    className={[
+                      'border-b border-gray-800',
+                      row.dnp ? 'opacity-40' : '',
+                    ].join(' ')}
+                  >
                     <td className="py-1.5 pr-3 text-gray-300">{row.gameDate}</td>
                     <td className="py-1.5 pr-3 text-gray-400">
                       {row.isHome ? '' : '@'}{row.opponentAbbr}
                     </td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmtMin(row.min)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-100 font-medium">{fmt(row.pts)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.reb)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.ast)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.stl)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.blk)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.tov)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmtShooting(row.fgm, row.fga)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmtShooting(row.fg3m, row.fga)}</td>
-                    <td className="py-1.5 pl-2 text-right text-gray-300">{fmtShooting(row.ftm, row.fta)}</td>
+                    {row.dnp ? (
+                      <td colSpan={10} className="py-1.5 px-2 text-gray-500 text-xs">
+                        DNP
+                      </td>
+                    ) : (
+                      <>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmtMin(row.min)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-100 font-medium">{fmt(row.pts)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.reb)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.ast)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.stl)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.blk)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.tov)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmtShooting(row.fgm, row.fga)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmtShooting(row.fg3m, row.fga)}</td>
+                        <td className="py-1.5 pl-2 text-right text-gray-300">{fmtShooting(row.ftm, row.fta)}</td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>
