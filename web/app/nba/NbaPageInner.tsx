@@ -21,10 +21,11 @@ export default function NbaPageInner() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       })
-      .then((data: Game[]) => {
-        setGames(data);
-        if (data.length > 0 && !searchParams.get('gameId')) {
-          router.replace(`/nba?gameId=${data[0].gameId}`);
+      .then((data: { games: Game[] }) => {
+        const list = data.games ?? [];
+        setGames(list);
+        if (list.length > 0 && !searchParams.get('gameId')) {
+          router.replace(`/nba?gameId=${list[0].gameId}`);
         }
       })
       .catch((err) => setError(err.message))
