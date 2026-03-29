@@ -177,11 +177,21 @@ DDL_STATEMENTS = [
         roster_status TINYINT      NULL,
         from_year     SMALLINT     NULL,
         to_year       SMALLINT     NULL,
+        position      VARCHAR(10)  NULL,
         created_at    DATETIME2    NOT NULL DEFAULT GETUTCDATE(),
         CONSTRAINT pk_nba_players      PRIMARY KEY (player_id),
         CONSTRAINT fk_nba_players_team FOREIGN KEY (team_id)
             REFERENCES nba.teams (team_id)
     )
+    """,
+    # Migration: add position column to existing nba.players tables created
+    # before this column was introduced.
+    """
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.columns
+        WHERE object_id = OBJECT_ID(N'nba.players') AND name = 'position'
+    )
+        ALTER TABLE nba.players ADD position VARCHAR(10) NULL
     """,
     """
     IF NOT EXISTS (SELECT 1 FROM sys.objects
@@ -552,6 +562,7 @@ def load_players(engine, season):
             "roster_status": safe_int(row.get("ROSTER_STATUS")),
             "from_year":     safe_int(row.get("FROM_YEAR")),
             "to_year":       safe_int(row.get("TO_YEAR")),
+            "position":      safe_str(row.get("POSITION")),
         })
     if rows:
         upsert(pd.DataFrame(rows), engine, "nba", "players", ["player_id"])
