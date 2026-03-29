@@ -1,7 +1,10 @@
-import os
+"""
+Diagnostic: inspect alternate prop market keys and sample line values
+from both odds.upcoming_player_props and odds.player_props.
+"""
+import os, time
 import pandas as pd
 from sqlalchemy import create_engine, text
-import time
 
 def get_engine(max_retries=3, retry_wait=45):
     conn_str = (
@@ -17,73 +20,76 @@ def get_engine(max_retries=3, retry_wait=45):
             return engine
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f'Connection attempt {attempt+1} failed. Retrying in {retry_wait}s...')
+                print(f'Attempt {attempt+1} failed, retrying in {retry_wait}s...')
                 time.sleep(retry_wait)
             else:
                 raise
 
 def run():
     engine = get_engine()
-    print('Connected to database.\n')
+    print('Connected.\n')
 
-    # All tables with row counts, grouped by schema
-    tables_sql = """
+    # 1. All distinct market_keys containing 'alternate' in upcoming props
+    print('=== upcoming_player_props: alternate market_keys ===')
+    df = pd.read_sql(text("""
+        SELECT DISTINCT market_key, bookmaker_key, outcome_name
+        FROM odds.upcoming_player_props
+        WHERE market_key LIKE '%alternate%'
+        ORDER BY market_key, bookmaker_key
+    """), engine)
+    print(df.to_string(index=False))
+
+    # 2. Sample line values per alternate market from upcoming props
+    print('\n=== upcoming_player_props: sample outcome_point per alt market (fanduel, Over) ===')
+    df2 = pd.read_sql(text("""
         SELECT
-            t.TABLE_SCHEMA   AS schema_name,
-            t.TABLE_NAME     AS table_name
-        FROM INFORMATION_SCHEMA.TABLES t
-        WHERE t.TABLE_TYPE = 'BASE TABLE'
-        ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME
-    """
-    tables = pd.read_sql(tables_sql, engine)
+            market_key,
+            STRING_AGG(CAST(CAST(outcome_point AS DECIMAL(6,1)) AS VARCHAR), ', ')
+                WITHIN GROUP (ORDER BY outcome_point) AS line_values
+        FROM (
+            SELECT DISTINCT market_key, outcome_point
+            FROM odds.upcoming_player_props
+            WHERE market_key   LIKE '%alternate%'
+              AND bookmaker_key = 'fanduel'
+              AND outcome_name  = 'Over'
+              AND outcome_point IS NOT NULL
+        ) x
+        GROUP BY market_key
+        ORDER BY market_key
+    """), engine)
+    print(df2.to_string(index=False))
 
-    if tables.empty:
-        print('No tables found.')
-        return
+    # 3. Same check against historical player_props for broader coverage
+    print('\n=== player_props: distinct alternate market_keys (fanduel) ===')
+    df3 = pd.read_sql(text("""
+        SELECT DISTINCT market_key
+        FROM odds.player_props
+        WHERE market_key   LIKE '%alternate%'
+          AND bookmaker_key = 'fanduel'
+        ORDER BY market_key
+    """), engine)
+    print(df3.to_string(index=False))
 
-    current_schema = None
-    for _, row in tables.iterrows():
-        schema = row['schema_name']
-        table = row['table_name']
-
-        if schema != current_schema:
-            print(f'--- Schema: {schema} ---')
-            current_schema = schema
-
-        try:
-            with engine.connect() as conn:
-                result = conn.execute(text(f'SELECT COUNT(*) FROM [{schema}].[{table}]'))
-                count = result.scalar()
-            print(f'  {table}: {count:,} rows')
-        except Exception as e:
-            print(f'  {table}: ERROR - {e}')
-
-    print('\n--- Column inventory ---')
-    # Print columns for every table
-    cols_sql = """
+    # 4. Sample line values per alt market from historical props (last 30 days)
+    print('\n=== player_props: outcome_point per alt market (fanduel, Over, last 30 days) ===')
+    df4 = pd.read_sql(text("""
         SELECT
-            c.TABLE_SCHEMA,
-            c.TABLE_NAME,
-            c.COLUMN_NAME,
-            c.DATA_TYPE,
-            c.IS_NULLABLE
-        FROM INFORMATION_SCHEMA.COLUMNS c
-        INNER JOIN INFORMATION_SCHEMA.TABLES t
-            ON c.TABLE_SCHEMA = t.TABLE_SCHEMA
-            AND c.TABLE_NAME  = t.TABLE_NAME
-            AND t.TABLE_TYPE  = 'BASE TABLE'
-        ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
-    """
-    cols = pd.read_sql(cols_sql, engine)
-
-    current_table = None
-    for _, row in cols.iterrows():
-        key = f"{row['TABLE_SCHEMA']}.{row['TABLE_NAME']}"
-        if key != current_table:
-            print(f'\n  [{row["TABLE_SCHEMA"]}].[{row["TABLE_NAME"]}]')
-            current_table = key
-        nullable = '(nullable)' if row['IS_NULLABLE'] == 'YES' else ''
-        print(f'    {row["COLUMN_NAME"]}  {row["DATA_TYPE"]}  {nullable}')
+            market_key,
+            STRING_AGG(CAST(CAST(outcome_point AS DECIMAL(6,1)) AS VARCHAR), ', ')
+                WITHIN GROUP (ORDER BY outcome_point) AS line_values
+        FROM (
+            SELECT DISTINCT market_key, outcome_point
+            FROM odds.player_props
+            WHERE market_key    LIKE '%alternate%'
+              AND bookmaker_key  = 'fanduel'
+              AND outcome_name   = 'Over'
+              AND outcome_point  IS NOT NULL
+              AND commence_time >= DATEADD(day, -30, GETUTCDATE())
+        ) x
+        GROUP BY market_key
+        ORDER BY market_key
+    """), engine)
+    print(df4.to_string(index=False))
 
 if __name__ == '__main__':
     run()
