@@ -40,7 +40,6 @@ function todayLocal(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// Add or subtract days from a YYYY-MM-DD string without timezone issues.
 function shiftDate(dateStr: string, days: number): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(y, m - 1, d + days);
@@ -51,8 +50,6 @@ export default function NbaPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Initialise date from URL param so navigating back from a player page
-  // restores the same date.
   const urlDate = searchParams.get('date');
   const [selectedDate, setSelectedDate] = useState<string>(urlDate ?? todayLocal());
   const [games, setGames] = useState<Game[]>([]);
@@ -103,16 +100,16 @@ export default function NbaPageInner() {
     applyDate(e.target.value);
   }
 
-  const gradesHref = activeGameId
-    ? `/nba/grades?gameId=${activeGameId}&date=${selectedDate}`
-    : `/nba/grades?date=${selectedDate}`;
+  // Always link to the full-day grades view so the user sees all games.
+  // A gameId scoped link is available from within the grades page itself
+  // if they navigate there from a specific game context.
+  const gradesHref = `/nba/grades?date=${selectedDate}`;
 
   return (
     <div className="flex flex-col min-h-screen">
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between gap-3">
         <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">NBA</span>
 
-        {/* Date picker with prev/next arrows */}
         <div className="flex items-center gap-1">
           <button
             onClick={() => applyDate(shiftDate(selectedDate, -1))}
