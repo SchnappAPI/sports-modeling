@@ -188,17 +188,17 @@ export async function getPlayerAverages(
          SELECT player_id, game_id FROM ranked WHERE rn <= @lastN
        )
        SELECT
-         l.player_id                          AS playerId,
-         l.player_name                        AS playerName,
-         COUNT(DISTINCT pbs.game_id)          AS games,
-         AVG(CAST(pbs.pts  AS FLOAT))         AS avgPts,
-         AVG(CAST(pbs.reb  AS FLOAT))         AS avgReb,
-         AVG(CAST(pbs.ast  AS FLOAT))         AS avgAst,
-         AVG(CAST(pbs.stl  AS FLOAT))         AS avgStl,
-         AVG(CAST(pbs.blk  AS FLOAT))         AS avgBlk,
-         AVG(CAST(pbs.tov  AS FLOAT))         AS avgTov,
-         AVG(CAST(pbs.min  AS FLOAT))         AS avgMin,
-         AVG(CAST(pbs.fg3m AS FLOAT))         AS avg3pm
+         l.player_id                               AS playerId,
+         l.player_name                             AS playerName,
+         COUNT(DISTINCT pbs.game_id)               AS games,
+         AVG(CAST(pbs.pts     AS FLOAT))           AS avgPts,
+         AVG(CAST(pbs.reb     AS FLOAT))           AS avgReb,
+         AVG(CAST(pbs.ast     AS FLOAT))           AS avgAst,
+         AVG(CAST(pbs.stl     AS FLOAT))           AS avgStl,
+         AVG(CAST(pbs.blk     AS FLOAT))           AS avgBlk,
+         AVG(CAST(pbs.tov     AS FLOAT))           AS avgTov,
+         AVG(CAST(pbs.minutes AS FLOAT))           AS avgMin,
+         AVG(CAST(pbs.fg3m    AS FLOAT))           AS avg3pm
        FROM lineup l
        LEFT JOIN nba.player_box_score_stats pbs
          ON pbs.player_id = l.player_id
@@ -240,13 +240,22 @@ export async function getBoxscore(gameId: string): Promise<BoxscoreRow[]> {
     .input('gameId', mssql.VarChar, gameId)
     .query<BoxscoreRow>(
       `SELECT
-         pbs.player_id  AS playerId,
-         p.player_name  AS playerName,
-         pbs.team_id    AS teamId,
-         pbs.period     AS period,
-         pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk,
-         pbs.tov, pbs.min, pbs.fg3m, pbs.fgm, pbs.fga,
-         pbs.ftm, pbs.fta
+         pbs.player_id      AS playerId,
+         p.player_name      AS playerName,
+         pbs.team_id        AS teamId,
+         pbs.period         AS period,
+         pbs.pts,
+         pbs.reb,
+         pbs.ast,
+         pbs.stl,
+         pbs.blk,
+         pbs.tov,
+         pbs.minutes        AS min,
+         pbs.fg3m,
+         pbs.fgm,
+         pbs.fga,
+         pbs.ftm,
+         pbs.fta
        FROM nba.player_box_score_stats pbs
        JOIN nba.players p ON p.player_id = pbs.player_id
        WHERE pbs.game_id = @gameId
@@ -289,16 +298,25 @@ export async function getPlayerGames(
     .input('lastN', mssql.Int, lastN)
     .query<PlayerGameRow>(
       `SELECT TOP (@lastN)
-         pbs.game_id       AS gameId,
+         pbs.game_id                            AS gameId,
          CONVERT(VARCHAR(10), g.game_date, 120) AS gameDate,
          CASE WHEN g.home_team_id = pbs.team_id
               THEN at.team_tricode
               ELSE ht.team_tricode
-         END               AS opponentAbbr,
+         END                                    AS opponentAbbr,
          CASE WHEN g.home_team_id = pbs.team_id THEN 1 ELSE 0 END AS isHome,
-         pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk,
-         pbs.tov, pbs.min, pbs.fg3m, pbs.fgm, pbs.fga,
-         pbs.ftm, pbs.fta
+         pbs.pts,
+         pbs.reb,
+         pbs.ast,
+         pbs.stl,
+         pbs.blk,
+         pbs.tov,
+         pbs.minutes AS min,
+         pbs.fg3m,
+         pbs.fgm,
+         pbs.fga,
+         pbs.ftm,
+         pbs.fta
        FROM nba.player_box_score_stats pbs
        JOIN nba.games g  ON g.game_id  = pbs.game_id
        JOIN nba.teams ht ON ht.team_id = g.home_team_id
