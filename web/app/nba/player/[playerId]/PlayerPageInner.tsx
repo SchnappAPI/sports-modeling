@@ -62,6 +62,7 @@ interface PlayerInfo {
   oppTeamId: number | null;
   position: string | null;
   playerName: string | null;
+  teamId: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,11 +206,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     return qs ? `/nba?${qs}` : '/nba';
   })();
 
-  const [log, setLog]             = useState<GameLogRow[]>([]);
-  const [grades, setGrades]       = useState<GradeLine[]>([]);
-  const [playerInfo, setPlayerInfo] = useState<PlayerInfo>({ oppTeamId: null, position: null, playerName: null });
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState<string | null>(null);
+  const [log, setLog]               = useState<GameLogRow[]>([]);
+  const [grades, setGrades]         = useState<GradeLine[]>([]);
+  const [playerInfo, setPlayerInfo] = useState<PlayerInfo>({ oppTeamId: null, position: null, playerName: null, teamId: null });
+  const [loading, setLoading]       = useState(true);
+  const [error, setError]           = useState<string | null>(null);
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
   const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
 
@@ -218,8 +219,9 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     setError(null);
     setLog([]);
     setGrades([]);
-    setPlayerInfo({ oppTeamId: null, position: null, playerName: null });
+    setPlayerInfo({ oppTeamId: null, position: null, playerName: null, teamId: null });
     setSelectedPeriods(new Set());
+    setTeamPlayers([]);
 
     Promise.all([
       fetch(`/api/player?playerId=${playerId}&lastN=9999&sport=nba`)
@@ -231,17 +233,26 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         setLog(playerData.log ?? []);
         setGrades(gradeData.grades ?? []);
 
-        // /api/player now returns playerName, position, and lastOppTeamId directly.
-        // Use these as the baseline for the matchup section — always available.
-        setPlayerInfo({
+        const info: PlayerInfo = {
           playerName: playerData.playerName ?? null,
           position:   playerData.position   ?? null,
           oppTeamId:  playerData.lastOppTeamId ?? null,
-        });
+          teamId:     playerData.teamId ?? null,
+        };
+        setPlayerInfo(info);
 
-        // If we have a gameId (arrived from a game context), override with the
-        // game-specific opponent so the matchup reflects today's actual matchup
-        // rather than the most recently played opponent.
+        // Fetch team roster for the player switcher dropdown using the player's
+        // own teamId. This runs unconditionally so the dropdown is always present,
+        // regardless of whether the page was opened from a game context.
+        if (playerData.teamId) {
+          fetch(`/api/team-players?teamId=${playerData.teamId}`)
+            .then((r) => r.json())
+            .then((d) => setTeamPlayers(d.players ?? []))
+            .catch(() => {});
+        }
+
+        // If we arrived from a game context, override the opponent with the
+        // game-specific matchup so the defense section reflects today's opponent.
         if (backGameId) {
           fetch(`/api/game-grades?gameId=${backGameId}`)
             .then((r) => r.json())
@@ -257,11 +268,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 }));
               }
             })
-            .catch(() => {});
-
-          fetch(`/api/team-players?gameId=${backGameId}`)
-            .then((r) => r.json())
-            .then((d) => setTeamPlayers(d.players ?? []))
             .catch(() => {});
         }
       })
@@ -319,7 +325,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     return value > line ? 'text-green-400' : 'text-red-400';
   }
 
-  // Display name: from the API response (always available), not from log rows.
   const displayName = playerInfo.playerName ?? `Player ${playerId}`;
 
   const todayMarket = useMemo(() => {
@@ -413,7 +418,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         </table>
       </div>
 
-      {/* Matchup defense — always shown when position and opponent are known */}
+      {/* Matchup defense */}
       {showMatchup && (
         <MatchupDefense
           oppTeamId={playerInfo.oppTeamId!}
