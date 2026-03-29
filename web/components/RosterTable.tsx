@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 
 interface RosterRow {
   playerId: number | null;
@@ -13,9 +14,10 @@ interface RosterRow {
 
 interface Props {
   gameId: string;
+  selectedDate: string;
 }
 
-export default function RosterTable({ gameId }: Props) {
+export default function RosterTable({ gameId, selectedDate }: Props) {
   const [roster, setRoster] = useState<RosterRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,13 +41,18 @@ export default function RosterTable({ gameId }: Props) {
 
   const teams = Array.from(new Set(roster.map((r) => r.teamAbbr)));
 
-  // Is this team's lineup projected or confirmed?
-  // A team is projected if any of its players has lineupStatus = 'Projected'.
-  // Once confirmed data arrives the lineup_poll replaces projected rows.
   function teamIsProjected(abbr: string): boolean {
     return roster
       .filter((r) => r.teamAbbr === abbr)
       .some((r) => r.lineupStatus === 'Projected');
+  }
+
+  function playerHref(playerId: number): string {
+    const params = new URLSearchParams();
+    params.set('gameId', gameId);
+    params.set('tab', 'roster');
+    if (selectedDate) params.set('date', selectedDate);
+    return `/nba/player/${playerId}?${params.toString()}`;
   }
 
   return (
@@ -58,7 +65,6 @@ export default function RosterTable({ gameId }: Props) {
 
         return (
           <div key={abbr}>
-            {/* Team header with confirmation status */}
             <div className="flex items-center gap-2 mb-2">
               <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
                 {abbr}
@@ -78,7 +84,18 @@ export default function RosterTable({ gameId }: Props) {
               <tbody>
                 {starters.map((p) => (
                   <tr key={p.playerName} className="border-b border-gray-800">
-                    <td className="py-1.5 pr-2 text-gray-100">{p.playerName}</td>
+                    <td className="py-1.5 pr-2">
+                      {p.playerId != null ? (
+                        <Link
+                          href={playerHref(p.playerId)}
+                          className="text-gray-100 hover:text-blue-400 transition-colors"
+                        >
+                          {p.playerName}
+                        </Link>
+                      ) : (
+                        <span className="text-gray-100">{p.playerName}</span>
+                      )}
+                    </td>
                     <td className="py-1.5 pr-2 text-gray-500 text-xs">{p.position ?? ''}</td>
                     <td className="py-1.5 text-right">
                       <span className="text-xs bg-blue-900 text-blue-300 px-1 rounded">S</span>
@@ -87,7 +104,18 @@ export default function RosterTable({ gameId }: Props) {
                 ))}
                 {bench.map((p) => (
                   <tr key={p.playerName} className="border-b border-gray-800">
-                    <td className="py-1.5 pr-2 text-gray-300">{p.playerName}</td>
+                    <td className="py-1.5 pr-2">
+                      {p.playerId != null ? (
+                        <Link
+                          href={playerHref(p.playerId)}
+                          className="text-gray-300 hover:text-blue-400 transition-colors"
+                        >
+                          {p.playerName}
+                        </Link>
+                      ) : (
+                        <span className="text-gray-300">{p.playerName}</span>
+                      )}
+                    </td>
                     <td className="py-1.5 pr-2 text-gray-500 text-xs">{p.position ?? ''}</td>
                     <td className="py-1.5"></td>
                   </tr>

@@ -40,7 +40,6 @@ export default function GameTabs({
   const isLive      = gameStatus === 2;
   const tabs        = getTabs(isLive);
 
-  // Default to 'live' when game is in progress, otherwise 'roster'.
   const rawTab    = searchParams.get('tab') as Tab | null;
   const activeTab = rawTab && tabs.includes(rawTab) ? rawTab : (isLive ? 'live' : 'roster');
 
@@ -80,7 +79,9 @@ export default function GameTabs({
       {activeTab === 'live' && isLive && (
         <LiveBoxScore gameId={gameId} selectedDate={selectedDate} />
       )}
-      {activeTab === 'roster' && <RosterTable gameId={gameId} />}
+      {activeTab === 'roster' && (
+        <RosterTable gameId={gameId} selectedDate={selectedDate} />
+      )}
       {activeTab === 'stats' && (
         <StatsTable
           gameId={gameId}
