@@ -54,7 +54,7 @@ Alternate line grid (half-points matching FanDuel's actual format)
   Only lines where FanDuel has posted odds are written. Graded overnight
   only; never re-graded intraday.
 
-Component grades (all 0–100)
+Component grades (all 0-100)
 -----------------------------
   weighted_hit_rate  Blended 20/60-day hit rate. Primary signal.
   trend_grade        Raw stat mean: last-10 games vs last-30. Centered at 50.
@@ -114,8 +114,8 @@ TREND_SHORT         = 10
 TREND_LONG          = 30
 TREND_MIN           = 3
 PATTERN_MIN         = 3
-BRACKET_STEPS       = 5    # steps above and below posted line
-BRACKET_INCREMENT   = 1.0  # step size for standard bracket
+BRACKET_STEPS       = 5
+BRACKET_INCREMENT   = 1.0
 
 BATCH_DEFAULT = 10
 
@@ -141,8 +141,6 @@ ALTERNATE_MARKETS = {
 
 PLAYER_MARKETS = STANDARD_MARKETS | ALTERNATE_MARKETS
 
-# Alternate line grids — half-points matching FanDuel's actual format.
-# Keyed by the stat column shared between standard and alternate markets.
 ALT_GRIDS = {
     "pts":  [4.5, 9.5, 14.5, 19.5, 24.5, 29.5, 34.5, 39.5, 44.5],
     "reb":  [3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5],
@@ -156,7 +154,6 @@ ALT_GRIDS = {
     "ra":   [4.5, 9.5, 14.5, 19.5, 24.5],
 }
 
-# Maps market_key -> SQL stat expression (for 60-day hit rate query).
 MARKET_STAT_MAP = {
     "player_points":                            "SUM(pts)",
     "player_points_alternate":                  "SUM(pts)",
@@ -180,7 +177,6 @@ MARKET_STAT_MAP = {
     "player_rebounds_assists_alternate":        "SUM(reb) + SUM(ast)",
 }
 
-# Maps market_key -> season_history column name.
 MARKET_STAT_COL = {
     "player_points":                            "pts",
     "player_points_alternate":                  "pts",
@@ -205,18 +201,18 @@ MARKET_STAT_COL = {
 }
 
 MARKET_DEF_RANK = {
-    "player_points":            "rank_pts",
-    "player_points_alternate":  "rank_pts",
-    "player_rebounds":          "rank_reb",
-    "player_rebounds_alternate":"rank_reb",
-    "player_assists":           "rank_ast",
-    "player_assists_alternate": "rank_ast",
-    "player_threes":            "rank_fg3m",
-    "player_threes_alternate":  "rank_fg3m",
-    "player_blocks":            "rank_blk",
-    "player_blocks_alternate":  "rank_blk",
-    "player_steals":            "rank_stl",
-    "player_steals_alternate":  "rank_stl",
+    "player_points":             "rank_pts",
+    "player_points_alternate":   "rank_pts",
+    "player_rebounds":           "rank_reb",
+    "player_rebounds_alternate": "rank_reb",
+    "player_assists":            "rank_ast",
+    "player_assists_alternate":  "rank_ast",
+    "player_threes":             "rank_fg3m",
+    "player_threes_alternate":   "rank_fg3m",
+    "player_blocks":             "rank_blk",
+    "player_blocks_alternate":   "rank_blk",
+    "player_steals":             "rank_stl",
+    "player_steals_alternate":   "rank_stl",
 }
 
 # ---------------------------------------------------------------------------
@@ -491,8 +487,6 @@ BASE_PROPS_SELECT = """
 
 
 def fetch_posted_props(engine, table="odds.upcoming_player_props", date_filter="", params=None):
-    """Fetch what FanDuel has actually posted. Used as source for standard lines
-    and as the odds filter for alternate lines."""
     sql = text(BASE_PROPS_SELECT.format(
         props_table=table, mkt_list=MARKET_LIST_SQL, date_filter=date_filter,
     ))
@@ -500,34 +494,32 @@ def fetch_posted_props(engine, table="odds.upcoming_player_props", date_filter="
 
 
 def build_standard_props(posted_df):
-    """
-    From posted standard lines, generate an 11-value bracket (posted ± 5
-    steps of 1.0) per player per market. Minimum line value 0.5.
-    Returns a DataFrame with the same columns as posted_df plus bracket rows.
-    Each bracket row inherits event_id, game_id, player_id, player_name,
-    market_key, bookmaker_key from the posted row. over_price is NULL for
-    non-posted bracket lines.
-    """
     std = posted_df[posted_df["market_key"].isin(STANDARD_MARKETS)].copy()
     if std.empty:
         return pd.DataFrame()
+
+    # Deduplicate posted rows to one per (player_id, market_key) before
+    # expanding the bracket. Multiple snapshots in odds.player_props can
+    # produce duplicate posted lines; without this the bracket rows would
+    # duplicate and cause MERGE conflicts.
+    std = std.drop_duplicates(subset=["player_id", "market_key"])
 
     rows = []
     for _, r in std.iterrows():
         center = float(r["line_value"])
         for step in range(-BRACKET_STEPS, BRACKET_STEPS + 1):
-            lv = center + step * BRACKET_INCREMENT
+            lv = round(center + step * BRACKET_INCREMENT, 1)
             if lv < 0.5:
                 continue
             rows.append({
-                "event_id":     r["event_id"],
-                "player_id":    r["player_id"],
-                "player_name":  r["player_name"],
-                "market_key":   r["market_key"],
-                "bookmaker_key":r["bookmaker_key"],
-                "line_value":   lv,
-                "game_id":      r["game_id"],
-                "over_price":   r["over_price"] if step == 0 else None,
+                "event_id":      r["event_id"],
+                "player_id":     r["player_id"],
+                "player_name":   r["player_name"],
+                "market_key":    r["market_key"],
+                "bookmaker_key": r["bookmaker_key"],
+                "line_value":    lv,
+                "game_id":       r["game_id"],
+                "over_price":    r["over_price"] if step == 0 else None,
             })
     return pd.DataFrame(rows).drop_duplicates(
         subset=["player_id", "market_key", "line_value"]
@@ -535,14 +527,6 @@ def build_standard_props(posted_df):
 
 
 def build_alt_props(posted_df, active_players_df, event_map):
-    """
-    Generate the static alternate grid rows, filtered to lines FanDuel
-    has actually priced. active_players_df has columns: player_id,
-    player_name, team_id. event_map: {team_id: (event_id, game_id)}.
-
-    Returns a DataFrame with the same schema as build_standard_props output.
-    """
-    # Build a set of (player_id, market_key, line_value) that FanDuel has posted.
     alt_posted = posted_df[posted_df["market_key"].isin(ALTERNATE_MARKETS)].copy()
     if alt_posted.empty:
         return pd.DataFrame()
@@ -552,7 +536,6 @@ def build_alt_props(posted_df, active_players_df, event_map):
             alt_posted["market_key"],
             alt_posted["line_value"].astype(float))
     )
-    # Also build price lookup for posted lines.
     price_lookup = {
         (int(r["player_id"]), r["market_key"], float(r["line_value"])): r["over_price"]
         for _, r in alt_posted.iterrows()
@@ -560,10 +543,10 @@ def build_alt_props(posted_df, active_players_df, event_map):
 
     rows = []
     for _, p in active_players_df.iterrows():
-        pid       = int(p["player_id"])
-        pname     = p["player_name"]
-        team_id   = int(p["team_id"])
-        ev_info   = event_map.get(team_id)
+        pid     = int(p["player_id"])
+        pname   = p["player_name"]
+        team_id = int(p["team_id"])
+        ev_info = event_map.get(team_id)
         if ev_info is None:
             continue
         event_id, game_id = ev_info
@@ -572,19 +555,18 @@ def build_alt_props(posted_df, active_players_df, event_map):
             stat_col = MARKET_STAT_COL.get(mkt)
             if stat_col is None:
                 continue
-            grid = ALT_GRIDS.get(stat_col, [])
-            for lv in grid:
+            for lv in ALT_GRIDS.get(stat_col, []):
                 if (pid, mkt, float(lv)) not in posted_set:
                     continue
                 rows.append({
-                    "event_id":     event_id,
-                    "player_id":    pid,
-                    "player_name":  pname,
-                    "market_key":   mkt,
+                    "event_id":      event_id,
+                    "player_id":     pid,
+                    "player_name":   pname,
+                    "market_key":    mkt,
                     "bookmaker_key": BOOKMAKER,
-                    "line_value":   float(lv),
-                    "game_id":      game_id,
-                    "over_price":   price_lookup.get((pid, mkt, float(lv))),
+                    "line_value":    float(lv),
+                    "game_id":       game_id,
+                    "over_price":    price_lookup.get((pid, mkt, float(lv))),
                 })
 
     return pd.DataFrame(rows).drop_duplicates(
@@ -593,7 +575,6 @@ def build_alt_props(posted_df, active_players_df, event_map):
 
 
 def fetch_active_players_today(engine, grade_date_str):
-    """Active roster players whose team is playing today."""
     sql = text("""
         SELECT p.player_id, p.player_name, p.team_id
         FROM nba.players p
@@ -606,10 +587,8 @@ def fetch_active_players_today(engine, grade_date_str):
 
 
 def fetch_event_map_today(engine, grade_date_str):
-    """Returns {team_id: (event_id, game_id)} for today's games."""
     sql = text("""
-        SELECT ue.game_id AS schedule_game_id,
-               egm.event_id, egm.game_id,
+        SELECT egm.event_id, egm.game_id,
                s.home_team_id, s.away_team_id
         FROM nba.schedule s
         JOIN odds.event_game_map egm ON egm.game_id = s.game_id
@@ -693,20 +672,12 @@ def _safe(v):
 
 
 def precompute_player_market_grades(season_df, props_df):
-    """
-    Precompute trend_grade and regression_grade for every unique
-    (player_id, market_key) combination present in props_df.
-    These do not depend on line_value so we compute them once per
-    player-market pair and reuse across all line values.
-
-    Returns dict: {(player_id, market_key): {trend_grade, regression_grade}}
-    """
     combos = props_df[["player_id", "market_key"]].drop_duplicates()
     result = {}
 
     for _, row in combos.iterrows():
-        pid = int(row["player_id"])
-        mkt = row["market_key"]
+        pid      = int(row["player_id"])
+        mkt      = row["market_key"]
         stat_col = MARKET_STAT_COL.get(mkt)
         if stat_col is None:
             result[(pid, mkt)] = {"trend_grade": None, "regression_grade": None}
@@ -719,7 +690,6 @@ def precompute_player_market_grades(season_df, props_df):
 
         vals = pdf[stat_col].dropna().values
 
-        # Trend grade
         trend = None
         if len(vals) >= TREND_MIN:
             short = vals[-TREND_SHORT:] if len(vals) >= TREND_SHORT else vals
@@ -727,18 +697,15 @@ def precompute_player_market_grades(season_df, props_df):
             if len(short) >= TREND_MIN:
                 sm, lm = float(np.mean(short)), float(np.mean(long))
                 if lm != 0:
-                    delta = (sm - lm) / lm
-                    trend = _safe(max(0.0, min(100.0, 50.0 + delta * 150.0)))
+                    trend = _safe(max(0.0, min(100.0, 50.0 + (sm - lm) / lm * 150.0)))
 
-        # Regression grade
         regression = None
         if len(vals) >= SEASON_MIN:
             recent = vals[-RECENT_WINDOW:] if len(vals) >= RECENT_WINDOW else vals[-max(1, len(vals)//2):]
             if len(recent) >= 3:
-                s_mean = float(np.mean(vals))
-                s_std  = float(np.std(vals))
+                s_std = float(np.std(vals))
                 if s_std >= 0.01:
-                    z = (float(np.mean(recent)) - s_mean) / s_std
+                    z = (float(np.mean(recent)) - float(np.mean(vals))) / s_std
                     regression = _safe(max(0.0, min(100.0, 50.0 - z * 25.0)))
 
         result[(pid, mkt)] = {"trend_grade": trend, "regression_grade": regression}
@@ -747,29 +714,19 @@ def precompute_player_market_grades(season_df, props_df):
 
 
 def precompute_line_grades(season_df, props_df):
-    """
-    Precompute momentum_grade and pattern_grade for every unique
-    (player_id, market_key, line_value) combination in props_df.
-    These depend on line_value but can still be vectorized by building
-    the hit sequence once per player-market-line combination.
-
-    Returns dict: {(player_id, market_key, line_value): {momentum_grade, pattern_grade}}
-    """
     combos = props_df[["player_id", "market_key", "line_value"]].drop_duplicates()
     result = {}
 
-    # Group season history by player once to avoid repeated DataFrame filtering.
     player_groups = {
         pid: grp.sort_values("game_date")
         for pid, grp in season_df.groupby("player_id")
     }
 
     for _, row in combos.iterrows():
-        pid  = int(row["player_id"])
-        mkt  = row["market_key"]
-        lv   = float(row["line_value"])
-        key  = (pid, mkt, lv)
-
+        pid      = int(row["player_id"])
+        mkt      = row["market_key"]
+        lv       = float(row["line_value"])
+        key      = (pid, mkt, lv)
         stat_col = MARKET_STAT_COL.get(mkt)
         pdf      = player_groups.get(pid)
 
@@ -784,13 +741,9 @@ def precompute_line_grades(season_df, props_df):
 
         hits = [bool(v > lv) for v in vals]
 
-        # Momentum grade — log-scaled uncapped streak.
         momentum = None
         if hits:
-            last = hits[-1]
-            streak = sum(1 for _ in (h for h in reversed(hits) if h == last)
-                         if True)
-            # Correct streak count using early-exit logic.
+            last   = hits[-1]
             streak = 0
             for h in reversed(hits):
                 if h == last:
@@ -798,10 +751,8 @@ def precompute_line_grades(season_df, props_df):
                 else:
                     break
             direction = 1 if last else -1
-            raw = 50.0 + direction * 25.0 * math.log2(1 + streak)
-            momentum = _safe(max(0.0, min(100.0, raw)))
+            momentum = _safe(max(0.0, min(100.0, 50.0 + direction * 25.0 * math.log2(1 + streak))))
 
-        # Pattern grade — reversal rate after identical-length streaks.
         pattern = None
         if len(hits) >= 2:
             last = hits[-1]
@@ -829,11 +780,8 @@ def precompute_line_grades(season_df, props_df):
                             reversals += 1
 
             if instances >= PATTERN_MIN:
-                rate = reversals / instances
-                if last:
-                    score = 50.0 - (rate - 0.5) * 100.0
-                else:
-                    score = 50.0 + (rate - 0.5) * 100.0
+                rate  = reversals / instances
+                score = 50.0 - (rate - 0.5) * 100.0 if last else 50.0 + (rate - 0.5) * 100.0
                 pattern = _safe(max(0.0, min(100.0, score)))
 
         result[key] = {"momentum_grade": momentum, "pattern_grade": pattern}
@@ -874,9 +822,23 @@ def compute_composite(whr, trend, momentum, pattern, matchup, regression):
 # ---------------------------------------------------------------------------
 # Upsert
 # ---------------------------------------------------------------------------
+MERGE_KEY = ["grade_date", "event_id", "player_id", "market_key", "bookmaker_key", "line_value"]
+
+
 def upsert_grades(engine, rows):
     if not rows:
         return 0
+
+    # Deduplicate on the MERGE key before staging. SQL Server's MERGE requires
+    # each source row to match at most one target row; duplicates in the source
+    # cause error 8672. The last occurrence wins (consistent with re-grade semantics).
+    seen = {}
+    for r in rows:
+        k = (r["grade_date"], r["event_id"], r["player_id"],
+             r["market_key"], r["bookmaker_key"], r["line_value"])
+        seen[k] = r
+    rows = list(seen.values())
+
     with engine.begin() as conn:
         conn.execute(text("""
             IF OBJECT_ID('tempdb..#stage_grades') IS NOT NULL
@@ -948,12 +910,17 @@ def grade_props_for_date(engine, grade_date_str, props_df):
         log.info(f"  {grade_date_str}: no props.")
         return 0
 
+    # Deduplicate input on the MERGE key before any computation.
+    props_df = props_df.drop_duplicates(
+        subset=["player_id", "market_key", "line_value"]
+    ).copy()
+
     player_ids  = props_df["player_id"].dropna().unique().tolist()
     market_keys = props_df["market_key"].dropna().unique().tolist()
 
-    history_df    = fetch_history(engine, player_ids, market_keys, grade_date_str)
-    season_df     = fetch_season_history(engine, player_ids, grade_date_str)
-    opp_info      = fetch_opp_info(engine, player_ids, grade_date_str)
+    history_df = fetch_history(engine, player_ids, market_keys, grade_date_str)
+    season_df  = fetch_season_history(engine, player_ids, grade_date_str)
+    opp_info   = fetch_opp_info(engine, player_ids, grade_date_str)
 
     matchup_pairs = []
     for pid, info in opp_info.items():
@@ -965,9 +932,7 @@ def grade_props_for_date(engine, grade_date_str, props_df):
     matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
 
     graded_df = compute_all_hit_rates(props_df, history_df)
-
-    # Bulk precompute all components keyed by (pid, mkt) and (pid, mkt, lv).
-    pm_grades   = precompute_player_market_grades(season_df, graded_df)
+    pm_grades = precompute_player_market_grades(season_df, graded_df)
     line_grades = precompute_line_grades(season_df, graded_df)
 
     rows = []
@@ -984,8 +949,8 @@ def grade_props_for_date(engine, grade_date_str, props_df):
         whr      = r.get("weighted_hit_rate")
         whr      = whr if pd.notna(whr) else None
 
-        pm  = pm_grades.get((pid_int, mkt), {})
-        lk  = line_grades.get((pid_int, mkt, lv), {})
+        pm = pm_grades.get((pid_int, mkt), {})
+        lk = line_grades.get((pid_int, mkt, lv), {})
 
         trend      = pm.get("trend_grade")
         regression = pm.get("regression_grade")
@@ -1003,12 +968,12 @@ def grade_props_for_date(engine, grade_date_str, props_df):
             "market_key":        mkt,
             "bookmaker_key":     r["bookmaker_key"],
             "line_value":        lv,
-            "hit_rate_60":       r.get("hit_rate_60")    if pd.notna(r.get("hit_rate_60"))    else None,
-            "hit_rate_20":       r.get("hit_rate_20")    if pd.notna(r.get("hit_rate_20"))    else None,
+            "hit_rate_60":       r.get("hit_rate_60")     if pd.notna(r.get("hit_rate_60"))     else None,
+            "hit_rate_20":       r.get("hit_rate_20")     if pd.notna(r.get("hit_rate_20"))     else None,
             "sample_size_60":    int(r["sample_size_60"]) if pd.notna(r.get("sample_size_60")) else 0,
             "sample_size_20":    int(r["sample_size_20"]) if pd.notna(r.get("sample_size_20")) else 0,
             "weighted_hit_rate": whr,
-            "grade":             r.get("grade")          if pd.notna(r.get("grade"))          else None,
+            "grade":             r.get("grade")           if pd.notna(r.get("grade"))           else None,
             "trend_grade":       trend,
             "momentum_grade":    momentum,
             "pattern_grade":     pattern,
@@ -1030,15 +995,16 @@ def run_upcoming(engine):
     today = str(date.today())
     log.info(f"Upcoming mode: {today}")
 
-    posted      = fetch_posted_props(engine)
-    std_props   = build_standard_props(posted)
+    posted    = fetch_posted_props(engine)
+    std_props = build_standard_props(posted)
 
-    active      = fetch_active_players_today(engine, today)
-    event_map   = fetch_event_map_today(engine, today)
-    alt_props   = build_alt_props(posted, active, event_map)
+    active    = fetch_active_players_today(engine, today)
+    event_map = fetch_event_map_today(engine, today)
+    alt_props = build_alt_props(posted, active, event_map)
 
-    all_props = pd.concat([p for p in [std_props, alt_props] if not p.empty],
-                          ignore_index=True)
+    all_props = pd.concat(
+        [p for p in [std_props, alt_props] if not p.empty], ignore_index=True
+    )
     if all_props.empty:
         log.info("No props to grade.")
         return
@@ -1049,45 +1015,35 @@ def run_upcoming(engine):
 
 
 def run_intraday(engine):
-    """
-    Re-grade standard lines only for players whose posted line has moved
-    since the last grade. Alternate lines are never touched intraday.
-    """
     today = str(date.today())
-    log.info(f"Intraday mode: checking for line movement on {today}")
+    log.info(f"Intraday mode: {today}")
 
-    posted = fetch_posted_props(engine)
+    posted     = fetch_posted_props(engine)
     std_posted = posted[posted["market_key"].isin(STANDARD_MARKETS)].copy()
     if std_posted.empty:
-        log.info("  No standard lines posted. Nothing to do.")
+        log.info("  No standard lines posted.")
         return
 
-    # Fetch last graded standard line per player per market for today.
     player_ids = std_posted["player_id"].dropna().unique().tolist()
     if not player_ids:
         return
-    pid_list = ", ".join(str(int(p)) for p in player_ids)
+    pid_list     = ", ".join(str(int(p)) for p in player_ids)
     std_mkt_list = ", ".join(f"'{m}'" for m in STANDARD_MARKETS)
 
     last_graded = pd.read_sql(text(f"""
-        SELECT player_id, market_key,
-               line_value AS last_line
+        SELECT player_id, market_key, line_value AS last_line
         FROM (
             SELECT player_id, market_key, line_value,
                    ROW_NUMBER() OVER (
-                       PARTITION BY player_id, market_key
-                       ORDER BY grade_id DESC
+                       PARTITION BY player_id, market_key ORDER BY grade_id DESC
                    ) AS rn
             FROM common.daily_grades
-            WHERE grade_date    = :gd
-              AND player_id     IN ({pid_list})
-              AND market_key    IN ({std_mkt_list})
-              AND bookmaker_key = :bk
+            WHERE grade_date = :gd AND player_id IN ({pid_list})
+              AND market_key IN ({std_mkt_list}) AND bookmaker_key = :bk
         ) ranked
         WHERE rn = 1
     """), engine, params={"gd": today, "bk": BOOKMAKER})
 
-    # Merge to find moved lines.
     current = std_posted[["player_id", "market_key", "line_value"]].rename(
         columns={"line_value": "current_line"}
     )
@@ -1099,23 +1055,18 @@ def run_intraday(engine):
         ]
     else:
         moved = current.copy()
-        moved["current_line"] = moved["current_line"]
 
     if moved.empty:
-        log.info("  No line movement detected. Nothing to re-grade.")
+        log.info("  No line movement. Nothing to do.")
         return
 
-    log.info(f"  {len(moved)} player-market pairs with moved or new lines.")
-
-    # Build bracket only for moved lines.
+    log.info(f"  {len(moved)} player-market pairs with movement.")
     moved_posted = std_posted.merge(
-        moved[["player_id", "market_key"]],
-        on=["player_id", "market_key"], how="inner"
+        moved[["player_id", "market_key"]], on=["player_id", "market_key"], how="inner"
     )
     bracket = build_standard_props(moved_posted)
     if bracket.empty:
         return
-
     grade_props_for_date(engine, today, bracket)
 
 
