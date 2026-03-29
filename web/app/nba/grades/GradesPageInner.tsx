@@ -20,6 +20,9 @@ interface GradeRow {
   grade: number | null;
   oppTeamId: number | null;
   position: string | null;
+  gameId: string | null;
+  homeTeamAbbr: string | null;
+  awayTeamAbbr: string | null;
 }
 
 interface DefenseCache {
@@ -71,7 +74,6 @@ function marketDropdownLabel(baseKey: string): string {
   return MARKET_ABBR[baseKey] ?? baseKey.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
 
-// Implied probability from American odds (raw, no vig removal).
 function impliedProb(price: number | null): string {
   if (price == null) return '-';
   const prob = price < 0
@@ -151,48 +153,47 @@ function posGroup(position: string | null): string | null {
   return null;
 }
 
+// Odds slider: single minimum-odds filter. Default = -1000 (show everything).
+// Sliding right raises the floor, filtering out heavy favorites.
 const ODDS_MIN = -1000;
-const ODDS_MAX = 3000;
+const ODDS_MAX = 200;
+const ODDS_DEFAULT = ODDS_MIN;
 
-// Refresh states
 type RefreshState = 'idle' | 'dispatching' | 'running' | 'reloading' | 'done' | 'error';
 
 export default function GradesPageInner() {
   const searchParams = useSearchParams();
-  const [grades, setGrades]           = useState<GradeRow[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [error, setError]             = useState<string | null>(null);
+  const [grades, setGrades]         = useState<GradeRow[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [error, setError]           = useState<string | null>(null);
   const [selectedMarket, setSelectedMarket] = useState<string>('');
   const [playerFilter, setPlayerFilter]     = useState<string>('');
-  const [oddsRange, setOddsRange]           = useState<[number, number]>([ODDS_MIN, ODDS_MAX]);
+  const [minOdds, setMinOdds]               = useState<number>(ODDS_DEFAULT);
+  const [selectedGameId, setSelectedGameId] = useState<string>('');
   const [defenseCache, setDefenseCache]     = useState<DefenseCache>({});
 
-  // Refresh state
   const [refreshState, setRefreshState] = useState<RefreshState>('idle');
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const backGameId = searchParams.get('gameId');
-  const gradeDate  = searchParams.get('date') ?? todayLocal();
-  const backHref   = backGameId ? `/nba?gameId=${backGameId}` : '/nba';
+  const gradeDate = searchParams.get('date') ?? todayLocal();
+  const backHref  = '/nba';
 
   const loadGrades = useCallback(() => {
     setLoading(true);
     setError(null);
-    const url = backGameId
-      ? `/api/grades?date=${gradeDate}&gameId=${backGameId}`
-      : `/api/grades?date=${gradeDate}`;
-    fetch(url)
+    fetch(`/api/grades?date=${gradeDate}`)
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((data) => setGrades(data.grades ?? []))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [gradeDate, backGameId]);
+  }, [gradeDate]);
 
   useEffect(() => {
     setSelectedMarket('');
     setPlayerFilter('');
-    setOddsRange([ODDS_MIN, ODDS_MAX]);
+    setMinOdds(ODDS_DEFAULT);
+    setSelectedGameId('');
     setDefenseCache({});
     loadGrades();
   }, [loadGrades]);
@@ -226,17 +227,14 @@ export default function GradesPageInner() {
     }
   }, [grades]);
 
-  // Refresh: trigger workflow, poll until complete, reload grades
   async function handleRefresh() {
     if (refreshState !== 'idle' && refreshState !== 'done' && refreshState !== 'error') return;
     setRefreshState('dispatching');
     setRefreshError(null);
-
     try {
       const res = await fetch('/api/refresh-lines', { method: 'POST' });
       if (!res.ok) throw new Error(`Dispatch failed: HTTP ${res.status}`);
       const { runId } = await res.json();
-
       if (!runId) {
         setRefreshState('running');
         setTimeout(() => {
@@ -247,11 +245,8 @@ export default function GradesPageInner() {
         }, 90000);
         return;
       }
-
       setRefreshState('running');
-
       let attempts = 0;
-      const maxAttempts = 30;
       pollRef.current = setInterval(async () => {
         attempts++;
         try {
@@ -269,16 +264,13 @@ export default function GradesPageInner() {
               setRefreshState('error');
               setRefreshError('Workflow completed but did not succeed.');
             }
-          } else if (attempts >= maxAttempts) {
+          } else if (attempts >= 30) {
             if (pollRef.current) clearInterval(pollRef.current);
             setRefreshState('error');
             setRefreshError('Timed out waiting for refresh to complete.');
           }
-        } catch {
-          // transient poll error, keep trying
-        }
+        } catch { /* transient poll error */ }
       }, 10000);
-
     } catch (e) {
       setRefreshState('error');
       setRefreshError(e instanceof Error ? e.message : String(e));
@@ -286,6 +278,20 @@ export default function GradesPageInner() {
   }
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  // Derive unique games from the grades data for the game filter dropdown.
+  const gameOptions = useMemo(() => {
+    const seen = new Map<string, string>(); // gameId -> label
+    for (const row of grades) {
+      if (row.gameId && !seen.has(row.gameId)) {
+        const label = (row.awayTeamAbbr && row.homeTeamAbbr)
+          ? `${row.awayTeamAbbr} @ ${row.homeTeamAbbr}`
+          : row.gameId;
+        seen.set(row.gameId, label);
+      }
+    }
+    return Array.from(seen.entries()); // [[gameId, label], ...]
+  }, [grades]);
 
   const marketOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -298,7 +304,12 @@ export default function GradesPageInner() {
   }, [grades]);
 
   const filtered = useMemo(() => {
-    let rows = grades;
+    // Only show rows where FanDuel has actually posted an odds price.
+    let rows = grades.filter((r) => r.overPrice != null);
+
+    if (selectedGameId) {
+      rows = rows.filter((r) => r.gameId === selectedGameId);
+    }
     if (selectedMarket) {
       rows = rows.filter((r) =>
         r.marketKey === selectedMarket || r.marketKey === `${selectedMarket}_alternate`
@@ -308,15 +319,13 @@ export default function GradesPageInner() {
       const q = playerFilter.trim().toLowerCase();
       rows = rows.filter((r) => r.playerName.toLowerCase().includes(q));
     }
-    const [lo, hi] = oddsRange;
-    const sliderActive = lo > ODDS_MIN || hi < ODDS_MAX;
-    if (sliderActive) {
-      rows = rows.filter((r) => r.overPrice == null || (r.overPrice >= lo && r.overPrice <= hi));
+    if (minOdds > ODDS_DEFAULT) {
+      rows = rows.filter((r) => r.overPrice != null && r.overPrice >= minOdds);
     }
     return rows;
-  }, [grades, selectedMarket, playerFilter, oddsRange]);
+  }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds]);
 
-  const sliderActive = oddsRange[0] > ODDS_MIN || oddsRange[1] < ODDS_MAX;
+  const oddsFilterActive = minOdds > ODDS_DEFAULT;
 
   function defRankCell(row: GradeRow): { rank: number | null; label: string } {
     const pg = posGroup(row.position);
@@ -334,7 +343,7 @@ export default function GradesPageInner() {
 
   function playerHref(row: GradeRow): string {
     const params = new URLSearchParams();
-    if (backGameId) params.set('gameId', backGameId);
+    if (row.gameId) params.set('gameId', row.gameId);
     const qs = params.toString();
     return `/nba/player/${row.playerId}${qs ? `?${qs}` : ''}`;
   }
@@ -372,6 +381,21 @@ export default function GradesPageInner() {
 
         {!loading && !error && grades.length > 0 && (
           <>
+            {/* Game filter */}
+            {gameOptions.length > 1 && (
+              <select
+                value={selectedGameId}
+                onChange={(e) => setSelectedGameId(e.target.value)}
+                className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded px-2 py-1 focus:outline-none focus:border-gray-500"
+              >
+                <option value="">All games</option>
+                {gameOptions.map(([gid, label]) => (
+                  <option key={gid} value={gid}>{label}</option>
+                ))}
+              </select>
+            )}
+
+            {/* Market filter */}
             <select
               value={selectedMarket}
               onChange={(e) => setSelectedMarket(e.target.value)}
@@ -383,6 +407,7 @@ export default function GradesPageInner() {
               ))}
             </select>
 
+            {/* Player search */}
             <input
               type="text"
               placeholder="Player..."
@@ -408,7 +433,8 @@ export default function GradesPageInner() {
 
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
-            {filtered.length}{filtered.length !== grades.length ? ` / ${grades.length}` : ''} props
+            {filtered.length}{filtered.length !== grades.filter(r => r.overPrice != null).length
+              ? ` / ${grades.filter(r => r.overPrice != null).length}` : ''} props
           </span>
         )}
       </div>
@@ -419,43 +445,25 @@ export default function GradesPageInner() {
         </div>
       )}
 
+      {/* Odds floor slider — single handle */}
       {!loading && !error && grades.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
-          <span className="text-xs text-gray-600 whitespace-nowrap">Odds</span>
-          <div className="flex items-center gap-1 flex-1">
-            <span className={`text-xs tabular-nums w-14 text-right ${
-              sliderActive ? 'text-gray-300' : 'text-gray-600'
-            }`}>
-              {oddsRange[0] >= 0 ? `+${oddsRange[0]}` : `${oddsRange[0]}`}
-            </span>
-            <input
-              type="range" min={ODDS_MIN} max={ODDS_MAX} step={5}
-              value={oddsRange[0]}
-              onChange={(e) => {
-                const v = parseInt(e.target.value);
-                setOddsRange([Math.min(v, oddsRange[1] - 5), oddsRange[1]]);
-              }}
-              className="flex-1 accent-blue-500 h-1"
-            />
-            <span className="text-xs text-gray-600">to</span>
-            <input
-              type="range" min={ODDS_MIN} max={ODDS_MAX} step={5}
-              value={oddsRange[1]}
-              onChange={(e) => {
-                const v = parseInt(e.target.value);
-                setOddsRange([oddsRange[0], Math.max(v, oddsRange[0] + 5)]);
-              }}
-              className="flex-1 accent-blue-500 h-1"
-            />
-            <span className={`text-xs tabular-nums w-14 ${
-              sliderActive ? 'text-gray-300' : 'text-gray-600'
-            }`}>
-              {oddsRange[1] >= 0 ? `+${oddsRange[1]}` : `${oddsRange[1]}`}
-            </span>
-          </div>
-          {sliderActive && (
+          <span className="text-xs text-gray-600 whitespace-nowrap">Min odds</span>
+          <input
+            type="range"
+            min={ODDS_MIN}
+            max={ODDS_MAX}
+            step={5}
+            value={minOdds}
+            onChange={(e) => setMinOdds(parseInt(e.target.value))}
+            className="flex-1 accent-blue-500 h-1"
+          />
+          <span className={`text-xs tabular-nums w-14 text-right ${oddsFilterActive ? 'text-gray-300' : 'text-gray-600'}`}>
+            {minOdds >= 0 ? `+${minOdds}` : `${minOdds}`}
+          </span>
+          {oddsFilterActive && (
             <button
-              onClick={() => setOddsRange([ODDS_MIN, ODDS_MAX])}
+              onClick={() => setMinOdds(ODDS_DEFAULT)}
               className="text-xs text-gray-600 hover:text-gray-400"
             >
               Reset
