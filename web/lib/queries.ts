@@ -106,7 +106,7 @@ export interface RosterRow {
   teamAbbr: string;
   position: string | null;
   isStarter: boolean;
-  lineupStatus: string | null;   // 'Confirmed' | 'Projected' | null
+  lineupStatus: string | null;  // 'Confirmed' | 'Projected' | null
 }
 
 export async function getRoster(gameId: string): Promise<RosterRow[]> {
@@ -208,7 +208,7 @@ export interface BoxscoreRow {
   playerName: string;
   teamId: number;
   period: string;
-  starterStatus: string | null;  // 'Starter' | 'Bench' | null (no lineup data)
+  starterStatus: string | null;
   pts: number | null;
   reb: number | null;
   ast: number | null;
@@ -363,7 +363,7 @@ export async function getPlayerGames(
 }
 
 // ---------------------------------------------------------------------------
-// Grades
+// Grades (At a Glance)
 // ---------------------------------------------------------------------------
 
 export interface GradeRow {
@@ -392,30 +392,23 @@ export async function getGrades(
   if (gameId != null) req.input('gameId', mssql.VarChar, gameId);
   const result = await req.query<GradeRow>(
     `WITH prop_prices AS (
-       SELECT event_id, market_key, player_id,
-              MIN(outcome_price) AS over_price
+       SELECT event_id, market_key, player_id, MIN(outcome_price) AS over_price
        FROM odds.upcoming_player_props
-       WHERE bookmaker_key = 'fanduel'
-         AND outcome_name  = 'Over'
-         AND player_id IS NOT NULL
+       WHERE bookmaker_key = 'fanduel' AND outcome_name = 'Over' AND player_id IS NOT NULL
        GROUP BY event_id, market_key, player_id
 
        UNION ALL
 
-       SELECT pp.event_id, pp.market_key, pm.player_id,
-              MIN(pp.outcome_price) AS over_price
+       SELECT pp.event_id, pp.market_key, pm.player_id, MIN(pp.outcome_price) AS over_price
        FROM odds.player_props pp
        JOIN odds.player_map pm
-         ON pm.odds_player_name = pp.player_name
-        AND pm.sport_key        = pp.sport_key
+         ON pm.odds_player_name = pp.player_name AND pm.sport_key = pp.sport_key
         AND pm.player_id IS NOT NULL
-       WHERE pp.bookmaker_key = 'fanduel'
-         AND pp.outcome_name  = 'Over'
+       WHERE pp.bookmaker_key = 'fanduel' AND pp.outcome_name = 'Over'
        GROUP BY pp.event_id, pp.market_key, pm.player_id
      ),
      best_price AS (
-       SELECT event_id, market_key, player_id,
-              MIN(over_price) AS over_price
+       SELECT event_id, market_key, player_id, MIN(over_price) AS over_price
        FROM prop_prices
        GROUP BY event_id, market_key, player_id
      )
@@ -436,12 +429,76 @@ export async function getGrades(
      FROM common.daily_grades dg
      LEFT JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
      LEFT JOIN best_price bp
-       ON bp.event_id   = dg.event_id
-      AND bp.market_key = dg.market_key
-      AND bp.player_id  = dg.player_id
+       ON bp.event_id = dg.event_id AND bp.market_key = dg.market_key AND bp.player_id = dg.player_id
      WHERE CONVERT(VARCHAR(10), dg.grade_date, 120) = @gradeDate
      ${gameFilter}
      ORDER BY dg.grade DESC`
   );
+  return result.recordset;
+}
+
+// ---------------------------------------------------------------------------
+// Player props — all graded markets for a single player across all dates
+// ---------------------------------------------------------------------------
+
+export interface PlayerPropRow {
+  gradeId: number;
+  gradeDate: string;
+  marketKey: string;
+  lineValue: number;
+  overPrice: number | null;
+  hitRate60: number | null;
+  hitRate20: number | null;
+  sampleSize60: number | null;
+  sampleSize20: number | null;
+  grade: number | null;
+}
+
+export async function getPlayerProps(playerId: number): Promise<PlayerPropRow[]> {
+  const pool = await getPool();
+  const result = await pool
+    .request()
+    .input('playerId', mssql.Int, playerId)
+    .query<PlayerPropRow>(
+      `WITH prop_prices AS (
+         SELECT event_id, market_key, player_id, MIN(outcome_price) AS over_price
+         FROM odds.upcoming_player_props
+         WHERE bookmaker_key = 'fanduel' AND outcome_name = 'Over' AND player_id IS NOT NULL
+         GROUP BY event_id, market_key, player_id
+
+         UNION ALL
+
+         SELECT pp.event_id, pp.market_key, pm.player_id, MIN(pp.outcome_price) AS over_price
+         FROM odds.player_props pp
+         JOIN odds.player_map pm
+           ON pm.odds_player_name = pp.player_name AND pm.sport_key = pp.sport_key
+          AND pm.player_id IS NOT NULL
+         WHERE pp.bookmaker_key = 'fanduel' AND pp.outcome_name = 'Over'
+         GROUP BY pp.event_id, pp.market_key, pm.player_id
+       ),
+       best_price AS (
+         SELECT event_id, market_key, player_id, MIN(over_price) AS over_price
+         FROM prop_prices
+         GROUP BY event_id, market_key, player_id
+       )
+       SELECT
+         dg.grade_id          AS gradeId,
+         CONVERT(VARCHAR(10), dg.grade_date, 120) AS gradeDate,
+         dg.market_key        AS marketKey,
+         dg.line_value        AS lineValue,
+         bp.over_price        AS overPrice,
+         dg.hit_rate_60       AS hitRate60,
+         dg.hit_rate_20       AS hitRate20,
+         dg.sample_size_60    AS sampleSize60,
+         dg.sample_size_20    AS sampleSize20,
+         dg.grade             AS grade
+       FROM common.daily_grades dg
+       LEFT JOIN best_price bp
+         ON bp.event_id = dg.event_id AND bp.market_key = dg.market_key AND bp.player_id = dg.player_id
+       WHERE dg.player_id = @playerId
+         AND dg.bookmaker_key = 'fanduel'
+       ORDER BY dg.grade_date DESC, dg.market_key, dg.line_value
+    `
+    );
   return result.recordset;
 }

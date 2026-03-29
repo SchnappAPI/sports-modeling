@@ -8,8 +8,8 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const players = await getRoster(gameId);
-    return NextResponse.json({ gameId, players });
+    const roster = await getRoster(gameId);
+    return NextResponse.json({ gameId, roster });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message }, { status: 500 });

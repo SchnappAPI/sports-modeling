@@ -62,50 +62,80 @@ function todayLocal(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Odds slider bounds (American odds). -200 to +300 covers the vast majority
+// of prop markets. Users drag to narrow this window.
+const ODDS_MIN = -300;
+const ODDS_MAX = 300;
+
 export default function GradesPageInner() {
   const searchParams = useSearchParams();
-  const [grades, setGrades] = useState<GradeRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [grades, setGrades]           = useState<GradeRow[]>([]);
+  const [loading, setLoading]         = useState(true);
+  const [error, setError]             = useState<string | null>(null);
   const [selectedMarket, setSelectedMarket] = useState<string>('');
+  const [playerFilter, setPlayerFilter]     = useState<string>('');
+  const [oddsRange, setOddsRange]           = useState<[number, number]>([ODDS_MIN, ODDS_MAX]);
 
   const backGameId = searchParams.get('gameId');
-  const gradeDate = searchParams.get('date') ?? todayLocal();
-  const backHref = backGameId ? `/nba?gameId=${backGameId}` : '/nba';
+  const gradeDate  = searchParams.get('date') ?? todayLocal();
+  const backHref   = backGameId ? `/nba?gameId=${backGameId}` : '/nba';
 
   useEffect(() => {
     setLoading(true);
     setError(null);
     setSelectedMarket('');
+    setPlayerFilter('');
+    setOddsRange([ODDS_MIN, ODDS_MAX]);
 
     const url = backGameId
       ? `/api/grades?date=${gradeDate}&gameId=${backGameId}`
       : `/api/grades?date=${gradeDate}`;
 
     fetch(url)
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((data) => setGrades(data.grades ?? []))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [gradeDate, backGameId]);
 
-  // Sorted unique market keys present in the loaded data.
-  const marketOptions = useMemo(() => {
-    const keys = Array.from(new Set(grades.map((r) => r.marketKey))).sort();
-    return keys;
+  const marketOptions = useMemo(
+    () => Array.from(new Set(grades.map((r) => r.marketKey))).sort(),
+    [grades]
+  );
+
+  // Derive the actual odds range present in the data so the slider bounds
+  // are meaningful. Rows with null overPrice are included regardless of slider.
+  const dataOddsMin = useMemo(() => {
+    const prices = grades.map((r) => r.overPrice).filter((p): p is number => p != null);
+    return prices.length ? Math.min(...prices) : ODDS_MIN;
+  }, [grades]);
+  const dataOddsMax = useMemo(() => {
+    const prices = grades.map((r) => r.overPrice).filter((p): p is number => p != null);
+    return prices.length ? Math.max(...prices) : ODDS_MAX;
   }, [grades]);
 
-  const filtered = useMemo(
-    () => (selectedMarket ? grades.filter((r) => r.marketKey === selectedMarket) : grades),
-    [grades, selectedMarket]
-  );
+  const filtered = useMemo(() => {
+    let rows = grades;
+    if (selectedMarket) rows = rows.filter((r) => r.marketKey === selectedMarket);
+    if (playerFilter.trim()) {
+      const q = playerFilter.trim().toLowerCase();
+      rows = rows.filter((r) => r.playerName.toLowerCase().includes(q));
+    }
+    // Odds filter: include rows that have a price within range, OR have no price.
+    const [lo, hi] = oddsRange;
+    const sliderActive = lo > ODDS_MIN || hi < ODDS_MAX;
+    if (sliderActive) {
+      rows = rows.filter((r) => r.overPrice == null || (r.overPrice >= lo && r.overPrice <= hi));
+    }
+    return rows;
+  }, [grades, selectedMarket, playerFilter, oddsRange]);
+
+  const sliderActive = oddsRange[0] > ODDS_MIN || oddsRange[1] < ODDS_MAX;
 
   return (
     <div className="flex flex-col min-h-screen">
-      <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3">
+      {/* Header row */}
+      <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap">
         <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">
           &#8592; Games
         </Link>
@@ -113,30 +143,98 @@ export default function GradesPageInner() {
           At a Glance
         </span>
         <span className="text-xs text-gray-600">{gradeDate}</span>
+
         {!loading && !error && grades.length > 0 && (
-          <select
-            value={selectedMarket}
-            onChange={(e) => setSelectedMarket(e.target.value)}
-            className="ml-3 bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded px-2 py-1 focus:outline-none focus:border-gray-500"
-          >
-            <option value="">All markets</option>
-            {marketOptions.map((key) => (
-              <option key={key} value={key}>
-                {formatMarket(key)}
-              </option>
-            ))}
-          </select>
+          <>
+            {/* Market dropdown */}
+            <select
+              value={selectedMarket}
+              onChange={(e) => setSelectedMarket(e.target.value)}
+              className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded px-2 py-1 focus:outline-none focus:border-gray-500"
+            >
+              <option value="">All markets</option>
+              {marketOptions.map((key) => (
+                <option key={key} value={key}>{formatMarket(key)}</option>
+              ))}
+            </select>
+
+            {/* Player search */}
+            <input
+              type="text"
+              placeholder="Player..."
+              value={playerFilter}
+              onChange={(e) => setPlayerFilter(e.target.value)}
+              className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded px-2 py-1 w-28 focus:outline-none focus:border-gray-500 placeholder-gray-600"
+            />
+          </>
         )}
+
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
-            {filtered.length}{selectedMarket ? ` / ${grades.length}` : ''} props
+            {filtered.length}{filtered.length !== grades.length ? ` / ${grades.length}` : ''} props
           </span>
         )}
       </div>
 
+      {/* Odds slider row — only shown once data is loaded */}
+      {!loading && !error && grades.length > 0 && (
+        <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
+          <span className="text-xs text-gray-600 whitespace-nowrap">Odds</span>
+
+          {/* Min handle */}
+          <div className="flex items-center gap-1 flex-1">
+            <span className={`text-xs tabular-nums w-10 text-right ${
+              sliderActive ? 'text-gray-300' : 'text-gray-600'
+            }`}>
+              {oddsRange[0] >= 0 ? `+${oddsRange[0]}` : `${oddsRange[0]}`}
+            </span>
+            <input
+              type="range"
+              min={ODDS_MIN}
+              max={ODDS_MAX}
+              step={5}
+              value={oddsRange[0]}
+              onChange={(e) => {
+                const v = parseInt(e.target.value);
+                setOddsRange([Math.min(v, oddsRange[1] - 5), oddsRange[1]]);
+              }}
+              className="flex-1 accent-blue-500 h-1"
+            />
+            <span className="text-xs text-gray-600">to</span>
+            <input
+              type="range"
+              min={ODDS_MIN}
+              max={ODDS_MAX}
+              step={5}
+              value={oddsRange[1]}
+              onChange={(e) => {
+                const v = parseInt(e.target.value);
+                setOddsRange([oddsRange[0], Math.max(v, oddsRange[0] + 5)]);
+              }}
+              className="flex-1 accent-blue-500 h-1"
+            />
+            <span className={`text-xs tabular-nums w-10 ${
+              sliderActive ? 'text-gray-300' : 'text-gray-600'
+            }`}>
+              {oddsRange[1] >= 0 ? `+${oddsRange[1]}` : `${oddsRange[1]}`}
+            </span>
+          </div>
+
+          {sliderActive && (
+            <button
+              onClick={() => setOddsRange([ODDS_MIN, ODDS_MAX])}
+              className="text-xs text-gray-600 hover:text-gray-400"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Table */}
       <div className="flex-1 px-4 py-4">
         {loading && <div className="text-sm text-gray-500">Loading grades...</div>}
-        {error && <div className="text-sm text-red-400">Error: {error}</div>}
+        {error   && <div className="text-sm text-red-400">Error: {error}</div>}
         {!loading && !error && grades.length === 0 && (
           <div className="text-sm text-gray-500">
             No grades available for {gradeDate}. Grades populate nightly after the ETL runs.
@@ -163,7 +261,7 @@ export default function GradesPageInner() {
                   <tr key={row.gradeId} className="border-b border-gray-800">
                     <td className="py-1.5 pr-3">
                       <Link
-                        href={`/nba/player/${row.playerId}${backGameId ? `?gameId=${backGameId}` : ''}`}
+                        href={`/nba/player/${row.playerId}/props`}
                         className="text-gray-100 hover:text-blue-400 transition-colors"
                       >
                         {row.playerName}
