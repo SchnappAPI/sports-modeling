@@ -1,0 +1,151 @@
+name: Odds Backfill
+
+# Runs backfill for all sport-season pairs in parallel using a matrix strategy.
+# Each matrix job is independent, has its own 6-hour limit, and checkpoints
+# against odds.events so re-dispatching any job resumes without double-fetching.
+#
+# Credit cost: ~40 credits per game (4 calls x 10 credits each).
+# Time cost:   ~7 seconds per game (4 calls + sleeps).
+# At 2500 games per job and 9 parallel jobs, a full backfill of ~12,000 games
+# completes in roughly one dispatch per sport-season, about 5 hours wall time
+# for the largest buckets (MLB ~2400 games).
+#
+# Re-dispatch is safe and idempotent. Already-loaded event_ids are skipped.
+# Run this workflow after odds-discover has populated odds.discovered_events.
+#
+# After backfill completes, run odds-etl with mode=mappings for each sport
+# to build odds.event_game_map and odds.player_map.
+
+on:
+  workflow_dispatch:
+    inputs:
+      games_per_job:
+        description: "Max events per matrix job. 2500 fits a 6-hour runner at ~7s/game."
+        required: false
+        default: "2500"
+      budget_per_job:
+        description: "Max credits per matrix job. 0 = unlimited. ~40 credits/game so 2500 games = ~100000."
+        required: false
+        default: "0"
+      seasons:
+        description: "Comma-separated season years to include (e.g. 2023,2024,2025)."
+        required: false
+        default: "2023,2024,2025"
+      sports:
+        description: "Comma-separated sports to include (nba, mlb, nfl)."
+        required: false
+        default: "nba,mlb,nfl"
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+  ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
+
+jobs:
+  # Build the matrix dynamically from the input strings so the workflow
+  # doesn't need to be edited when you want to re-run a subset.
+  build-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          python3 - <<'EOF'
+          import json, os, itertools
+
+          sports  = [s.strip() for s in "${{ github.event.inputs.sports  || 'nba,mlb,nfl' }}".split(",") if s.strip()]
+          seasons = [s.strip() for s in "${{ github.event.inputs.seasons || '2023,2024,2025' }}".split(",") if s.strip()]
+
+          pairs = [{"sport": sp, "season": se} for sp, se in itertools.product(sports, seasons)]
+          matrix = {"include": pairs}
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+          EOF
+
+  backfill:
+    needs: build-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 5h50m -- leaves buffer before GitHub's 6h hard cut
+    strategy:
+      matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
+      fail-fast: false      # one job failing does not cancel the others
+
+    name: backfill-${{ matrix.sport }}-${{ matrix.season }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ODBC Driver 18
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y curl gnupg apt-transport-https
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+            | gpg --dearmor --batch --yes --no-tty \
+            | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
+          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update -q
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
+      - name: Install Python dependencies
+        run: pip install -r etl/requirements.txt
+
+      - name: Run backfill loop
+        env:
+          SPORT:          ${{ matrix.sport }}
+          SEASON:         ${{ matrix.season }}
+          GAMES_PER_JOB:  ${{ github.event.inputs.games_per_job  || '2500' }}
+          BUDGET_PER_JOB: ${{ github.event.inputs.budget_per_job || '0' }}
+        run: |
+          set -euo pipefail
+
+          # Loop in batches until the Python script reports nothing left to do
+          # or the runner approaches its timeout. Each Python call processes
+          # GAMES_PER_JOB events and exits. The destination table is the
+          # checkpoint -- re-running always skips already-loaded event_ids.
+          ITER=0
+          MAX_ITER=20   # safety cap: 20 x 2500 = 50000 games max per job
+
+          while [ $ITER -lt $MAX_ITER ]; do
+            ITER=$((ITER + 1))
+            echo ""
+            echo "--- Batch $ITER (sport=$SPORT season=$SEASON) ---"
+
+            OUTPUT=$(python etl/odds_etl.py \
+              --mode backfill \
+              --sport "$SPORT" \
+              --season "$SEASON" \
+              --games "$GAMES_PER_JOB" \
+              --budget "$BUDGET_PER_JOB" 2>&1) || {
+                echo "Python exited non-zero. Stopping job."
+                echo "$OUTPUT"
+                exit 1
+              }
+
+            echo "$OUTPUT"
+
+            # Detect natural completion: nothing left to process.
+            if echo "$OUTPUT" | grep -q "Nothing to do\|All .* discovered events loaded"; then
+              echo "$SPORT $SEASON: backfill complete."
+              break
+            fi
+
+            # Budget reached is a clean exit. The next iteration starts a
+            # fresh Python process with a fresh budget counter.
+            if echo "$OUTPUT" | grep -q "BUDGET REACHED"; then
+              echo "Budget reached. Continuing to next batch."
+            fi
+
+          done
+
+          if [ $ITER -ge $MAX_ITER ]; then
+            echo "WARNING: hit iteration cap for $SPORT $SEASON. Re-dispatch to continue."
+          fi
