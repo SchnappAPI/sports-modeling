@@ -130,10 +130,9 @@ def fetch_live_box_score(game_id):
         return []
 
     try:
-        # V3 endpoints use typed dataset accessors, not resultSets.
-        game_data    = data["boxScoreTraditional"]
-        home_team    = game_data["homeTeam"]
-        away_team    = game_data["awayTeam"]
+        game_data     = data["boxScoreTraditional"]
+        home_team     = game_data["homeTeam"]
+        away_team     = game_data["awayTeam"]
         game_date_raw = game_data.get("gameTimeLocal", "")[:10] or None
     except (KeyError, TypeError) as exc:
         log.warning(f"  {game_id}: unexpected response shape: {exc}")
@@ -145,8 +144,8 @@ def fetch_live_box_score(game_id):
         team_tricode = safe_str(team_obj.get("teamTricode"))
 
         for player_obj in team_obj.get("players", []):
-            pid       = safe_int(player_obj.get("personId"))
-            pname     = safe_str(player_obj.get("name"))
+            pid   = safe_int(player_obj.get("personId"))
+            pname = safe_str(player_obj.get("name"))
             if pid is None:
                 continue
 
@@ -154,15 +153,14 @@ def fetch_live_box_score(game_id):
                 period_num = safe_int(period_stats.get("period"))
                 if period_num is None:
                     continue
-                # Map period number to label: 1->1Q, 2->2Q, 3->3Q, 4->4Q, 5+->OT
                 period_label = PERIOD_MAP.get(period_num, "OT")
 
-                s = period_stats  # shorthand
+                s = period_stats
                 rows.append({
                     "game_id":        game_id,
                     "player_id":      pid,
                     "period":         period_label,
-                    "season_year":    None,  # not in V3 response; nightly ETL fills this
+                    "season_year":    None,
                     "player_name":    pname,
                     "team_id":        team_id,
                     "team_tricode":   team_tricode,
@@ -199,10 +197,6 @@ def fetch_live_box_score(game_id):
 
 
 def _parse_minutes(clock_str):
-    """
-    Convert NBA clock string (e.g. 'PT12M34.00S') to decimal minutes.
-    Returns None on failure.
-    """
     if not clock_str:
         return None
     import re
@@ -218,14 +212,10 @@ def _parse_minutes(clock_str):
 
 
 # ---------------------------------------------------------------------------
-# Also update nba.schedule scores for in-progress games
+# Update nba.schedule scores via ScoreboardV3
 # ---------------------------------------------------------------------------
 
 def update_live_schedule(engine, game_id):
-    """
-    Update home_score and away_score in nba.schedule for in-progress games
-    using the ScoreboardV3 endpoint so the game strip shows current scores.
-    """
     url    = "https://stats.nba.com/stats/scoreboardv3"
     params = {"GameDate": date.today().strftime("%m/%d/%Y"), "LeagueID": "00"}
     data   = _request(url, params, f"ScoreboardV3 {date.today()}")
@@ -245,11 +235,11 @@ def update_live_schedule(engine, game_id):
         home = g.get("homeTeam", {})
         away = g.get("awayTeam", {})
         rows.append({
-            "game_id":    gid,
-            "game_status": safe_int(g.get("gameStatus")),
+            "game_id":          gid,
+            "game_status":      safe_int(g.get("gameStatus")),
             "game_status_text": safe_str(g.get("gameStatusText")),
-            "home_score": safe_int(home.get("score")),
-            "away_score":  safe_int(away.get("score")),
+            "home_score":       safe_int(home.get("score")),
+            "away_score":       safe_int(away.get("score")),
         })
 
     if not rows:
@@ -285,7 +275,6 @@ def main():
 
     log.info(f"Gate: {len(live_ids)} in-progress game(s): {live_ids}")
 
-    # Update scoreboard first (one call covers all games)
     update_live_schedule(engine, live_ids[0])
 
     total_rows = 0
