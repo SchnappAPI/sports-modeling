@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 
 interface PlayerAvg {
   playerId: number;
@@ -29,7 +31,10 @@ function fmt(val: number | null | undefined, decimals = 1): string {
   return val.toFixed(decimals);
 }
 
-function TeamStatsTable({ abbr, players }: { abbr: string; players: PlayerAvg[] }) {
+function TeamStatsTable({ abbr, players, gameId }: { abbr: string; players: PlayerAvg[]; gameId: string }) {
+  const searchParams = useSearchParams();
+  const tab = searchParams.get('tab') ?? 'stats';
+
   return (
     <div className="overflow-x-auto">
       <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{abbr}</div>
@@ -50,7 +55,14 @@ function TeamStatsTable({ abbr, players }: { abbr: string; players: PlayerAvg[] 
         <tbody>
           {players.map((p) => (
             <tr key={p.playerId} className="border-b border-gray-800">
-              <td className="py-1.5 pr-3 text-gray-100">{p.playerName}</td>
+              <td className="py-1.5 pr-3">
+                <Link
+                  href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}`}
+                  className="text-gray-100 hover:text-blue-400 transition-colors"
+                >
+                  {p.playerName}
+                </Link>
+              </td>
               <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgMin)}</td>
               <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
               <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
@@ -67,7 +79,7 @@ function TeamStatsTable({ abbr, players }: { abbr: string; players: PlayerAvg[] 
   );
 }
 
-export default function StatsTable({ homeTeamId, awayTeamId }: Props) {
+export default function StatsTable({ gameId, homeTeamId, awayTeamId }: Props) {
   const [players, setPlayers] = useState<PlayerAvg[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -98,6 +110,7 @@ export default function StatsTable({ homeTeamId, awayTeamId }: Props) {
           key={abbr}
           abbr={abbr}
           players={players.filter((p) => p.teamAbbr === abbr)}
+          gameId={gameId}
         />
       ))}
     </div>
