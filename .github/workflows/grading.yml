@@ -17,6 +17,10 @@ on:
         description: 'Backfill mode only: max dates per run. Default 10, use 50+ for bulk backfill.'
         required: false
         default: ''
+  workflow_run:
+    workflows: ["Odds ETL"]
+    types: [completed]
+    branches: [main]
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -26,6 +30,7 @@ env:
 
 jobs:
   grade:
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
