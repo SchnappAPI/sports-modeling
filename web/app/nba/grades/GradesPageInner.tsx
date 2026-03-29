@@ -23,16 +23,57 @@ interface GradeRow {
 }
 
 interface DefenseCache {
-  // keyed by `${oppTeamId}:${posGroup}` -> per-stat ranks
   [key: string]: Record<string, number> | 'loading' | 'error';
 }
 
-function formatMarket(key: string): string {
-  return key
-    .replace('player_', '')
-    .replace(/_over_under$/, '')
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+// ---------------------------------------------------------------------------
+// Market helpers
+// ---------------------------------------------------------------------------
+
+// Maps any market key to a short abbreviation for display in the table.
+const MARKET_ABBR: Record<string, string> = {
+  player_points:                       'PTS',
+  player_points_alternate:             'PTS',
+  player_rebounds:                     'REB',
+  player_rebounds_alternate:           'REB',
+  player_assists:                      'AST',
+  player_assists_alternate:            'AST',
+  player_steals:                       'STL',
+  player_steals_alternate:             'STL',
+  player_blocks:                       'BLK',
+  player_blocks_alternate:             'BLK',
+  player_threes:                       '3PM',
+  player_threes_alternate:             '3PM',
+  player_turnovers:                    'TOV',
+  player_turnovers_alternate:          'TOV',
+  player_points_rebounds_assists:      'PRA',
+  player_points_rebounds_assists_alternate: 'PRA',
+  player_points_rebounds:              'PR',
+  player_points_rebounds_alternate:    'PR',
+  player_points_assists:               'PA',
+  player_points_assists_alternate:     'PA',
+  player_rebounds_assists:             'RA',
+  player_rebounds_assists_alternate:   'RA',
+};
+
+// Maps a market key to the canonical (non-alternate) base key, used for
+// collapsing the market dropdown so "Points" and "Points (Alt)" become
+// a single "PTS" option.
+function baseMarket(key: string): string {
+  return key.replace(/_alternate$/, '');
+}
+
+function isAlternate(key: string): boolean {
+  return key.endsWith('_alternate');
+}
+
+function marketAbbr(key: string): string {
+  return MARKET_ABBR[key] ?? key.replace('player_', '').replace(/_/g, ' ').toUpperCase();
+}
+
+// Human-readable label for the dropdown (uses abbreviation only).
+function marketDropdownLabel(baseKey: string): string {
+  return MARKET_ABBR[baseKey] ?? baseKey.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
 
 function gradeColor(grade: number | null): string {
@@ -154,18 +195,14 @@ export default function GradesPageInner() {
 
     for (const key of pairs) {
       setDefenseCache((prev) => {
-        if (prev[key]) return prev;  // already fetched or fetching
+        if (prev[key]) return prev;
         return { ...prev, [key]: 'loading' };
       });
 
       const [tid, pg] = key.split(':');
       fetch(`/api/contextual?oppTeamId=${tid}&position=${pg}`)
-        .then((r) => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.json();
-        })
+        .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then((data) => {
-          // Extract per-stat ranks from the response
           const ranks: Record<string, number> = {};
           for (const stat of ['pts', 'reb', 'ast', 'stl', 'blk', 'fg3m', 'tov']) {
             if (data[stat]?.rank != null) ranks[stat] = data[stat].rank;
@@ -178,23 +215,28 @@ export default function GradesPageInner() {
     }
   }, [grades]);
 
-  const marketOptions = useMemo(
-    () => Array.from(new Set(grades.map((r) => r.marketKey))).sort(),
-    [grades]
-  );
-
-  const dataOddsMin = useMemo(() => {
-    const prices = grades.map((r) => r.overPrice).filter((p): p is number => p != null);
-    return prices.length ? Math.min(...prices) : ODDS_MIN;
-  }, [grades]);
-  const dataOddsMax = useMemo(() => {
-    const prices = grades.map((r) => r.overPrice).filter((p): p is number => p != null);
-    return prices.length ? Math.max(...prices) : ODDS_MAX;
+  // Dropdown options: unique base market keys (collapse regular + alternate into one).
+  const marketOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const opts: string[] = [];
+    for (const row of grades) {
+      const base = baseMarket(row.marketKey);
+      if (!seen.has(base)) {
+        seen.add(base);
+        opts.push(base);
+      }
+    }
+    return opts.sort();
   }, [grades]);
 
   const filtered = useMemo(() => {
     let rows = grades;
-    if (selectedMarket) rows = rows.filter((r) => r.marketKey === selectedMarket);
+    // When a base market is selected, include both the standard and alternate keys.
+    if (selectedMarket) {
+      rows = rows.filter((r) =>
+        r.marketKey === selectedMarket || r.marketKey === `${selectedMarket}_alternate`
+      );
+    }
     if (playerFilter.trim()) {
       const q = playerFilter.trim().toLowerCase();
       rows = rows.filter((r) => r.playerName.toLowerCase().includes(q));
@@ -209,7 +251,6 @@ export default function GradesPageInner() {
 
   const sliderActive = oddsRange[0] > ODDS_MIN || oddsRange[1] < ODDS_MAX;
 
-  // Derive a defense rank cell for a grade row based on its market.
   function defRankCell(row: GradeRow): { rank: number | null; label: string } {
     const pg = posGroup(row.position);
     if (!row.oppTeamId || !pg) return { rank: null, label: '-' };
@@ -222,6 +263,15 @@ export default function GradesPageInner() {
     const rank = (entry as Record<string, number>)[statKey];
     if (rank == null) return { rank: null, label: '-' };
     return { rank, label: ordinal(rank) };
+  }
+
+  // Build the player link: go to the player page, pass gameId (if available) for
+  // matchup context. No date needed since all rows on this page share gradeDate.
+  function playerHref(row: GradeRow): string {
+    const params = new URLSearchParams();
+    if (backGameId) params.set('gameId', backGameId);
+    const qs = params.toString();
+    return `/nba/player/${row.playerId}${qs ? `?${qs}` : ''}`;
   }
 
   return (
@@ -245,7 +295,7 @@ export default function GradesPageInner() {
             >
               <option value="">All markets</option>
               {marketOptions.map((key) => (
-                <option key={key} value={key}>{formatMarket(key)}</option>
+                <option key={key} value={key}>{marketDropdownLabel(key)}</option>
               ))}
             </select>
 
@@ -276,10 +326,7 @@ export default function GradesPageInner() {
               {oddsRange[0] >= 0 ? `+${oddsRange[0]}` : `${oddsRange[0]}`}
             </span>
             <input
-              type="range"
-              min={ODDS_MIN}
-              max={ODDS_MAX}
-              step={5}
+              type="range" min={ODDS_MIN} max={ODDS_MAX} step={5}
               value={oddsRange[0]}
               onChange={(e) => {
                 const v = parseInt(e.target.value);
@@ -289,10 +336,7 @@ export default function GradesPageInner() {
             />
             <span className="text-xs text-gray-600">to</span>
             <input
-              type="range"
-              min={ODDS_MIN}
-              max={ODDS_MAX}
-              step={5}
+              type="range" min={ODDS_MIN} max={ODDS_MAX} step={5}
               value={oddsRange[1]}
               onChange={(e) => {
                 const v = parseInt(e.target.value);
@@ -331,7 +375,8 @@ export default function GradesPageInner() {
               <thead>
                 <tr className="text-xs text-gray-500 border-b border-gray-800">
                   <th className="text-left py-1.5 pr-3 font-medium">Player</th>
-                  <th className="text-left py-1.5 pr-3 font-medium">Market</th>
+                  <th className="text-left py-1.5 pr-1 font-medium">Mkt</th>
+                  <th className="text-center py-1.5 px-1 font-medium" title="Alternate line">Alt</th>
                   <th className="text-right py-1.5 px-2 font-medium">Line</th>
                   <th className="text-right py-1.5 px-2 font-medium">Odds</th>
                   <th className="text-right py-1.5 px-2 font-medium">Grade</th>
@@ -345,17 +390,23 @@ export default function GradesPageInner() {
               <tbody>
                 {filtered.map((row) => {
                   const def = defRankCell(row);
+                  const alt = isAlternate(row.marketKey);
                   return (
                     <tr key={row.gradeId} className="border-b border-gray-800">
                       <td className="py-1.5 pr-3">
                         <Link
-                          href={`/nba/player/${row.playerId}/props`}
+                          href={playerHref(row)}
                           className="text-gray-100 hover:text-blue-400 transition-colors"
                         >
                           {row.playerName}
                         </Link>
                       </td>
-                      <td className="py-1.5 pr-3 text-gray-400">{formatMarket(row.marketKey)}</td>
+                      <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">
+                        {marketAbbr(row.marketKey)}
+                      </td>
+                      <td className="py-1.5 px-1 text-center text-gray-500 text-xs">
+                        {alt ? <span className="text-yellow-600">*</span> : ''}
+                      </td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.lineValue)}</td>
                       <td className={`py-1.5 px-2 text-right tabular-nums ${oddsColor(row.overPrice)}`}>
                         {fmtOdds(row.overPrice)}
