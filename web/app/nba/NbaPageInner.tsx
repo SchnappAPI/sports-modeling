@@ -75,6 +75,8 @@ export default function NbaPageInner() {
             gameId={activeGame.gameId}
             homeTeamId={activeGame.homeTeamId}
             awayTeamId={activeGame.awayTeamId}
+            homeTeamAbbr={activeGame.homeTeamAbbr}
+            awayTeamAbbr={activeGame.awayTeamAbbr}
           />
         ) : (
           !loading && <div className="py-6 text-sm text-gray-500">Select a game above.</div>

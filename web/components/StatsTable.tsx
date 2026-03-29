@@ -24,6 +24,8 @@ interface Props {
   gameId: string;
   homeTeamId: number;
   awayTeamId: number;
+  homeTeamAbbr: string;
+  awayTeamAbbr: string;
 }
 
 function fmt(val: number | null | undefined, decimals = 1): string {
@@ -31,7 +33,17 @@ function fmt(val: number | null | undefined, decimals = 1): string {
   return val.toFixed(decimals);
 }
 
-function TeamStatsTable({ abbr, players, gameId }: { abbr: string; players: PlayerAvg[]; gameId: string }) {
+function TeamStatsTable({
+  abbr,
+  opponentAbbr,
+  players,
+  gameId,
+}: {
+  abbr: string;
+  opponentAbbr: string;
+  players: PlayerAvg[];
+  gameId: string;
+}) {
   const searchParams = useSearchParams();
   const tab = searchParams.get('tab') ?? 'stats';
 
@@ -57,7 +69,7 @@ function TeamStatsTable({ abbr, players, gameId }: { abbr: string; players: Play
             <tr key={p.playerId} className="border-b border-gray-800">
               <td className="py-1.5 pr-3">
                 <Link
-                  href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}`}
+                  href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}`}
                   className="text-gray-100 hover:text-blue-400 transition-colors"
                 >
                   {p.playerName}
@@ -79,7 +91,7 @@ function TeamStatsTable({ abbr, players, gameId }: { abbr: string; players: Play
   );
 }
 
-export default function StatsTable({ gameId, homeTeamId, awayTeamId }: Props) {
+export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr }: Props) {
   const [players, setPlayers] = useState<PlayerAvg[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -101,14 +113,38 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId }: Props) {
   if (error) return <div className="text-sm text-red-400 py-4">Error: {error}</div>;
   if (players.length === 0) return <div className="text-sm text-gray-500 py-4">No stats available.</div>;
 
-  const teams = Array.from(new Set(players.map((p) => p.teamAbbr)));
+  const homePlayers = players.filter((p) => p.teamAbbr === homeTeamAbbr);
+  const awayPlayers = players.filter((p) => p.teamAbbr === awayTeamAbbr);
+  // fallback: any players not matching either tricode go into their own group
+  const otherAbbrs = Array.from(new Set(
+    players
+      .filter((p) => p.teamAbbr !== homeTeamAbbr && p.teamAbbr !== awayTeamAbbr)
+      .map((p) => p.teamAbbr)
+  ));
 
   return (
     <div className="flex flex-col gap-6">
-      {teams.map((abbr) => (
+      {awayPlayers.length > 0 && (
+        <TeamStatsTable
+          abbr={awayTeamAbbr}
+          opponentAbbr={homeTeamAbbr}
+          players={awayPlayers}
+          gameId={gameId}
+        />
+      )}
+      {homePlayers.length > 0 && (
+        <TeamStatsTable
+          abbr={homeTeamAbbr}
+          opponentAbbr={awayTeamAbbr}
+          players={homePlayers}
+          gameId={gameId}
+        />
+      )}
+      {otherAbbrs.map((abbr) => (
         <TeamStatsTable
           key={abbr}
           abbr={abbr}
+          opponentAbbr=''
           players={players.filter((p) => p.teamAbbr === abbr)}
           gameId={gameId}
         />
