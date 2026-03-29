@@ -18,6 +18,13 @@ interface GradeRow {
   sampleSize20: number | null;
   weightedHitRate: number | null;
   grade: number | null;
+  oppTeamId: number | null;
+  position: string | null;
+}
+
+interface DefenseCache {
+  // keyed by `${oppTeamId}:${posGroup}` -> per-stat ranks
+  [key: string]: Record<string, number> | 'loading' | 'error';
 }
 
 function formatMarket(key: string): string {
@@ -62,8 +69,43 @@ function todayLocal(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// Odds slider bounds (American odds). -200 to +300 covers the vast majority
-// of prop markets. Users drag to narrow this window.
+function ordinal(n: number): string {
+  if (n === 11 || n === 12 || n === 13) return `${n}th`;
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 10;
+  return `${n}${s[v] || 'th'}`;
+}
+
+function rankColor(rank: number): string {
+  if (rank <= 10) return 'text-green-400';
+  if (rank <= 20) return 'text-yellow-400';
+  return 'text-red-400';
+}
+
+const MARKET_TO_STAT_KEY: Record<string, string> = {
+  player_points:             'pts',
+  player_points_alternate:   'pts',
+  player_rebounds:           'reb',
+  player_rebounds_alternate: 'reb',
+  player_assists:            'ast',
+  player_assists_alternate:  'ast',
+  player_steals:             'stl',
+  player_steals_alternate:   'stl',
+  player_blocks:             'blk',
+  player_blocks_alternate:   'blk',
+  player_threes:             'fg3m',
+  player_threes_alternate:   'fg3m',
+  player_turnovers:          'tov',
+};
+
+function posGroup(position: string | null): string | null {
+  if (!position) return null;
+  if (position.startsWith('G')) return 'G';
+  if (position.startsWith('F')) return 'F';
+  if (position.startsWith('C')) return 'C';
+  return null;
+}
+
 const ODDS_MIN = -300;
 const ODDS_MAX = 300;
 
@@ -75,6 +117,7 @@ export default function GradesPageInner() {
   const [selectedMarket, setSelectedMarket] = useState<string>('');
   const [playerFilter, setPlayerFilter]     = useState<string>('');
   const [oddsRange, setOddsRange]           = useState<[number, number]>([ODDS_MIN, ODDS_MAX]);
+  const [defenseCache, setDefenseCache]     = useState<DefenseCache>({});
 
   const backGameId = searchParams.get('gameId');
   const gradeDate  = searchParams.get('date') ?? todayLocal();
@@ -86,6 +129,7 @@ export default function GradesPageInner() {
     setSelectedMarket('');
     setPlayerFilter('');
     setOddsRange([ODDS_MIN, ODDS_MAX]);
+    setDefenseCache({});
 
     const url = backGameId
       ? `/api/grades?date=${gradeDate}&gameId=${backGameId}`
@@ -98,13 +142,47 @@ export default function GradesPageInner() {
       .finally(() => setLoading(false));
   }, [gradeDate, backGameId]);
 
+  // After grades load, fetch defense data for each unique (oppTeamId, posGroup) pair.
+  useEffect(() => {
+    if (grades.length === 0) return;
+
+    const pairs = new Set<string>();
+    for (const g of grades) {
+      const pg = posGroup(g.position);
+      if (g.oppTeamId && pg) pairs.add(`${g.oppTeamId}:${pg}`);
+    }
+
+    for (const key of pairs) {
+      setDefenseCache((prev) => {
+        if (prev[key]) return prev;  // already fetched or fetching
+        return { ...prev, [key]: 'loading' };
+      });
+
+      const [tid, pg] = key.split(':');
+      fetch(`/api/contextual?oppTeamId=${tid}&position=${pg}`)
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then((data) => {
+          // Extract per-stat ranks from the response
+          const ranks: Record<string, number> = {};
+          for (const stat of ['pts', 'reb', 'ast', 'stl', 'blk', 'fg3m', 'tov']) {
+            if (data[stat]?.rank != null) ranks[stat] = data[stat].rank;
+          }
+          setDefenseCache((prev) => ({ ...prev, [key]: ranks }));
+        })
+        .catch(() => {
+          setDefenseCache((prev) => ({ ...prev, [key]: 'error' }));
+        });
+    }
+  }, [grades]);
+
   const marketOptions = useMemo(
     () => Array.from(new Set(grades.map((r) => r.marketKey))).sort(),
     [grades]
   );
 
-  // Derive the actual odds range present in the data so the slider bounds
-  // are meaningful. Rows with null overPrice are included regardless of slider.
   const dataOddsMin = useMemo(() => {
     const prices = grades.map((r) => r.overPrice).filter((p): p is number => p != null);
     return prices.length ? Math.min(...prices) : ODDS_MIN;
@@ -121,7 +199,6 @@ export default function GradesPageInner() {
       const q = playerFilter.trim().toLowerCase();
       rows = rows.filter((r) => r.playerName.toLowerCase().includes(q));
     }
-    // Odds filter: include rows that have a price within range, OR have no price.
     const [lo, hi] = oddsRange;
     const sliderActive = lo > ODDS_MIN || hi < ODDS_MAX;
     if (sliderActive) {
@@ -131,6 +208,21 @@ export default function GradesPageInner() {
   }, [grades, selectedMarket, playerFilter, oddsRange]);
 
   const sliderActive = oddsRange[0] > ODDS_MIN || oddsRange[1] < ODDS_MAX;
+
+  // Derive a defense rank cell for a grade row based on its market.
+  function defRankCell(row: GradeRow): { rank: number | null; label: string } {
+    const pg = posGroup(row.position);
+    if (!row.oppTeamId || !pg) return { rank: null, label: '-' };
+    const key = `${row.oppTeamId}:${pg}`;
+    const entry = defenseCache[key];
+    if (!entry || entry === 'loading') return { rank: null, label: '...' };
+    if (entry === 'error') return { rank: null, label: '-' };
+    const statKey = MARKET_TO_STAT_KEY[row.marketKey];
+    if (!statKey) return { rank: null, label: '-' };
+    const rank = (entry as Record<string, number>)[statKey];
+    if (rank == null) return { rank: null, label: '-' };
+    return { rank, label: ordinal(rank) };
+  }
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -146,7 +238,6 @@ export default function GradesPageInner() {
 
         {!loading && !error && grades.length > 0 && (
           <>
-            {/* Market dropdown */}
             <select
               value={selectedMarket}
               onChange={(e) => setSelectedMarket(e.target.value)}
@@ -158,7 +249,6 @@ export default function GradesPageInner() {
               ))}
             </select>
 
-            {/* Player search */}
             <input
               type="text"
               placeholder="Player..."
@@ -176,12 +266,9 @@ export default function GradesPageInner() {
         )}
       </div>
 
-      {/* Odds slider row — only shown once data is loaded */}
       {!loading && !error && grades.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
           <span className="text-xs text-gray-600 whitespace-nowrap">Odds</span>
-
-          {/* Min handle */}
           <div className="flex items-center gap-1 flex-1">
             <span className={`text-xs tabular-nums w-10 text-right ${
               sliderActive ? 'text-gray-300' : 'text-gray-600'
@@ -219,7 +306,6 @@ export default function GradesPageInner() {
               {oddsRange[1] >= 0 ? `+${oddsRange[1]}` : `${oddsRange[1]}`}
             </span>
           </div>
-
           {sliderActive && (
             <button
               onClick={() => setOddsRange([ODDS_MIN, ODDS_MAX])}
@@ -231,7 +317,6 @@ export default function GradesPageInner() {
         </div>
       )}
 
-      {/* Table */}
       <div className="flex-1 px-4 py-4">
         {loading && <div className="text-sm text-gray-500">Loading grades...</div>}
         {error   && <div className="text-sm text-red-400">Error: {error}</div>}
@@ -253,34 +338,43 @@ export default function GradesPageInner() {
                   <th className="text-right py-1.5 px-2 font-medium">L20%</th>
                   <th className="text-right py-1.5 px-2 font-medium">L60%</th>
                   <th className="text-right py-1.5 px-2 font-medium">N20</th>
-                  <th className="text-right py-1.5 pl-2 font-medium">N60</th>
+                  <th className="text-right py-1.5 px-2 font-medium">N60</th>
+                  <th className="text-right py-1.5 pl-2 font-medium" title="Opponent defense rank for this stat at this position. 1st = most allowed.">Def</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((row) => (
-                  <tr key={row.gradeId} className="border-b border-gray-800">
-                    <td className="py-1.5 pr-3">
-                      <Link
-                        href={`/nba/player/${row.playerId}/props`}
-                        className="text-gray-100 hover:text-blue-400 transition-colors"
-                      >
-                        {row.playerName}
-                      </Link>
-                    </td>
-                    <td className="py-1.5 pr-3 text-gray-400">{formatMarket(row.marketKey)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.lineValue)}</td>
-                    <td className={`py-1.5 px-2 text-right tabular-nums ${oddsColor(row.overPrice)}`}>
-                      {fmtOdds(row.overPrice)}
-                    </td>
-                    <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.grade)}`}>
-                      {fmt(row.grade)}
-                    </td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate60)}</td>
-                    <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize20 ?? '-'}</td>
-                    <td className="py-1.5 pl-2 text-right text-gray-500">{row.sampleSize60 ?? '-'}</td>
-                  </tr>
-                ))}
+                {filtered.map((row) => {
+                  const def = defRankCell(row);
+                  return (
+                    <tr key={row.gradeId} className="border-b border-gray-800">
+                      <td className="py-1.5 pr-3">
+                        <Link
+                          href={`/nba/player/${row.playerId}/props`}
+                          className="text-gray-100 hover:text-blue-400 transition-colors"
+                        >
+                          {row.playerName}
+                        </Link>
+                      </td>
+                      <td className="py-1.5 pr-3 text-gray-400">{formatMarket(row.marketKey)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.lineValue)}</td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${oddsColor(row.overPrice)}`}>
+                        {fmtOdds(row.overPrice)}
+                      </td>
+                      <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.grade)}`}>
+                        {fmt(row.grade)}
+                      </td>
+                      <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate60)}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize20 ?? '-'}</td>
+                      <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize60 ?? '-'}</td>
+                      <td className={`py-1.5 pl-2 text-right tabular-nums text-xs ${
+                        def.rank != null ? rankColor(def.rank) : 'text-gray-600'
+                      }`}>
+                        {def.label}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

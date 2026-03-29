@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import MatchupDefense from '@/components/MatchupDefense';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -57,6 +58,11 @@ interface GameSummary {
   fta: number;
 }
 
+interface PlayerInfo {
+  oppTeamId: number | null;
+  position: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -68,7 +74,6 @@ function buildGameSummaries(
   rows: GameLogRow[],
   selectedPeriods: Set<QuarterKey>,
 ): GameSummary[] {
-  // Collect all unique game identities from the full (unfiltered) row set.
   const gameOrder: string[] = [];
   const gameMeta = new Map<string, Pick<GameSummary, 'gameDate' | 'opponentAbbr' | 'isHome' | 'dnp' | 'started'>>();
   for (const r of rows) {
@@ -84,7 +89,6 @@ function buildGameSummaries(
     }
   }
 
-  // Sum stats only for rows that pass the period filter.
   const filtered = selectedPeriods.size === 0
     ? rows
     : rows.filter((r) => selectedPeriods.has(r.period as QuarterKey));
@@ -200,10 +204,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     return qs ? `/nba?${qs}` : '/nba';
   })();
 
-  const [log, setLog]       = useState<GameLogRow[]>([]);
-  const [grades, setGrades] = useState<GradeLine[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState<string | null>(null);
+  const [log, setLog]             = useState<GameLogRow[]>([]);
+  const [grades, setGrades]       = useState<GradeLine[]>([]);
+  const [playerInfo, setPlayerInfo] = useState<PlayerInfo>({ oppTeamId: null, position: null });
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState<string | null>(null);
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
 
   // Team players for switcher
@@ -214,6 +219,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     setError(null);
     setLog([]);
     setGrades([]);
+    setPlayerInfo({ oppTeamId: null, position: null });
     setSelectedPeriods(new Set());
 
     Promise.all([
@@ -226,9 +232,24 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         setLog(playerData.log ?? []);
         setGrades(gradeData.grades ?? []);
 
-        // Fetch team players for switcher once we know the teamId
-        const firstRow = (playerData.log ?? [])[0];
-        if (firstRow && backGameId) {
+        // Fetch player position and today's opponent from game-grades if we have a gameId.
+        // This gives us what we need to show the matchup defense section.
+        if (backGameId) {
+          fetch(`/api/game-grades?gameId=${backGameId}`)
+            .then((r) => r.json())
+            .then((d) => {
+              const myGrade = (d.grades ?? []).find(
+                (g: any) => String(g.playerId) === String(playerId)
+              );
+              if (myGrade) {
+                setPlayerInfo({
+                  oppTeamId: myGrade.oppTeamId ?? null,
+                  position:  myGrade.position  ?? null,
+                });
+              }
+            })
+            .catch(() => {});
+
           fetch(`/api/team-players?gameId=${backGameId}`)
             .then((r) => r.json())
             .then((d) => setTeamPlayers(d.players ?? []))
@@ -289,11 +310,17 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     return value > line ? 'text-green-400' : 'text-red-400';
   }
 
-  // Derive player name from first non-DNP row
-  const playerName = log.find((r) => !r.dnp)?.opponentAbbr
-    ? undefined
-    : undefined; // resolved via API
   const displayName = (log[0] as any)?.playerName ?? `Player ${playerId}`;
+
+  // Derive the most relevant prop market for this player today (first grade we find)
+  // to pass as highlightMarket to MatchupDefense.
+  const todayMarket = useMemo(() => {
+    if (!backGameId) return undefined;
+    const gm = gradeMap.get(backGameId);
+    return gm ? Array.from(gm.keys())[0] : undefined;
+  }, [gradeMap, backGameId]);
+
+  const showMatchup = playerInfo.oppTeamId != null && playerInfo.position != null;
 
   if (loading) return <div className="px-4 py-6 text-sm text-gray-500">Loading...</div>;
   if (error)   return <div className="px-4 py-6 text-sm text-red-400">Error: {error}</div>;
@@ -310,7 +337,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3">
         <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">&#8592;</Link>
 
-        {/* Player switcher */}
         {teamPlayers.length > 0 ? (
           <select
             value={playerId}
@@ -378,6 +404,15 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           </tbody>
         </table>
       </div>
+
+      {/* Matchup defense — shown when we have oppTeamId and position */}
+      {showMatchup && (
+        <MatchupDefense
+          oppTeamId={playerInfo.oppTeamId!}
+          position={playerInfo.position!}
+          highlightMarket={todayMarket}
+        />
+      )}
 
       {/* Period filter */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">

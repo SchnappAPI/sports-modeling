@@ -363,7 +363,8 @@ export async function getPlayerGames(
 }
 
 // ---------------------------------------------------------------------------
-// Grades (At a Glance)
+// Grades (At a Glance) — with opponent team ID and player position for
+// contextual defense ranks
 // ---------------------------------------------------------------------------
 
 export interface GradeRow {
@@ -380,6 +381,9 @@ export interface GradeRow {
   sampleSize20: number | null;
   weightedHitRate: number | null;
   grade: number | null;
+  // contextual fields — populated for today's grades when schedule data available
+  oppTeamId: number | null;
+  position: string | null;
 }
 
 export async function getGrades(
@@ -425,11 +429,18 @@ export async function getGrades(
        dg.sample_size_60    AS sampleSize60,
        dg.sample_size_20    AS sampleSize20,
        dg.weighted_hit_rate AS weightedHitRate,
-       dg.grade             AS grade
+       dg.grade             AS grade,
+       CASE
+         WHEN p.team_id = s.home_team_id THEN s.away_team_id
+         ELSE s.home_team_id
+       END                  AS oppTeamId,
+       p.position           AS position
      FROM common.daily_grades dg
      LEFT JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
      LEFT JOIN best_price bp
        ON bp.event_id = dg.event_id AND bp.market_key = dg.market_key AND bp.player_id = dg.player_id
+     LEFT JOIN nba.players p ON p.player_id = dg.player_id
+     LEFT JOIN nba.schedule s ON s.game_id = egm.game_id
      WHERE CONVERT(VARCHAR(10), dg.grade_date, 120) = @gradeDate
      ${gameFilter}
      ORDER BY dg.grade DESC`
@@ -501,4 +512,149 @@ export async function getPlayerProps(playerId: number): Promise<PlayerPropRow[]>
     `
     );
   return result.recordset;
+}
+
+// ---------------------------------------------------------------------------
+// Matchup defense — how a team defends each stat category at a given position
+//
+// Returns per-stat averages allowed and ranks across all 30 teams.
+// Rank 1 = most allowed (best matchup for overs). Rank 30 = fewest allowed.
+// Position matching is loose: G covers PG/SG/G, F covers SF/PF/F, C is exact.
+// ---------------------------------------------------------------------------
+
+export interface MatchupStatLine {
+  avg: number;
+  rank: number;   // 1 = most allowed
+  gamesDefended: number;
+}
+
+export interface MatchupDefenseRow {
+  oppTeamId: number;
+  oppTeamAbbr: string;
+  position: string;
+  pts: MatchupStatLine;
+  reb: MatchupStatLine;
+  ast: MatchupStatLine;
+  stl: MatchupStatLine;
+  blk: MatchupStatLine;
+  fg3m: MatchupStatLine;
+  tov: MatchupStatLine;
+}
+
+export async function getMatchupDefense(
+  oppTeamId: number,
+  position: string
+): Promise<MatchupDefenseRow | null> {
+  const pool = await getPool();
+
+  // Normalize position to broad group for matching.
+  // NBA positions in nba.players are typically: G, F, C, G-F, F-G, F-C, C-F.
+  // We match on the primary position character.
+  const posGroup =
+    position.startsWith('G') ? 'G' :
+    position.startsWith('F') ? 'F' :
+    position.startsWith('C') ? 'C' : null;
+
+  if (!posGroup) return null;
+
+  const result = await pool
+    .request()
+    .input('oppTeamId', mssql.Int, oppTeamId)
+    .input('posGroup', mssql.VarChar, posGroup)
+    .query(
+      `-- Build full-game totals for every player-game this season, with opponent
+       -- team ID and position.
+       WITH season_start AS (
+         SELECT CAST('2024-10-01' AS DATE) AS dt
+       ),
+       game_totals AS (
+         SELECT
+           pbs.player_id,
+           pbs.game_id,
+           -- Opponent is whoever is NOT the player's team in this game
+           CASE
+             WHEN pbs.team_id = s.home_team_id THEN s.away_team_id
+             ELSE s.home_team_id
+           END AS opp_team_id,
+           SUM(pbs.pts)    AS pts,
+           SUM(pbs.reb)    AS reb,
+           SUM(pbs.ast)    AS ast,
+           SUM(pbs.stl)    AS stl,
+           SUM(pbs.blk)    AS blk,
+           SUM(pbs.fg3m)   AS fg3m,
+           SUM(pbs.tov)    AS tov
+         FROM nba.player_box_score_stats pbs
+         JOIN nba.schedule s ON s.game_id = pbs.game_id
+         WHERE s.game_date >= (SELECT dt FROM season_start)
+         GROUP BY pbs.player_id, pbs.game_id, pbs.team_id, s.home_team_id, s.away_team_id
+       ),
+       -- Join position; filter to players whose primary position matches posGroup
+       pos_filtered AS (
+         SELECT gt.*
+         FROM game_totals gt
+         JOIN nba.players p ON p.player_id = gt.player_id
+         WHERE LEFT(p.position, 1) = @posGroup
+       ),
+       -- Aggregate per defending team
+       team_defense AS (
+         SELECT
+           opp_team_id,
+           COUNT(*)            AS games_defended,
+           AVG(CAST(pts  AS FLOAT)) AS avg_pts,
+           AVG(CAST(reb  AS FLOAT)) AS avg_reb,
+           AVG(CAST(ast  AS FLOAT)) AS avg_ast,
+           AVG(CAST(stl  AS FLOAT)) AS avg_stl,
+           AVG(CAST(blk  AS FLOAT)) AS avg_blk,
+           AVG(CAST(fg3m AS FLOAT)) AS avg_fg3m,
+           AVG(CAST(tov  AS FLOAT)) AS avg_tov
+         FROM pos_filtered
+         GROUP BY opp_team_id
+       ),
+       -- Rank all teams (1 = most allowed = best matchup for overs)
+       ranked AS (
+         SELECT
+           opp_team_id,
+           games_defended,
+           avg_pts,  RANK() OVER (ORDER BY avg_pts  DESC) AS rank_pts,
+           avg_reb,  RANK() OVER (ORDER BY avg_reb  DESC) AS rank_reb,
+           avg_ast,  RANK() OVER (ORDER BY avg_ast  DESC) AS rank_ast,
+           avg_stl,  RANK() OVER (ORDER BY avg_stl  DESC) AS rank_stl,
+           avg_blk,  RANK() OVER (ORDER BY avg_blk  DESC) AS rank_blk,
+           avg_fg3m, RANK() OVER (ORDER BY avg_fg3m DESC) AS rank_fg3m,
+           avg_tov,  RANK() OVER (ORDER BY avg_tov  DESC) AS rank_tov
+         FROM team_defense
+       )
+       SELECT
+         r.opp_team_id    AS oppTeamId,
+         t.team_tricode   AS oppTeamAbbr,
+         r.games_defended AS gamesDefended,
+         r.avg_pts,  r.rank_pts,
+         r.avg_reb,  r.rank_reb,
+         r.avg_ast,  r.rank_ast,
+         r.avg_stl,  r.rank_stl,
+         r.avg_blk,  r.rank_blk,
+         r.avg_fg3m, r.rank_fg3m,
+         r.avg_tov,  r.rank_tov
+       FROM ranked r
+       JOIN nba.teams t ON t.team_id = r.opp_team_id
+       WHERE r.opp_team_id = @oppTeamId`
+    );
+
+  if (result.recordset.length === 0) return null;
+  const row = result.recordset[0];
+
+  const line = (avg: number, rank: number, gd: number): MatchupStatLine => ({ avg, rank, gamesDefended: gd });
+  return {
+    oppTeamId:  row.oppTeamId,
+    oppTeamAbbr: row.oppTeamAbbr,
+    position,
+    gamesDefended: row.gamesDefended,
+    pts:  line(row.avg_pts,  row.rank_pts,  row.gamesDefended),
+    reb:  line(row.avg_reb,  row.rank_reb,  row.gamesDefended),
+    ast:  line(row.avg_ast,  row.rank_ast,  row.gamesDefended),
+    stl:  line(row.avg_stl,  row.rank_stl,  row.gamesDefended),
+    blk:  line(row.avg_blk,  row.rank_blk,  row.gamesDefended),
+    fg3m: line(row.avg_fg3m, row.rank_fg3m, row.gamesDefended),
+    tov:  line(row.avg_tov,  row.rank_tov,  row.gamesDefended),
+  } as MatchupDefenseRow;
 }
