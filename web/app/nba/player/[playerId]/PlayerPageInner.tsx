@@ -29,6 +29,9 @@ interface GameLogRow {
   fga: number | null;
   ftm: number | null;
   fta: number | null;
+  // PT stats
+  potentialAst: number | null;
+  rebChances: number | null;
 }
 
 interface GradeLine {
@@ -78,6 +81,9 @@ interface GameSummary {
   fga: number;
   ftm: number;
   fta: number;
+  // PT stats at game level (same across all quarter rows for a game)
+  potentialAst: number | null;
+  rebChances: number | null;
 }
 
 interface PlayerInfo {
@@ -162,7 +168,9 @@ function buildGameSummaries(
   selectedPeriods: Set<QuarterKey>,
 ): GameSummary[] {
   const gameOrder: string[] = [];
-  const gameMeta = new Map<string, Pick<GameSummary, 'gameDate' | 'opponentAbbr' | 'isHome' | 'dnp' | 'started'>>();
+  const gameMeta = new Map<string, Pick<GameSummary,
+    'gameDate' | 'opponentAbbr' | 'isHome' | 'dnp' | 'started' | 'potentialAst' | 'rebChances'
+  >>();
   for (const r of rows) {
     if (!gameMeta.has(r.gameId)) {
       gameOrder.push(r.gameId);
@@ -172,6 +180,9 @@ function buildGameSummaries(
         isHome:       r.isHome,
         dnp:          r.dnp,
         started:      r.started,
+        // PT stats are game-level; take from the first row seen for this game
+        potentialAst: r.potentialAst ?? null,
+        rebChances:   r.rebChances   ?? null,
       });
     }
   }
@@ -180,7 +191,9 @@ function buildGameSummaries(
     ? rows
     : rows.filter((r) => selectedPeriods.has(r.period as QuarterKey));
 
-  const totals = new Map<string, Omit<GameSummary, 'gameId' | 'gameDate' | 'opponentAbbr' | 'isHome' | 'dnp' | 'started'>>();
+  const totals = new Map<string, Omit<GameSummary,
+    'gameId' | 'gameDate' | 'opponentAbbr' | 'isHome' | 'dnp' | 'started' | 'potentialAst' | 'rebChances'
+  >>();
   for (const r of filtered) {
     if (r.dnp) continue;
     const t = totals.get(r.gameId) ?? { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 };
@@ -284,7 +297,7 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   const map = new Map<string, TodayGradeRow[]>();
 
   for (const g of grades) {
-    if (g.overPrice == null) continue; // only show priced lines
+    if (g.overPrice == null) continue;
     const base = baseMarket(g.marketKey);
     if (!map.has(base)) { order.push(base); map.set(base, []); }
     map.get(base)!.push(g);
@@ -303,16 +316,13 @@ function PropCard({ row }: { row: TodayGradeRow }) {
     <div className={`rounded border px-3 py-2 min-w-[90px] ${
       alt ? 'border-yellow-900 bg-yellow-950/20' : 'border-gray-700 bg-gray-900'
     }`}>
-      {/* Line value */}
       <div className="text-base font-semibold text-gray-100 tabular-nums leading-none">
         {row.lineValue.toFixed(1)}
         {alt && <span className="text-yellow-600 text-xs ml-1">alt</span>}
       </div>
-      {/* Odds */}
       <div className="text-xs text-gray-400 tabular-nums mt-0.5">
         {fmtOdds(row.overPrice)}
       </div>
-      {/* Composite and hit rate */}
       <div className="flex gap-2 mt-1.5 text-xs">
         {row.compositeGrade != null && (
           <span className={`font-medium ${gradeColor(row.compositeGrade)}`}>
@@ -325,7 +335,6 @@ function PropCard({ row }: { row: TodayGradeRow }) {
           </span>
         )}
       </div>
-      {/* L20 / L60 */}
       <div className="flex gap-2 mt-0.5 text-xs text-gray-600">
         <span>{fmtPct(row.hitRate20)}</span>
         <span>{fmtPct(row.hitRate60)}</span>
@@ -367,9 +376,7 @@ function TodayPropsSection({ playerId, gradeDate }: { playerId: string; gradeDat
       <div className="px-4 pb-3 flex flex-col gap-3">
         {groups.map((group) => (
           <div key={group.baseKey}>
-            {/* Market header */}
             <div className="text-xs text-gray-500 font-medium mb-1.5">{group.label}</div>
-            {/* Line cards */}
             <div className="flex flex-wrap gap-2">
               {group.lines.map((row) => (
                 <PropCard key={row.gradeId} row={row} />
@@ -395,8 +402,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const backDate     = searchParams.get('date');
   const oppParam     = searchParams.get('opp');
 
-  // The date to use for fetching today's grades from the At a Glance page.
-  // If arrived from grades page the date param is set, otherwise use today.
   const gradeDate = backDate ?? todayLocal();
 
   const backHref = (() => {
@@ -623,7 +628,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         />
       )}
 
-      {/* Today's props — only shown when navigated from a grade date context */}
+      {/* Today's props */}
       <TodayPropsSection playerId={playerId} gradeDate={gradeDate} />
 
       {/* Period filter */}
@@ -666,8 +671,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               <th className="text-right px-2 py-1.5 font-medium">Str</th>
               <th className="text-right px-2 py-1.5 font-medium">MIN</th>
               <th className="text-right px-2 py-1.5 font-medium">PTS</th>
-              <th className="text-right px-2 py-1.5 font-medium">REB</th>
-              <th className="text-right px-2 py-1.5 font-medium">AST</th>
+              <th className="text-right px-2 py-1.5 font-medium" title="REB / REB Chances">REB</th>
+              <th className="text-right px-2 py-1.5 font-medium" title="AST / Potential AST">AST</th>
               <th className="text-right px-2 py-1.5 font-medium">STL</th>
               <th className="text-right px-2 py-1.5 font-medium">BLK</th>
               <th className="text-right px-2 py-1.5 font-medium">TOV</th>
@@ -702,6 +707,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               };
               const fmtS = (made: number, att: number) =>
                 att === 0 ? '-' : `${made}/${att}`;
+              // PT stats: actual/potential format
+              const fmtPT = (actual: number, potential: number | null): string => {
+                if (potential == null) return String(actual);
+                return `${actual}/${Math.round(potential)}`;
+              };
               const starterBadge = g.started === true
                 ? <span className="text-blue-500 font-medium">S</span>
                 : g.started === false
@@ -716,8 +726,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   <td className="px-2 py-1.5 text-right text-xs">{starterBadge}</td>
                   <td className="px-2 py-1.5 text-right text-gray-300">{fmtM(g.min)}</td>
                   <td className={`px-2 py-1.5 text-right ${ptsLine}`}>{g.pts}</td>
-                  <td className={`px-2 py-1.5 text-right ${rebLine}`}>{g.reb}</td>
-                  <td className={`px-2 py-1.5 text-right ${astLine}`}>{g.ast}</td>
+                  <td className={`px-2 py-1.5 text-right ${rebLine} tabular-nums`}>
+                    {fmtPT(g.reb, selectedPeriods.size === 0 ? g.rebChances : null)}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right ${astLine} tabular-nums`}>
+                    {fmtPT(g.ast, selectedPeriods.size === 0 ? g.potentialAst : null)}
+                  </td>
                   <td className={`px-2 py-1.5 text-right ${stlLine}`}>{g.stl}</td>
                   <td className={`px-2 py-1.5 text-right ${blkLine}`}>{g.blk}</td>
                   <td className="px-2 py-1.5 text-right text-gray-300">{g.tov}</td>

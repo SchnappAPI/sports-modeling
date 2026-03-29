@@ -278,6 +278,10 @@ export interface PlayerGameRow {
   fga: number | null;
   ftm: number | null;
   fta: number | null;
+  // PT stats — game-level, joined from nba.player_passing_stats /
+  // nba.player_rebound_chances. NULL when not yet loaded for that date.
+  potentialAst: number | null;
+  rebChances: number | null;
 }
 
 export async function getPlayerGames(
@@ -291,7 +295,9 @@ export async function getPlayerGames(
     .input('lastN', mssql.Int, lastN)
     .query<PlayerGameRow>(
       // Uses nba.schedule (not nba.games) so in-progress games appear in the
-      // log alongside completed ones. nba.games only contains final box scores.
+      // log alongside completed ones.
+      // Future scheduled games (game_date > today) are excluded from the DNP
+      // branch so upcoming fixtures don't appear as blank rows in the log.
       `WITH player_team AS (
          SELECT team_id FROM nba.players WHERE player_id = @playerId
        ),
@@ -305,8 +311,9 @@ export async function getPlayerGames(
          FROM nba.schedule s
          JOIN nba.teams ht ON ht.team_id = s.home_team_id
          JOIN nba.teams at ON at.team_id = s.away_team_id
-         WHERE s.home_team_id = (SELECT team_id FROM player_team)
-            OR s.away_team_id = (SELECT team_id FROM player_team)
+         WHERE (s.home_team_id = (SELECT team_id FROM player_team)
+             OR s.away_team_id = (SELECT team_id FROM player_team))
+           AND s.game_date <= CAST(GETUTCDATE() AS DATE)
          ORDER BY s.game_date DESC
        ),
        player_quarters AS (
@@ -340,11 +347,17 @@ export async function getPlayerGames(
          ls.started                              AS started,
          pq.period,
          pq.pts, pq.reb, pq.ast, pq.stl, pq.blk, pq.tov,
-         pq.min, pq.fg3m, pq.fgm, pq.fga, pq.ftm, pq.fta
+         pq.min, pq.fg3m, pq.fgm, pq.fga, pq.ftm, pq.fta,
+         pps.potential_ast                       AS potentialAst,
+         prc.reb_chances                         AS rebChances
        FROM team_games tg
        JOIN played_games pg ON pg.game_id = tg.game_id
        JOIN player_quarters pq ON pq.game_id = tg.game_id
        LEFT JOIN lineup_status ls ON ls.game_id = tg.game_id
+       LEFT JOIN nba.player_passing_stats pps
+         ON pps.player_id = @playerId AND pps.game_date = tg.game_date
+       LEFT JOIN nba.player_rebound_chances prc
+         ON prc.player_id = @playerId AND prc.game_date = tg.game_date
 
        UNION ALL
 
@@ -358,7 +371,9 @@ export async function getPlayerGames(
          1                                       AS dnp,
          NULL                                    AS started,
          'FullGame'                              AS period,
-         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+         NULL AS potentialAst,
+         NULL AS rebChances
        FROM team_games tg
        WHERE tg.game_id NOT IN (SELECT game_id FROM played_games)
 
