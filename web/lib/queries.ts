@@ -123,7 +123,9 @@ export async function getRoster(gameId: string): Promise<RosterRow[]> {
        FROM nba.daily_lineups dl
        LEFT JOIN nba.players p ON p.player_name = dl.player_name
        WHERE dl.game_id = @gameId
-       ORDER BY dl.team_tricode, dl.starter_status, dl.player_name`
+       ORDER BY dl.team_tricode,
+                CASE WHEN dl.starter_status = 'Starter' THEN 0 ELSE 1 END,
+                dl.player_name`
     );
   return result.recordset;
 }
@@ -204,6 +206,7 @@ export interface BoxscoreRow {
   playerName: string;
   teamId: number;
   period: string;
+  starterStatus: string | null;  // 'Starter' | 'Bench' | null (no lineup data)
   pts: number | null;
   reb: number | null;
   ast: number | null;
@@ -225,24 +228,33 @@ export async function getBoxscore(gameId: string): Promise<BoxscoreRow[]> {
     .input('gameId', mssql.VarChar, gameId)
     .query<BoxscoreRow>(
       `SELECT
-         pbs.player_id AS playerId,
-         p.player_name AS playerName,
-         pbs.team_id   AS teamId,
-         pbs.period    AS period,
+         pbs.player_id        AS playerId,
+         p.player_name        AS playerName,
+         pbs.team_id          AS teamId,
+         pbs.period           AS period,
+         dl.starter_status    AS starterStatus,
          pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk, pbs.tov,
          pbs.minutes AS min,
          pbs.fg3m, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta
        FROM nba.player_box_score_stats pbs
        JOIN nba.players p ON p.player_id = pbs.player_id
+       LEFT JOIN nba.daily_lineups dl
+         ON dl.game_id = pbs.game_id
+         AND dl.player_name = p.player_name
        WHERE pbs.game_id = @gameId
-       ORDER BY pbs.player_id, pbs.period`
+       ORDER BY
+         CASE WHEN dl.starter_status = 'Starter' THEN 0 ELSE 1 END,
+         pbs.player_id, pbs.period`
     );
   return result.recordset;
 }
 
 // ---------------------------------------------------------------------------
-// Player detail — full season game log with DNP rows
+// Player detail — per-quarter game log rows
 // ---------------------------------------------------------------------------
+// Each row is one (game, period) combination so the client can filter
+// by period and re-sum without additional API calls. DNP games are returned
+// as a single synthetic row with period='FullGame' and all stats null.
 
 export interface PlayerGameRow {
   gameId: string;
@@ -250,6 +262,8 @@ export interface PlayerGameRow {
   opponentAbbr: string;
   isHome: boolean;
   dnp: boolean;
+  started: boolean | null;  // null when no lineup data
+  period: string;
   pts: number | null;
   reb: number | null;
   ast: number | null;
@@ -264,9 +278,6 @@ export interface PlayerGameRow {
   fta: number | null;
 }
 
-// Returns every completed game the player's team played this season.
-// Games where the player has no box score rows are returned with dnp=true.
-// Stats are summed across all quarters (no FullGame period exists).
 export async function getPlayerGames(
   playerId: number,
   lastN: number
@@ -277,13 +288,9 @@ export async function getPlayerGames(
     .input('playerId', mssql.Int, playerId)
     .input('lastN', mssql.Int, lastN)
     .query<PlayerGameRow>(
-      `-- Find the player's current team
-       WITH player_team AS (
-         SELECT team_id
-         FROM nba.players
-         WHERE player_id = @playerId
+      `WITH player_team AS (
+         SELECT team_id FROM nba.players WHERE player_id = @playerId
        ),
-       -- All completed games for that team, most recent first
        team_games AS (
          SELECT TOP (@lastN)
            g.game_id,
@@ -298,44 +305,62 @@ export async function getPlayerGames(
             OR g.away_team_id = (SELECT team_id FROM player_team)
          ORDER BY g.game_date DESC
        ),
-       -- Sum box score quarters for this player per game
-       player_totals AS (
+       player_quarters AS (
          SELECT
            pbs.game_id,
-           SUM(pbs.pts)     AS pts,
-           SUM(pbs.reb)     AS reb,
-           SUM(pbs.ast)     AS ast,
-           SUM(pbs.stl)     AS stl,
-           SUM(pbs.blk)     AS blk,
-           SUM(pbs.tov)     AS tov,
-           SUM(pbs.minutes) AS min,
-           SUM(pbs.fg3m)    AS fg3m,
-           SUM(pbs.fgm)     AS fgm,
-           SUM(pbs.fga)     AS fga,
-           SUM(pbs.ftm)     AS ftm,
-           SUM(pbs.fta)     AS fta
+           pbs.period,
+           pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk, pbs.tov,
+           pbs.minutes AS min,
+           pbs.fg3m, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta
          FROM nba.player_box_score_stats pbs
          WHERE pbs.player_id = @playerId
-         GROUP BY pbs.game_id
+       ),
+       played_games AS (
+         SELECT DISTINCT game_id FROM player_quarters
+       ),
+       lineup_status AS (
+         SELECT dl.game_id,
+                CASE WHEN dl.starter_status = 'Starter' THEN 1 ELSE 0 END AS started
+         FROM nba.daily_lineups dl
+         JOIN nba.players p ON p.player_name = dl.player_name
+         WHERE p.player_id = @playerId
        )
+       -- Played rows: one row per (game, period)
        SELECT
          tg.game_id                              AS gameId,
          CONVERT(VARCHAR(10), tg.game_date, 120) AS gameDate,
-         CASE
-           WHEN tg.home_team_id = (SELECT team_id FROM player_team)
-           THEN tg.away_tricode
-           ELSE tg.home_tricode
-         END                                     AS opponentAbbr,
-         CASE
-           WHEN tg.home_team_id = (SELECT team_id FROM player_team)
-           THEN 1 ELSE 0
-         END                                     AS isHome,
-         CASE WHEN pt.game_id IS NULL THEN 1 ELSE 0 END AS dnp,
-         pt.pts, pt.reb, pt.ast, pt.stl, pt.blk, pt.tov,
-         pt.min, pt.fg3m, pt.fgm, pt.fga, pt.ftm, pt.fta
+         CASE WHEN tg.home_team_id = (SELECT team_id FROM player_team)
+              THEN tg.away_tricode ELSE tg.home_tricode END AS opponentAbbr,
+         CASE WHEN tg.home_team_id = (SELECT team_id FROM player_team)
+              THEN 1 ELSE 0 END                 AS isHome,
+         0                                       AS dnp,
+         ls.started                              AS started,
+         pq.period,
+         pq.pts, pq.reb, pq.ast, pq.stl, pq.blk, pq.tov,
+         pq.min, pq.fg3m, pq.fgm, pq.fga, pq.ftm, pq.fta
        FROM team_games tg
-       LEFT JOIN player_totals pt ON pt.game_id = tg.game_id
-       ORDER BY tg.game_date DESC`
+       JOIN played_games pg ON pg.game_id = tg.game_id
+       JOIN player_quarters pq ON pq.game_id = tg.game_id
+       LEFT JOIN lineup_status ls ON ls.game_id = tg.game_id
+
+       UNION ALL
+
+       -- DNP rows: one synthetic row per missed game
+       SELECT
+         tg.game_id                              AS gameId,
+         CONVERT(VARCHAR(10), tg.game_date, 120) AS gameDate,
+         CASE WHEN tg.home_team_id = (SELECT team_id FROM player_team)
+              THEN tg.away_tricode ELSE tg.home_tricode END AS opponentAbbr,
+         CASE WHEN tg.home_team_id = (SELECT team_id FROM player_team)
+              THEN 1 ELSE 0 END                 AS isHome,
+         1                                       AS dnp,
+         NULL                                    AS started,
+         'FullGame'                              AS period,
+         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+       FROM team_games tg
+       WHERE tg.game_id NOT IN (SELECT game_id FROM played_games)
+
+       ORDER BY gameDate DESC, gameId, period`
     );
   return result.recordset;
 }

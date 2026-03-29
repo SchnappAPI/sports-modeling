@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 
@@ -33,6 +33,22 @@ function fmt(val: number | null | undefined, decimals = 1): string {
   return val.toFixed(decimals);
 }
 
+const PERIOD_OPTIONS = [
+  { label: 'Full', value: 'full' },
+  { label: '1Q',   value: '1Q' },
+  { label: '2Q',   value: '2Q' },
+  { label: '3Q',   value: '3Q' },
+  { label: '4Q',   value: '4Q' },
+  { label: 'OT',   value: 'OT' },
+] as const;
+
+const N_OPTIONS = [
+  { label: 'L10',  value: '10' },
+  { label: 'L20',  value: '20' },
+  { label: 'L40',  value: '40' },
+  { label: 'All',  value: 'all' },
+];
+
 function TeamStatsTable({
   abbr,
   opponentAbbr,
@@ -54,6 +70,7 @@ function TeamStatsTable({
         <thead>
           <tr className="text-xs text-gray-500 border-b border-gray-800">
             <th className="text-left py-1.5 pr-3 font-medium">Player</th>
+            <th className="text-right py-1.5 px-2 font-medium">GP</th>
             <th className="text-right py-1.5 px-2 font-medium">MIN</th>
             <th className="text-right py-1.5 px-2 font-medium">PTS</th>
             <th className="text-right py-1.5 px-2 font-medium">REB</th>
@@ -75,6 +92,7 @@ function TeamStatsTable({
                   {p.playerName}
                 </Link>
               </td>
+              <td className="py-1.5 px-2 text-right text-gray-500 text-xs">{p.games}</td>
               <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgMin)}</td>
               <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
               <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
@@ -92,14 +110,49 @@ function TeamStatsTable({
 }
 
 export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr }: Props) {
+  // Period checkboxes. 'full' means no period filter (sum all quarters).
+  const [activePeriods, setActivePeriods] = useState<Set<string>>(new Set(['full']));
+  const [nGames, setNGames] = useState('20');
+
   const [players, setPlayers] = useState<PlayerAvg[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  function togglePeriod(value: string) {
+    setActivePeriods((prev) => {
+      const next = new Set(prev);
+      if (value === 'full') {
+        // Selecting Full clears all quarter selections.
+        return new Set(['full']);
+      }
+      // Toggling a quarter clears Full.
+      next.delete('full');
+      if (next.has(value)) {
+        next.delete(value);
+        // If nothing left, fall back to Full.
+        if (next.size === 0) return new Set(['full']);
+      } else {
+        next.add(value);
+      }
+      return next;
+    });
+  }
+
+  const fetchStats = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`/api/team-averages?homeTeamId=${homeTeamId}&awayTeamId=${awayTeamId}&context=20`)
+
+    const periodsParam = activePeriods.has('full')
+      ? ''
+      : Array.from(activePeriods).join(',');
+
+    const url = new URL('/api/team-averages', window.location.origin);
+    url.searchParams.set('homeTeamId', String(homeTeamId));
+    url.searchParams.set('awayTeamId', String(awayTeamId));
+    url.searchParams.set('context', nGames);
+    if (periodsParam) url.searchParams.set('periods', periodsParam);
+
+    fetch(url.toString())
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -107,48 +160,99 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
       .then((data) => setPlayers(data.players ?? []))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [homeTeamId, awayTeamId]);
+  }, [homeTeamId, awayTeamId, nGames, activePeriods]);
 
-  if (loading) return <div className="text-sm text-gray-500 py-4">Loading stats...</div>;
-  if (error) return <div className="text-sm text-red-400 py-4">Error: {error}</div>;
-  if (players.length === 0) return <div className="text-sm text-gray-500 py-4">No stats available.</div>;
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
 
-  const homePlayers = players.filter((p) => p.teamAbbr === homeTeamAbbr);
-  const awayPlayers = players.filter((p) => p.teamAbbr === awayTeamAbbr);
-  // fallback: any players not matching either tricode go into their own group
-  const otherAbbrs = Array.from(new Set(
+  const homePlayers  = players.filter((p) => p.teamAbbr === homeTeamAbbr);
+  const awayPlayers  = players.filter((p) => p.teamAbbr === awayTeamAbbr);
+  const otherAbbrs   = Array.from(new Set(
     players
       .filter((p) => p.teamAbbr !== homeTeamAbbr && p.teamAbbr !== awayTeamAbbr)
       .map((p) => p.teamAbbr)
   ));
 
   return (
-    <div className="flex flex-col gap-6">
-      {awayPlayers.length > 0 && (
-        <TeamStatsTable
-          abbr={awayTeamAbbr}
-          opponentAbbr={homeTeamAbbr}
-          players={awayPlayers}
-          gameId={gameId}
-        />
+    <div className="flex flex-col gap-4">
+      {/* Controls */}
+      <div className="flex flex-wrap items-center gap-4">
+        {/* Period toggles */}
+        <div className="flex items-center gap-1">
+          {PERIOD_OPTIONS.map(({ label, value }) => {
+            const active = activePeriods.has(value);
+            return (
+              <button
+                key={value}
+                onClick={() => togglePeriod(value)}
+                className={[
+                  'px-2.5 py-1 text-xs font-medium rounded transition-colors',
+                  active
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+                ].join(' ')}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* N-game selector */}
+        <div className="flex items-center gap-1">
+          {N_OPTIONS.map(({ label, value }) => (
+            <button
+              key={value}
+              onClick={() => setNGames(value)}
+              className={[
+                'px-2.5 py-1 text-xs font-medium rounded transition-colors',
+                nGames === value
+                  ? 'bg-gray-600 text-white'
+                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+              ].join(' ')}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading && <div className="text-sm text-gray-500 py-2">Loading stats...</div>}
+      {error   && <div className="text-sm text-red-400 py-2">Error: {error}</div>}
+
+      {!loading && !error && (
+        <div className="flex flex-col gap-6">
+          {awayPlayers.length > 0 && (
+            <TeamStatsTable
+              abbr={awayTeamAbbr}
+              opponentAbbr={homeTeamAbbr}
+              players={awayPlayers}
+              gameId={gameId}
+            />
+          )}
+          {homePlayers.length > 0 && (
+            <TeamStatsTable
+              abbr={homeTeamAbbr}
+              opponentAbbr={awayTeamAbbr}
+              players={homePlayers}
+              gameId={gameId}
+            />
+          )}
+          {otherAbbrs.map((abbr) => (
+            <TeamStatsTable
+              key={abbr}
+              abbr={abbr}
+              opponentAbbr=''
+              players={players.filter((p) => p.teamAbbr === abbr)}
+              gameId={gameId}
+            />
+          ))}
+          {players.length === 0 && (
+            <div className="text-sm text-gray-500">No stats available.</div>
+          )}
+        </div>
       )}
-      {homePlayers.length > 0 && (
-        <TeamStatsTable
-          abbr={homeTeamAbbr}
-          opponentAbbr={awayTeamAbbr}
-          players={homePlayers}
-          gameId={gameId}
-        />
-      )}
-      {otherAbbrs.map((abbr) => (
-        <TeamStatsTable
-          key={abbr}
-          abbr={abbr}
-          opponentAbbr=''
-          players={players.filter((p) => p.teamAbbr === abbr)}
-          gameId={gameId}
-        />
-      ))}
     </div>
   );
 }
