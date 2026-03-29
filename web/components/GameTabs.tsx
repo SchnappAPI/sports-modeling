@@ -64,7 +64,12 @@ export default function GameTabs({ gameId, homeTeamId, awayTeamId, homeTeamAbbr,
           selectedDate={selectedDate}
         />
       )}
-      {activeTab === 'boxscore' && <BoxScoreTable gameId={gameId} />}
+      {activeTab === 'boxscore' && (
+        <BoxScoreTable
+          gameId={gameId}
+          selectedDate={selectedDate}
+        />
+      )}
     </div>
   );
 }
