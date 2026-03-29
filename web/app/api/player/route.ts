@@ -18,22 +18,57 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // Fetch team info alongside game log so the client has teamId for the player switcher.
     const pool = await getPool();
-    const [log, teamResult] = await Promise.all([
+    const [log, playerResult] = await Promise.all([
       getPlayerGames(pid, lastN),
       pool
         .request()
         .input('playerId', mssql.Int, pid)
-        .query(`SELECT player_name AS playerName, team_id AS teamId, team_tricode AS teamAbbr
-                FROM nba.players WHERE player_id = @playerId`),
+        .query(`
+          SELECT
+            p.player_name  AS playerName,
+            p.team_id      AS teamId,
+            p.team_tricode AS teamAbbr,
+            p.position     AS position
+          FROM nba.players p
+          WHERE p.player_id = @playerId
+        `),
     ]);
-    const playerInfo = teamResult.recordset[0] ?? null;
+
+    const playerInfo = playerResult.recordset[0] ?? null;
+
+    // Derive the most recent opponent team ID from the schedule so the matchup
+    // defense section can render even without a gameId in the URL.
+    // Find the most recent non-DNP game in the log and look up the opponent team.
+    let lastOppTeamId: number | null = null;
+    const recentGame = log.find((r) => !r.dnp);
+    if (recentGame && playerInfo?.teamId) {
+      const schedResult = await pool
+        .request()
+        .input('gameId', mssql.VarChar, recentGame.gameId)
+        .input('teamId', mssql.Int, playerInfo.teamId)
+        .query(`
+          SELECT
+            CASE
+              WHEN home_team_id = @teamId THEN away_team_id
+              ELSE home_team_id
+            END AS oppTeamId
+          FROM nba.schedule
+          WHERE game_id = @gameId
+        `);
+      lastOppTeamId = schedResult.recordset[0]?.oppTeamId ?? null;
+    }
+
     return NextResponse.json({
-      playerId: pid, lastN, sport, log,
-      playerName: playerInfo?.playerName ?? null,
-      teamId: playerInfo?.teamId ?? null,
-      teamAbbr: playerInfo?.teamAbbr ?? null,
+      playerId:     pid,
+      lastN,
+      sport,
+      log,
+      playerName:   playerInfo?.playerName   ?? null,
+      teamId:       playerInfo?.teamId        ?? null,
+      teamAbbr:     playerInfo?.teamAbbr      ?? null,
+      position:     playerInfo?.position      ?? null,
+      lastOppTeamId,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
