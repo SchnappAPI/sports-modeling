@@ -1,6 +1,4 @@
-import os
 import time
-import sqlalchemy
 from sqlalchemy import text
 from db import get_engine
 
@@ -12,24 +10,23 @@ IF NOT EXISTS (
 )
 BEGIN
     CREATE TABLE common.teams (
-        participant_id   VARCHAR(36)   NOT NULL,
-        sport_key        VARCHAR(50)   NOT NULL,
-        team_name        NVARCHAR(100) NOT NULL,
         league           VARCHAR(10)   NOT NULL,
-        team_index       INT           NOT NULL,
-        team_key         VARCHAR(10)   NOT NULL,
-        conference       VARCHAR(50)   NULL,
         team_id          BIGINT        NOT NULL,
+        team_name        NVARCHAR(100) NOT NULL,
+        tricode          VARCHAR(10)   NULL,
+        conference       VARCHAR(50)   NULL,
+        team_index       INT           NULL,
+        sport_key        VARCHAR(50)   NULL,
+        participant_id   VARCHAR(36)   NULL,
         created_at       DATETIME2     DEFAULT GETUTCDATE(),
-        CONSTRAINT PK_common_teams PRIMARY KEY (participant_id)
+        CONSTRAINT PK_common_teams PRIMARY KEY (league, team_id)
     );
-    CREATE UNIQUE INDEX UX_common_teams_sport_key_team_key
-        ON common.teams (sport_key, team_key);
-    CREATE INDEX IX_common_teams_league ON common.teams (league);
-    CREATE INDEX IX_common_teams_team_id ON common.teams (team_id);
+    CREATE INDEX IX_common_teams_tricode      ON common.teams (league, tricode);
+    CREATE INDEX IX_common_teams_participant  ON common.teams (participant_id);
 END
 """
 
+# (participant_id, sport_key, team_name, league, team_index, tricode, conference, team_id)
 ROWS = [
     ('par_01hqmkr1xsfxmrj5pdq0f23asx','americanfootball_nfl','Arizona Cardinals','NFL',1,'ARI','NFC West',1),
     ('par_01hqmkr1xtexkbhkq7ct921rne','americanfootball_nfl','Atlanta Falcons','NFL',2,'ATL','NFC South',2),
@@ -125,6 +122,7 @@ ROWS = [
     ('par_01hqmkq6g9f0d9n781t7z01mn2','basketball_nba','Washington Wizards','NBA',92,'WAS','Southeast',1610612764),
 ]
 
+
 def wait_for_db(engine, retries=3, wait=45):
     for attempt in range(1, retries + 1):
         try:
@@ -149,25 +147,28 @@ def run():
 
         merge = text("""
             MERGE common.teams AS target
-            USING (VALUES (:participant_id, :sport_key, :team_name, :league,
-                           :team_index, :team_key, :conference, :team_id))
-                  AS source (participant_id, sport_key, team_name, league,
-                             team_index, team_key, conference, team_id)
-            ON target.participant_id = source.participant_id
+            USING (VALUES (
+                :league, :team_id, :team_name, :tricode,
+                :conference, :team_index, :sport_key, :participant_id
+            )) AS source (
+                league, team_id, team_name, tricode,
+                conference, team_index, sport_key, participant_id
+            )
+            ON target.league = source.league AND target.team_id = source.team_id
             WHEN MATCHED THEN UPDATE SET
-                sport_key    = source.sport_key,
-                team_name    = source.team_name,
-                league       = source.league,
-                team_index   = source.team_index,
-                team_key     = source.team_key,
-                conference   = source.conference,
-                team_id      = source.team_id
-            WHEN NOT MATCHED THEN INSERT
-                (participant_id, sport_key, team_name, league,
-                 team_index, team_key, conference, team_id)
-            VALUES
-                (source.participant_id, source.sport_key, source.team_name, source.league,
-                 source.team_index, source.team_key, source.conference, source.team_id);
+                team_name      = source.team_name,
+                tricode        = source.tricode,
+                conference     = source.conference,
+                team_index     = source.team_index,
+                sport_key      = source.sport_key,
+                participant_id = source.participant_id
+            WHEN NOT MATCHED THEN INSERT (
+                league, team_id, team_name, tricode,
+                conference, team_index, sport_key, participant_id
+            ) VALUES (
+                source.league, source.team_id, source.team_name, source.tricode,
+                source.conference, source.team_index, source.sport_key, source.participant_id
+            );
         """)
 
         for row in ROWS:
@@ -177,7 +178,7 @@ def run():
                 'team_name':      row[2],
                 'league':         row[3],
                 'team_index':     row[4],
-                'team_key':       row[5],
+                'tricode':        row[5],
                 'conference':     row[6],
                 'team_id':        row[7],
             })
