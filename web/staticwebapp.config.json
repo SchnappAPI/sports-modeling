@@ -11,6 +11,10 @@
   },
   "routes": [
     {
+      "route": "/api/ping",
+      "allowedRoles": ["anonymous"]
+    },
+    {
       "route": "/api/*",
       "allowedRoles": ["authenticated"]
     },
