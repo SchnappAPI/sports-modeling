@@ -1,8 +1,9 @@
 name: Odds ETL
 
+# Manual dispatch only -- nightly schedule moved to odds-grading-pipeline.yml.
+# Use this workflow for one-off runs: probe, discover, or targeted backfill.
+
 on:
-  schedule:
-    - cron: '0 10 * * *'   # UTC 10:00 = 4:00 AM CST / 5:00 AM CDT, 30 min before grading
   workflow_dispatch:
     inputs:
       mode:
@@ -16,7 +17,7 @@ on:
       season:
         description: "Season year (NBA/NFL = start year, e.g. 2025 for 2025-26). Leave blank for auto-detect."
         required: false
-        default: "2025"
+        default: ""
       snapshots:
         description: "Discover mode: max calendar dates to walk per run."
         required: false
@@ -68,18 +69,14 @@ jobs:
       - name: Build CLI flags
         id: flags
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            FLAGS="--mode upcoming --sport nba --days-ahead 1"
-          else
-            FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
-            FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'nba' }}"
-            FLAGS="$FLAGS --snapshots ${{ github.event.inputs.snapshots || '50' }}"
-            FLAGS="$FLAGS --games ${{ github.event.inputs.games || '20' }}"
-            FLAGS="$FLAGS --days-ahead ${{ github.event.inputs.days_ahead || '1' }}"
-            FLAGS="$FLAGS --budget ${{ github.event.inputs.budget || '0' }}"
-            SEASON="${{ github.event.inputs.season }}"
-            [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
-          fi
+          FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
+          FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'nba' }}"
+          FLAGS="$FLAGS --snapshots ${{ github.event.inputs.snapshots || '50' }}"
+          FLAGS="$FLAGS --games ${{ github.event.inputs.games || '20' }}"
+          FLAGS="$FLAGS --days-ahead ${{ github.event.inputs.days_ahead || '1' }}"
+          FLAGS="$FLAGS --budget ${{ github.event.inputs.budget || '0' }}"
+          SEASON="${{ github.event.inputs.season }}"
+          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
           echo "flags=$FLAGS" >> $GITHUB_OUTPUT
 
       - name: Run Odds ETL
