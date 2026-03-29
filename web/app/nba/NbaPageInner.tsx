@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import GameStrip, { type Game } from '@/components/GameStrip';
+import GameTabs from '@/components/GameTabs';
 
 export default function NbaPageInner() {
   const router = useRouter();
@@ -33,10 +34,12 @@ export default function NbaPageInner() {
   }, []);
 
   function handleSelectGame(gameId: string) {
-    router.replace(`/nba?gameId=${gameId}`);
+    const params = new URLSearchParams();
+    params.set('gameId', gameId);
+    const currentTab = searchParams.get('tab');
+    if (currentTab) params.set('tab', currentTab);
+    router.replace(`/nba?${params.toString()}`);
   }
-
-  const activeGame = games.find((g) => g.gameId === activeGameId) ?? null;
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -44,12 +47,8 @@ export default function NbaPageInner() {
         <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">NBA</span>
       </div>
 
-      {loading && (
-        <div className="px-4 py-3 text-sm text-gray-500">Loading games...</div>
-      )}
-      {error && (
-        <div className="px-4 py-3 text-sm text-red-400">Error: {error}</div>
-      )}
+      {loading && <div className="px-4 py-3 text-sm text-gray-500">Loading games...</div>}
+      {error && <div className="px-4 py-3 text-sm text-red-400">Error: {error}</div>}
       {!loading && !error && (
         <GameStrip
           games={games}
@@ -58,13 +57,11 @@ export default function NbaPageInner() {
         />
       )}
 
-      <div className="flex-1 px-4 py-6">
-        {activeGame ? (
-          <div className="text-sm text-gray-400">
-            Selected: {activeGame.awayTeamName} @ {activeGame.homeTeamName}
-          </div>
+      <div className="flex-1 px-4">
+        {activeGameId ? (
+          <GameTabs gameId={activeGameId} />
         ) : (
-          !loading && <div className="text-sm text-gray-500">Select a game above.</div>
+          !loading && <div className="py-6 text-sm text-gray-500">Select a game above.</div>
         )}
       </div>
     </div>
