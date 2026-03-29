@@ -153,9 +153,9 @@ export interface PlayerAverageRow {
   avg3pm: number | null;
 }
 
-// daily_lineups has no player_id — join to players on name to get IDs,
-// then use those IDs to look up box score history.
-// Players with no box score history appear with NULL averages and games = 0.
+// player_box_score_stats has no FullGame period — stats are stored per quarter.
+// Rank the last N games per player from the lineup, then sum quarters within
+// each game, then average across games.
 export async function getPlayerAverages(
   gameId: string,
   lastN: number
@@ -174,36 +174,45 @@ export async function getPlayerAverages(
          LEFT JOIN nba.players p ON p.player_name = dl.player_name
          WHERE dl.game_id = @gameId
        ),
-       ranked AS (
+       game_totals AS (
          SELECT
            pbs.player_id,
            pbs.game_id,
-           ROW_NUMBER() OVER (PARTITION BY pbs.player_id ORDER BY g.game_date DESC) AS rn
+           pbs.game_date,
+           SUM(pbs.pts)     AS pts,
+           SUM(pbs.reb)     AS reb,
+           SUM(pbs.ast)     AS ast,
+           SUM(pbs.stl)     AS stl,
+           SUM(pbs.blk)     AS blk,
+           SUM(pbs.tov)     AS tov,
+           SUM(pbs.minutes) AS minutes,
+           SUM(pbs.fg3m)    AS fg3m
          FROM nba.player_box_score_stats pbs
-         JOIN nba.games g ON g.game_id = pbs.game_id
          JOIN lineup l ON l.player_id = pbs.player_id
-         WHERE pbs.period = 'FullGame'
+         GROUP BY pbs.player_id, pbs.game_id, pbs.game_date
+       ),
+       ranked AS (
+         SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_date DESC) AS rn
+         FROM game_totals
        ),
        recent AS (
-         SELECT player_id, game_id FROM ranked WHERE rn <= @lastN
+         SELECT * FROM ranked WHERE rn <= @lastN
        )
        SELECT
          l.player_id                               AS playerId,
          l.player_name                             AS playerName,
-         COUNT(DISTINCT pbs.game_id)               AS games,
-         AVG(CAST(pbs.pts     AS FLOAT))           AS avgPts,
-         AVG(CAST(pbs.reb     AS FLOAT))           AS avgReb,
-         AVG(CAST(pbs.ast     AS FLOAT))           AS avgAst,
-         AVG(CAST(pbs.stl     AS FLOAT))           AS avgStl,
-         AVG(CAST(pbs.blk     AS FLOAT))           AS avgBlk,
-         AVG(CAST(pbs.tov     AS FLOAT))           AS avgTov,
-         AVG(CAST(pbs.minutes AS FLOAT))           AS avgMin,
-         AVG(CAST(pbs.fg3m    AS FLOAT))           AS avg3pm
+         COUNT(r.game_id)                          AS games,
+         AVG(CAST(r.pts     AS FLOAT))             AS avgPts,
+         AVG(CAST(r.reb     AS FLOAT))             AS avgReb,
+         AVG(CAST(r.ast     AS FLOAT))             AS avgAst,
+         AVG(CAST(r.stl     AS FLOAT))             AS avgStl,
+         AVG(CAST(r.blk     AS FLOAT))             AS avgBlk,
+         AVG(CAST(r.tov     AS FLOAT))             AS avgTov,
+         AVG(CAST(r.minutes AS FLOAT))             AS avgMin,
+         AVG(CAST(r.fg3m    AS FLOAT))             AS avg3pm
        FROM lineup l
-       LEFT JOIN nba.player_box_score_stats pbs
-         ON pbs.player_id = l.player_id
-         AND pbs.game_id IN (SELECT game_id FROM recent WHERE player_id = l.player_id)
-         AND pbs.period = 'FullGame'
+       LEFT JOIN recent r ON r.player_id = l.player_id
        GROUP BY l.player_id, l.player_name
        ORDER BY l.player_name`
     );
@@ -287,6 +296,8 @@ export interface PlayerGameRow {
   fta: number | null;
 }
 
+// player_box_score_stats has no FullGame period — sum quarters per game,
+// then take the last N games ordered by date descending.
 export async function getPlayerGames(
   playerId: number,
   lastN: number
@@ -305,24 +316,27 @@ export async function getPlayerGames(
               ELSE ht.team_tricode
          END                                    AS opponentAbbr,
          CASE WHEN g.home_team_id = pbs.team_id THEN 1 ELSE 0 END AS isHome,
-         pbs.pts,
-         pbs.reb,
-         pbs.ast,
-         pbs.stl,
-         pbs.blk,
-         pbs.tov,
-         pbs.minutes AS min,
-         pbs.fg3m,
-         pbs.fgm,
-         pbs.fga,
-         pbs.ftm,
-         pbs.fta
+         SUM(pbs.pts)     AS pts,
+         SUM(pbs.reb)     AS reb,
+         SUM(pbs.ast)     AS ast,
+         SUM(pbs.stl)     AS stl,
+         SUM(pbs.blk)     AS blk,
+         SUM(pbs.tov)     AS tov,
+         SUM(pbs.minutes) AS min,
+         SUM(pbs.fg3m)    AS fg3m,
+         SUM(pbs.fgm)     AS fgm,
+         SUM(pbs.fga)     AS fga,
+         SUM(pbs.ftm)     AS ftm,
+         SUM(pbs.fta)     AS fta
        FROM nba.player_box_score_stats pbs
        JOIN nba.games g  ON g.game_id  = pbs.game_id
        JOIN nba.teams ht ON ht.team_id = g.home_team_id
        JOIN nba.teams at ON at.team_id = g.away_team_id
        WHERE pbs.player_id = @playerId
-         AND pbs.period = 'FullGame'
+       GROUP BY
+         pbs.game_id, pbs.team_id,
+         g.game_date, g.home_team_id,
+         ht.team_tricode, at.team_tricode
        ORDER BY g.game_date DESC`
     );
   return result.recordset;
