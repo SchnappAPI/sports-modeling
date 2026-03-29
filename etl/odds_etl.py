@@ -24,6 +24,8 @@ Modes
 
   upcoming  -- Fetches current pre-game lines for the next --days-ahead game
                days. Truncates and reloads odds.upcoming_* tables each run.
+               Also upserts into odds.event_game_map so the grading engine
+               can resolve event_id -> game_id for today's props.
 
   probe     -- Coverage discovery pass. Writes to odds.market_probe only.
 
@@ -688,24 +690,14 @@ def clean_dataframe(df):
 
 # ---------------------------------------------------------------------------
 # Budget tracking
-#
-# _used_at_start  -- x-requests-used value captured from the first API
-#                    response of this process invocation. None until set.
-# _used_current   -- most recent x-requests-used value seen.
-# _budget         -- maximum credits this invocation is allowed to spend.
-#                    0 = unlimited.
-#
-# Spend = _used_current - _used_at_start.
-# Checked after every successful API response via _check_budget().
 # ---------------------------------------------------------------------------
 
 _used_at_start  = None
 _used_current   = None
-_budget         = 0       # set from --budget arg in main()
+_budget         = 0
 
 
 def _check_budget():
-    """Exit if this invocation has spent more than _budget credits."""
     if _budget <= 0:
         return
     if _used_at_start is None or _used_current is None:
@@ -717,7 +709,6 @@ def _check_budget():
 
 
 def _record_quota_headers(headers):
-    """Update global tracking from API response headers."""
     global _used_at_start, _used_current
     used_str = headers.get("x-requests-used") if headers else None
     if used_str is None:
@@ -895,10 +886,6 @@ def run_discover(sport, api_key, season_year, snapshots_limit, engine):
         ]
 
         if season_events:
-            # Deduplicate by event_id before staging. The API's sliding window
-            # can return the same event_id in multiple responses within a batch.
-            # SQL Server's MERGE requires each source row to match at most one
-            # target row; duplicates in the staging table cause error 8672.
             seen = {}
             for ev in season_events:
                 seen[ev["id"]] = ev
@@ -977,15 +964,6 @@ def _fetch_event(sport_key, event_id, snap_iso, markets, api_key):
 # ---------------------------------------------------------------------------
 
 def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
-    """
-    Parse bookmaker odds from an event object into game_lines and player_props rows.
-
-    Routing logic:
-      - Any market in TEAM_LEVEL_MARKETS always goes to game_lines, even if the
-        odds API populates the outcome description field with a team name.
-      - All other markets: outcomes with a description go to player_props;
-        outcomes without a description go to game_lines.
-    """
     snap_ts = _to_utc_str(snap_ts_raw)
     game_lines, player_props = [], []
     for bk in event_obj.get("bookmakers") or []:
@@ -1014,13 +992,6 @@ def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
 
 
 def _snap_iso(commence_raw):
-    """
-    Return a snapshot ISO string 1 minute before game start.
-
-    The historical odds API returns the snapshot at or before the requested
-    time. Requesting commence_time - 1 minute yields the closest available
-    pre-game line for each event.
-    """
     if not commence_raw:
         return None
     try:
@@ -1048,7 +1019,6 @@ def _cdt(event):
 
 
 def _eastern_date(dt_utc):
-    """Convert a UTC-aware datetime to its Eastern calendar date."""
     if dt_utc is None:
         return None
     return dt_utc.astimezone(EASTERN_TZ).date()
@@ -1625,16 +1595,30 @@ def run_upcoming(sport, api_key, days_ahead, engine):
             time.sleep(1.5)
 
         upsert(engine, clean_dataframe(pd.DataFrame([{
+            "event_id":      eid,
+            "sport_key":     sport_key,
+            "sport_title":   event.get("sport_title"),
+            "commence_time": _to_utc_str(event.get("commence_time")),
+            "home_team":     home_name,
+            "away_team":     away_name,
+            "home_tricode":  home_tc,
+            "away_tricode":  away_tc,
+            "game_id":       game_id,
+        }])), schema="odds", table="upcoming_events", keys=["event_id"])
+
+        # Write to event_game_map so the grading engine can join on event_id.
+        # The grading query requires egm.game_id IS NOT NULL; without this row
+        # the upcoming props are invisible to grading even when they exist in
+        # odds.upcoming_player_props.
+        upsert(engine, clean_dataframe(pd.DataFrame([{
             "event_id":     eid,
             "sport_key":    sport_key,
-            "sport_title":  event.get("sport_title"),
-            "commence_time": _to_utc_str(event.get("commence_time")),
-            "home_team":    home_name,
-            "away_team":    away_name,
+            "game_id":      game_id,
+            "game_date":    str(eastern_date) if eastern_date else None,
             "home_tricode": home_tc,
             "away_tricode": away_tc,
-            "game_id":      game_id,
-        }])), schema="odds", table="upcoming_events", keys=["event_id"])
+            "match_method": "upcoming_schedule" if game_id else "upcoming_unmatched",
+        }])), schema="odds", table="event_game_map", keys=["event_id"])
 
         if gl_all:
             upsert(engine, clean_dataframe(pd.DataFrame(gl_all)),
