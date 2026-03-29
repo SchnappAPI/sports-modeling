@@ -18,6 +18,11 @@ interface GradeRow {
   sampleSize20: number | null;
   weightedHitRate: number | null;
   grade: number | null;
+  compositeGrade: number | null;
+  trendGrade: number | null;
+  momentumGrade: number | null;
+  matchupGrade: number | null;
+  regressionGrade: number | null;
   oppTeamId: number | null;
   position: string | null;
   gameId: string | null;
@@ -153,11 +158,18 @@ function posGroup(position: string | null): string | null {
   return null;
 }
 
-// Odds slider: single minimum-odds filter. Default = -1000 (show everything).
-// Sliding right raises the floor, filtering out heavy favorites.
 const ODDS_MIN = -1000;
 const ODDS_MAX = 200;
 const ODDS_DEFAULT = ODDS_MIN;
+
+// ---------------------------------------------------------------------------
+// Sort
+// ---------------------------------------------------------------------------
+type SortKey = 'playerName' | 'marketKey' | 'lineValue' | 'overPrice' | 'grade' | 'compositeGrade' | 'hitRate20' | 'hitRate60' | 'sampleSize20' | 'sampleSize60' | 'def';
+
+type SortDir = 'asc' | 'desc';
+
+const SORT_NULLS_LAST_DESC: SortKey[] = ['grade', 'compositeGrade', 'hitRate20', 'hitRate60', 'sampleSize20', 'sampleSize60', 'overPrice', 'def'];
 
 type RefreshState = 'idle' | 'dispatching' | 'running' | 'reloading' | 'done' | 'error';
 
@@ -171,6 +183,8 @@ export default function GradesPageInner() {
   const [minOdds, setMinOdds]               = useState<number>(ODDS_DEFAULT);
   const [selectedGameId, setSelectedGameId] = useState<string>('');
   const [defenseCache, setDefenseCache]     = useState<DefenseCache>({});
+  const [sortKey, setSortKey]               = useState<SortKey>('compositeGrade');
+  const [sortDir, setSortDir]               = useState<SortDir>('desc');
 
   const [refreshState, setRefreshState] = useState<RefreshState>('idle');
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -279,9 +293,8 @@ export default function GradesPageInner() {
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
-  // Derive unique games from the grades data for the game filter dropdown.
   const gameOptions = useMemo(() => {
-    const seen = new Map<string, string>(); // gameId -> label
+    const seen = new Map<string, string>();
     for (const row of grades) {
       if (row.gameId && !seen.has(row.gameId)) {
         const label = (row.awayTeamAbbr && row.homeTeamAbbr)
@@ -290,7 +303,7 @@ export default function GradesPageInner() {
         seen.set(row.gameId, label);
       }
     }
-    return Array.from(seen.entries()); // [[gameId, label], ...]
+    return Array.from(seen.entries());
   }, [grades]);
 
   const marketOptions = useMemo(() => {
@@ -304,12 +317,8 @@ export default function GradesPageInner() {
   }, [grades]);
 
   const filtered = useMemo(() => {
-    // Only show rows where FanDuel has actually posted an odds price.
     let rows = grades.filter((r) => r.overPrice != null);
-
-    if (selectedGameId) {
-      rows = rows.filter((r) => r.gameId === selectedGameId);
-    }
+    if (selectedGameId) rows = rows.filter((r) => r.gameId === selectedGameId);
     if (selectedMarket) {
       rows = rows.filter((r) =>
         r.marketKey === selectedMarket || r.marketKey === `${selectedMarket}_alternate`
@@ -324,6 +333,70 @@ export default function GradesPageInner() {
     }
     return rows;
   }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds]);
+
+  // Compute def rank per row for sorting
+  function getDefRank(row: GradeRow): number | null {
+    const pg = posGroup(row.position);
+    if (!row.oppTeamId || !pg) return null;
+    const entry = defenseCache[`${row.oppTeamId}:${pg}`];
+    if (!entry || entry === 'loading' || entry === 'error') return null;
+    const statKey = MARKET_TO_STAT_KEY[row.marketKey];
+    if (!statKey) return null;
+    const rank = (entry as Record<string, number>)[statKey];
+    return rank ?? null;
+  }
+
+  const sorted = useMemo(() => {
+    const rows = [...filtered];
+    const dir = sortDir === 'desc' ? -1 : 1;
+    const nullsLast = SORT_NULLS_LAST_DESC.includes(sortKey);
+
+    rows.sort((a, b) => {
+      let va: number | string | null = null;
+      let vb: number | string | null = null;
+
+      if (sortKey === 'playerName') { va = a.playerName; vb = b.playerName; }
+      else if (sortKey === 'marketKey') { va = marketAbbr(a.marketKey); vb = marketAbbr(b.marketKey); }
+      else if (sortKey === 'lineValue') { va = a.lineValue; vb = b.lineValue; }
+      else if (sortKey === 'overPrice') { va = a.overPrice; vb = b.overPrice; }
+      else if (sortKey === 'grade') { va = a.grade; vb = b.grade; }
+      else if (sortKey === 'compositeGrade') { va = a.compositeGrade; vb = b.compositeGrade; }
+      else if (sortKey === 'hitRate20') { va = a.hitRate20; vb = b.hitRate20; }
+      else if (sortKey === 'hitRate60') { va = a.hitRate60; vb = b.hitRate60; }
+      else if (sortKey === 'sampleSize20') { va = a.sampleSize20; vb = b.sampleSize20; }
+      else if (sortKey === 'sampleSize60') { va = a.sampleSize60; vb = b.sampleSize60; }
+      else if (sortKey === 'def') { va = getDefRank(a); vb = getDefRank(b); }
+
+      // Handle nulls
+      const aN = va == null;
+      const bN = vb == null;
+      if (aN && bN) return 0;
+      if (aN) return nullsLast ? 1 : -1 * dir;
+      if (bN) return nullsLast ? -1 : 1 * dir;
+
+      if (typeof va === 'string' && typeof vb === 'string') {
+        return dir * va.localeCompare(vb);
+      }
+      return dir * ((va as number) - (vb as number));
+    });
+    return rows;
+  }, [filtered, sortKey, sortDir, defenseCache]);
+
+  function handleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => d === 'desc' ? 'asc' : 'desc');
+    } else {
+      setSortKey(key);
+      setSortDir(SORT_NULLS_LAST_DESC.includes(key) ? 'desc' : 'asc');
+    }
+  }
+
+  function sortIndicator(key: SortKey) {
+    if (sortKey !== key) return <span className="text-gray-700 ml-0.5">&#8597;</span>;
+    return sortDir === 'desc'
+      ? <span className="text-blue-400 ml-0.5">&#8595;</span>
+      : <span className="text-blue-400 ml-0.5">&#8593;</span>;
+  }
 
   const oddsFilterActive = minOdds > ODDS_DEFAULT;
 
@@ -344,6 +417,7 @@ export default function GradesPageInner() {
   function playerHref(row: GradeRow): string {
     const params = new URLSearchParams();
     if (row.gameId) params.set('gameId', row.gameId);
+    params.set('date', gradeDate);
     const qs = params.toString();
     return `/nba/player/${row.playerId}${qs ? `?${qs}` : ''}`;
   }
@@ -367,9 +441,21 @@ export default function GradesPageInner() {
     return `${base} border-gray-600 text-gray-400 hover:border-gray-400 hover:text-gray-200`;
   }
 
+  function SortTh({ col, label, title, right }: { col: SortKey; label: string; title?: string; right?: boolean }) {
+    return (
+      <th
+        className={`py-1.5 ${right ? 'px-2 text-right' : 'pr-3 text-left'} font-medium cursor-pointer select-none whitespace-nowrap hover:text-gray-300 transition-colors`}
+        title={title}
+        onClick={() => handleSort(col)}
+      >
+        {label}{sortIndicator(col)}
+      </th>
+    );
+  }
+
   return (
     <div className="flex flex-col min-h-screen">
-      {/* Header row */}
+      {/* Header */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap">
         <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">
           &#8592; Games
@@ -381,7 +467,6 @@ export default function GradesPageInner() {
 
         {!loading && !error && grades.length > 0 && (
           <>
-            {/* Game filter */}
             {gameOptions.length > 1 && (
               <select
                 value={selectedGameId}
@@ -394,8 +479,6 @@ export default function GradesPageInner() {
                 ))}
               </select>
             )}
-
-            {/* Market filter */}
             <select
               value={selectedMarket}
               onChange={(e) => setSelectedMarket(e.target.value)}
@@ -406,8 +489,6 @@ export default function GradesPageInner() {
                 <option key={key} value={key}>{marketDropdownLabel(key)}</option>
               ))}
             </select>
-
-            {/* Player search */}
             <input
               type="text"
               placeholder="Player..."
@@ -433,7 +514,7 @@ export default function GradesPageInner() {
 
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
-            {filtered.length}{filtered.length !== grades.filter(r => r.overPrice != null).length
+            {sorted.length}{sorted.length !== grades.filter(r => r.overPrice != null).length
               ? ` / ${grades.filter(r => r.overPrice != null).length}` : ''} props
           </span>
         )}
@@ -445,7 +526,7 @@ export default function GradesPageInner() {
         </div>
       )}
 
-      {/* Odds floor slider — single handle */}
+      {/* Odds floor slider */}
       {!loading && !error && grades.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
           <span className="text-xs text-gray-600 whitespace-nowrap">Min odds</span>
@@ -485,22 +566,23 @@ export default function GradesPageInner() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-xs text-gray-500 border-b border-gray-800">
-                  <th className="text-left py-1.5 pr-3 font-medium">Player</th>
-                  <th className="text-left py-1.5 pr-1 font-medium">Mkt</th>
-                  <th className="text-center py-1.5 px-1 font-medium" title="Alternate line">Alt</th>
-                  <th className="text-right py-1.5 px-2 font-medium">Line</th>
-                  <th className="text-right py-1.5 px-2 font-medium">Odds</th>
-                  <th className="text-right py-1.5 px-2 font-medium" title="Implied probability from odds (no vig removal)">Imp%</th>
-                  <th className="text-right py-1.5 px-2 font-medium">Grade</th>
-                  <th className="text-right py-1.5 px-2 font-medium">L20%</th>
-                  <th className="text-right py-1.5 px-2 font-medium">L60%</th>
-                  <th className="text-right py-1.5 px-2 font-medium">N20</th>
-                  <th className="text-right py-1.5 px-2 font-medium">N60</th>
-                  <th className="text-right py-1.5 pl-2 font-medium" title="Opponent defense rank for this stat at this position. 1st = most allowed.">Def</th>
+                  <SortTh col="playerName" label="Player" />
+                  <SortTh col="marketKey" label="Mkt" />
+                  <th className="text-center py-1.5 px-1 font-medium text-xs text-gray-500" title="Alternate line">Alt</th>
+                  <SortTh col="lineValue" label="Line" right />
+                  <SortTh col="overPrice" label="Odds" right />
+                  <th className="text-right py-1.5 px-2 font-medium text-gray-500 text-xs" title="Implied probability from odds">Imp%</th>
+                  <SortTh col="compositeGrade" label="Comp" title="Composite grade — equal-weighted average of all signal components" right />
+                  <SortTh col="grade" label="HR%" title="Hit rate grade (weighted 20/60 day)" right />
+                  <SortTh col="hitRate20" label="L20%" right />
+                  <SortTh col="hitRate60" label="L60%" right />
+                  <SortTh col="sampleSize20" label="N20" right />
+                  <SortTh col="sampleSize60" label="N60" right />
+                  <SortTh col="def" label="Def" title="Opponent defense rank for this stat at this position. 1st = most allowed." right />
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((row) => {
+                {sorted.map((row) => {
                   const def = defRankCell(row);
                   const alt = isAlternate(row.marketKey);
                   return (
@@ -526,7 +608,10 @@ export default function GradesPageInner() {
                       <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">
                         {impliedProb(row.overPrice)}
                       </td>
-                      <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.grade)}`}>
+                      <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.compositeGrade)}`}>
+                        {fmt(row.compositeGrade)}
+                      </td>
+                      <td className={`py-1.5 px-2 text-right ${gradeColor(row.grade)}`}>
                         {fmt(row.grade)}
                       </td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>

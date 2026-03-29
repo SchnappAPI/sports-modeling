@@ -37,6 +37,28 @@ interface GradeLine {
   lineValue: number;
 }
 
+interface TodayGradeRow {
+  gradeId: number;
+  gradeDate: string;
+  playerId: number;
+  playerName: string;
+  marketKey: string;
+  lineValue: number;
+  overPrice: number | null;
+  hitRate60: number | null;
+  hitRate20: number | null;
+  sampleSize60: number | null;
+  sampleSize20: number | null;
+  weightedHitRate: number | null;
+  grade: number | null;
+  compositeGrade: number | null;
+  oppTeamId: number | null;
+  position: string | null;
+  gameId: string | null;
+  homeTeamAbbr: string | null;
+  awayTeamAbbr: string | null;
+}
+
 interface GameSummary {
   gameId: string;
   gameDate: string;
@@ -63,6 +85,69 @@ interface PlayerInfo {
   position: string | null;
   playerName: string | null;
   teamId: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Market helpers
+// ---------------------------------------------------------------------------
+
+const MARKET_ABBR: Record<string, string> = {
+  player_points:                           'PTS',
+  player_points_alternate:                 'PTS',
+  player_rebounds:                         'REB',
+  player_rebounds_alternate:               'REB',
+  player_assists:                          'AST',
+  player_assists_alternate:                'AST',
+  player_steals:                           'STL',
+  player_steals_alternate:                 'STL',
+  player_blocks:                           'BLK',
+  player_blocks_alternate:                 'BLK',
+  player_threes:                           '3PM',
+  player_threes_alternate:                 '3PM',
+  player_turnovers:                        'TOV',
+  player_turnovers_alternate:              'TOV',
+  player_points_rebounds_assists:          'PRA',
+  player_points_rebounds_assists_alternate:'PRA',
+  player_points_rebounds:                  'PR',
+  player_points_rebounds_alternate:        'PR',
+  player_points_assists:                   'PA',
+  player_points_assists_alternate:         'PA',
+  player_rebounds_assists:                 'RA',
+  player_rebounds_assists_alternate:       'RA',
+};
+
+function marketLabel(key: string): string {
+  return MARKET_ABBR[key] ?? key.replace('player_', '').replace(/_/g, ' ').toUpperCase();
+}
+
+function baseMarket(key: string): string {
+  return key.replace(/_alternate$/, '');
+}
+
+function isAlternate(key: string): boolean {
+  return key.endsWith('_alternate');
+}
+
+function fmtOdds(price: number | null): string {
+  if (price == null) return '-';
+  return price >= 0 ? `+${price}` : `${price}`;
+}
+
+function fmtPct(val: number | null): string {
+  if (val == null) return '-';
+  return `${(val * 100).toFixed(0)}%`;
+}
+
+function gradeColor(grade: number | null): string {
+  if (grade == null) return 'text-gray-500';
+  if (grade >= 70) return 'text-green-400';
+  if (grade >= 55) return 'text-yellow-400';
+  return 'text-gray-400';
+}
+
+function todayLocal(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +270,119 @@ const MARKET_STAT: Record<string, keyof GameSummary> = {
 };
 
 // ---------------------------------------------------------------------------
+// Prop cards section
+// ---------------------------------------------------------------------------
+
+interface MarketGroup {
+  baseKey: string;
+  label: string;
+  lines: TodayGradeRow[];
+}
+
+function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
+  const order: string[] = [];
+  const map = new Map<string, TodayGradeRow[]>();
+
+  for (const g of grades) {
+    if (g.overPrice == null) continue; // only show priced lines
+    const base = baseMarket(g.marketKey);
+    if (!map.has(base)) { order.push(base); map.set(base, []); }
+    map.get(base)!.push(g);
+  }
+
+  return order.map((base) => ({
+    baseKey: base,
+    label: marketLabel(base),
+    lines: (map.get(base) ?? []).sort((a, b) => a.lineValue - b.lineValue),
+  }));
+}
+
+function PropCard({ row }: { row: TodayGradeRow }) {
+  const alt = isAlternate(row.marketKey);
+  return (
+    <div className={`rounded border px-3 py-2 min-w-[90px] ${
+      alt ? 'border-yellow-900 bg-yellow-950/20' : 'border-gray-700 bg-gray-900'
+    }`}>
+      {/* Line value */}
+      <div className="text-base font-semibold text-gray-100 tabular-nums leading-none">
+        {row.lineValue.toFixed(1)}
+        {alt && <span className="text-yellow-600 text-xs ml-1">alt</span>}
+      </div>
+      {/* Odds */}
+      <div className="text-xs text-gray-400 tabular-nums mt-0.5">
+        {fmtOdds(row.overPrice)}
+      </div>
+      {/* Composite and hit rate */}
+      <div className="flex gap-2 mt-1.5 text-xs">
+        {row.compositeGrade != null && (
+          <span className={`font-medium ${gradeColor(row.compositeGrade)}`}>
+            C:{row.compositeGrade.toFixed(0)}
+          </span>
+        )}
+        {row.grade != null && (
+          <span className={gradeColor(row.grade)}>
+            HR:{row.grade.toFixed(0)}
+          </span>
+        )}
+      </div>
+      {/* L20 / L60 */}
+      <div className="flex gap-2 mt-0.5 text-xs text-gray-600">
+        <span>{fmtPct(row.hitRate20)}</span>
+        <span>{fmtPct(row.hitRate60)}</span>
+      </div>
+    </div>
+  );
+}
+
+function TodayPropsSection({ playerId, gradeDate }: { playerId: string; gradeDate: string }) {
+  const [grades, setGrades] = useState<TodayGradeRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/api/grades?date=${gradeDate}`)
+      .then((r) => r.ok ? r.json() : { grades: [] })
+      .then((data) => {
+        const rows: TodayGradeRow[] = (data.grades ?? []).filter(
+          (g: TodayGradeRow) => String(g.playerId) === String(playerId)
+        );
+        setGrades(rows);
+      })
+      .catch(() => setGrades([]))
+      .finally(() => setLoading(false));
+  }, [playerId, gradeDate]);
+
+  const groups = useMemo(() => buildMarketGroups(grades), [grades]);
+
+  if (loading) return (
+    <div className="px-4 py-3 border-b border-gray-800 text-xs text-gray-600">Loading props...</div>
+  );
+  if (groups.length === 0) return null;
+
+  return (
+    <div className="border-b border-gray-800">
+      <div className="px-4 pt-3 pb-1">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today's Props</span>
+      </div>
+      <div className="px-4 pb-3 flex flex-col gap-3">
+        {groups.map((group) => (
+          <div key={group.baseKey}>
+            {/* Market header */}
+            <div className="text-xs text-gray-500 font-medium mb-1.5">{group.label}</div>
+            {/* Line cards */}
+            <div className="flex flex-wrap gap-2">
+              {group.lines.map((row) => (
+                <PropCard key={row.gradeId} row={row} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -196,6 +394,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const backTab      = searchParams.get('tab') ?? 'boxscore';
   const backDate     = searchParams.get('date');
   const oppParam     = searchParams.get('opp');
+
+  // The date to use for fetching today's grades from the At a Glance page.
+  // If arrived from grades page the date param is set, otherwise use today.
+  const gradeDate = backDate ?? todayLocal();
 
   const backHref = (() => {
     const p = new URLSearchParams();
@@ -241,9 +443,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         };
         setPlayerInfo(info);
 
-        // Fetch team roster for the player switcher dropdown using the player's
-        // own teamId. This runs unconditionally so the dropdown is always present,
-        // regardless of whether the page was opened from a game context.
         if (playerData.teamId) {
           fetch(`/api/team-players?teamId=${playerData.teamId}`)
             .then((r) => r.json())
@@ -251,8 +450,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
             .catch(() => {});
         }
 
-        // If we arrived from a game context, override the opponent with the
-        // game-specific matchup so the defense section reflects today's opponent.
         if (backGameId) {
           fetch(`/api/game-grades?gameId=${backGameId}`)
             .then((r) => r.json())
@@ -275,7 +472,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       .finally(() => setLoading(false));
   }, [playerId]);
 
-  // Grade lookup: gameId -> marketKey -> lineValue
   const gradeMap = useMemo(() => {
     const m = new Map<string, Map<string, number>>();
     for (const g of grades) {
@@ -426,6 +622,9 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           highlightMarket={todayMarket}
         />
       )}
+
+      {/* Today's props — only shown when navigated from a grade date context */}
+      <TodayPropsSection playerId={playerId} gradeDate={gradeDate} />
 
       {/* Period filter */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
