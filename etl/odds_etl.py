@@ -61,6 +61,12 @@ Budget tracking
   computed as (current x-requests-used) - (x-requests-used at first response).
   This is independent of account balance, never needs updating between runs,
   and stops a runaway loop from consuming more than intended.
+
+Discover deduplication
+  The historical events endpoint uses a sliding window. Adjacent snapshot
+  requests can return the same event_id in multiple responses within a single
+  batch. The upsert MERGE requires each source row to match at most one target
+  row, so the rows list is deduplicated by event_id before staging.
 """
 
 import argparse
@@ -889,6 +895,15 @@ def run_discover(sport, api_key, season_year, snapshots_limit, engine):
         ]
 
         if season_events:
+            # Deduplicate by event_id before staging. The API's sliding window
+            # can return the same event_id in multiple responses within a batch.
+            # SQL Server's MERGE requires each source row to match at most one
+            # target row; duplicates in the staging table cause error 8672.
+            seen = {}
+            for ev in season_events:
+                seen[ev["id"]] = ev
+            season_events = list(seen.values())
+
             rows = [{
                 "event_id":      ev["id"],
                 "sport_key":     sport_key,
