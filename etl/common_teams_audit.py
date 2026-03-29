@@ -1,14 +1,21 @@
 """
 common_teams_audit.py
 
-Prints the current contents of common.teams, nba.teams, mlb.teams,
-and the distinct team abbreviations found in nfl.games so we can
-plan the common.teams migration.
+Writes the full contents of common.teams, nba.teams, mlb.teams,
+and distinct NFL team abbreviations from nfl.games to CSV files
+so nothing gets truncated in the Actions log.
+
+Output: audit_output/common_teams_*.csv
 """
 
 import os
+import csv
 import time
+from pathlib import Path
 from sqlalchemy import create_engine, text
+
+OUT = Path("audit_output")
+OUT.mkdir(exist_ok=True)
 
 
 def get_engine():
@@ -33,59 +40,56 @@ def get_engine():
     raise RuntimeError("Could not connect after 3 attempts.")
 
 
-def dump(conn, label, sql):
-    print(f"\n=== {label} ===")
+def dump_csv(conn, filename, sql):
     result = conn.execute(text(sql))
     headers = list(result.keys())
     rows = result.fetchall()
-    print("  " + " | ".join(f"{h:<25}" for h in headers))
-    print("  " + "-" * (28 * len(headers)))
-    for row in rows:
-        print("  " + " | ".join(f"{str(v) if v is not None else 'NULL':<25}" for v in row))
-    print(f"  ({len(rows)} rows)")
+    path = OUT / filename
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(headers)
+        w.writerows(rows)
+    print(f"  {filename}: {len(rows)} rows -> {path}")
+    return rows
 
 
 def main():
     engine = get_engine()
-    print("Connected.")
+    print("Connected.\n")
 
     with engine.connect() as conn:
 
-        # common.teams - full dump
-        dump(conn, "common.teams (all columns, all rows)",
-             "SELECT * FROM common.teams ORDER BY 1")
+        dump_csv(conn, "common_teams.csv",
+                 "SELECT * FROM common.teams ORDER BY league, team_id")
 
-        # nba.teams - full dump
-        dump(conn, "nba.teams (all columns)",
-             "SELECT * FROM nba.teams ORDER BY team_id")
+        dump_csv(conn, "nba_teams.csv",
+                 "SELECT * FROM nba.teams ORDER BY team_id")
 
-        # mlb.teams - full dump
-        dump(conn, "mlb.teams (all columns)",
-             "SELECT * FROM mlb.teams ORDER BY team_id")
+        dump_csv(conn, "mlb_teams.csv",
+                 "SELECT * FROM mlb.teams ORDER BY team_id")
 
-        # NFL team abbreviations from nfl.games
-        dump(conn, "NFL team abbreviations from nfl.games (home_team + away_team)",
-             """
-             SELECT DISTINCT team_abbr
-             FROM (
-                 SELECT home_team AS team_abbr FROM nfl.games
-                 UNION
-                 SELECT away_team AS team_abbr FROM nfl.games
-             ) t
-             WHERE team_abbr IS NOT NULL
-             ORDER BY team_abbr
-             """)
+        dump_csv(conn, "nfl_game_team_abbrs.csv",
+                 """
+                 SELECT DISTINCT team_abbr
+                 FROM (
+                     SELECT home_team AS team_abbr FROM nfl.games
+                     UNION
+                     SELECT away_team AS team_abbr FROM nfl.games
+                 ) t
+                 WHERE team_abbr IS NOT NULL
+                 ORDER BY team_abbr
+                 """)
 
-        # nfl.games column names so we know the exact field names
-        dump(conn, "nfl.games columns",
-             """
-             SELECT column_name, data_type
-             FROM information_schema.columns
-             WHERE table_schema = 'nfl' AND table_name = 'games'
-             ORDER BY ordinal_position
-             """)
+        dump_csv(conn, "nfl_games_columns.csv",
+                 """
+                 SELECT column_name, data_type
+                 FROM information_schema.columns
+                 WHERE table_schema = 'nfl' AND table_name = 'games'
+                 ORDER BY ordinal_position
+                 """)
 
     print("\n=== AUDIT COMPLETE ===")
+    print(f"All files written to: {OUT.resolve()}")
 
 
 if __name__ == "__main__":
