@@ -6,22 +6,18 @@ on:
 jobs:
   migrate:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: etl
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Install ODBC Driver 18
         run: |
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
-          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update -q
           ACCEPT_EULA=Y sudo apt-get install -y msodbcsql18
 
       - name: Install Python deps
-        run: pip install sqlalchemy pyodbc pandas
+        run: pip install sqlalchemy pyodbc
 
       - name: Run migration
         env:
@@ -29,4 +25,4 @@ jobs:
           AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
           AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
           AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
-        run: python migrate_common_teams.py
+        run: python etl/migrate_common_teams.py
