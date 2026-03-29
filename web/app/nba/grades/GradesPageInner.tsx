@@ -151,9 +151,8 @@ function posGroup(position: string | null): string | null {
   return null;
 }
 
-// Widen the odds range to include high-priced alternate lines.
-const ODDS_MIN = -500;
-const ODDS_MAX = 600;
+const ODDS_MIN = -1000;
+const ODDS_MAX = 3000;
 
 // Refresh states
 type RefreshState = 'idle' | 'dispatching' | 'running' | 'reloading' | 'done' | 'error';
@@ -424,7 +423,7 @@ export default function GradesPageInner() {
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
           <span className="text-xs text-gray-600 whitespace-nowrap">Odds</span>
           <div className="flex items-center gap-1 flex-1">
-            <span className={`text-xs tabular-nums w-12 text-right ${
+            <span className={`text-xs tabular-nums w-14 text-right ${
               sliderActive ? 'text-gray-300' : 'text-gray-600'
             }`}>
               {oddsRange[0] >= 0 ? `+${oddsRange[0]}` : `${oddsRange[0]}`}
@@ -448,7 +447,7 @@ export default function GradesPageInner() {
               }}
               className="flex-1 accent-blue-500 h-1"
             />
-            <span className={`text-xs tabular-nums w-12 ${
+            <span className={`text-xs tabular-nums w-14 ${
               sliderActive ? 'text-gray-300' : 'text-gray-600'
             }`}>
               {oddsRange[1] >= 0 ? `+${oddsRange[1]}` : `${oddsRange[1]}`}
