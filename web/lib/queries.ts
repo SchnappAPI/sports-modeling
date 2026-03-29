@@ -104,16 +104,17 @@ export async function getGames(sport: string, date: string): Promise<GameRow[]> 
 // ---------------------------------------------------------------------------
 
 export interface RosterRow {
-  playerId: number;
+  playerId: number | null;
   playerName: string;
-  teamId: number;
   teamAbbr: string;
   position: string | null;
   isStarter: boolean;
 }
 
-// nba.players has no position column — returning NULL until that changes.
-// nba.teams uses team_tricode not abbreviation.
+// nba.daily_lineups has no player_id or team_id — identified by player_name and
+// team_tricode. Join to nba.players on name to get player_id; LEFT JOIN because
+// a player may exist in lineups before the players table is updated.
+// starter_status values: 'Starter' | 'Bench'
 export async function getRoster(gameId: string): Promise<RosterRow[]> {
   const pool = await getPool();
   const result = await pool
@@ -121,17 +122,15 @@ export async function getRoster(gameId: string): Promise<RosterRow[]> {
     .input('gameId', mssql.VarChar, gameId)
     .query<RosterRow>(
       `SELECT
-         dl.player_id      AS playerId,
-         p.player_name     AS playerName,
-         dl.team_id        AS teamId,
-         t.team_tricode    AS teamAbbr,
-         NULL              AS position,
-         dl.is_starter     AS isStarter
+         p.player_id                                    AS playerId,
+         dl.player_name                                 AS playerName,
+         dl.team_tricode                                AS teamAbbr,
+         dl.position                                    AS position,
+         CASE WHEN dl.starter_status = 'Starter' THEN 1 ELSE 0 END AS isStarter
        FROM nba.daily_lineups dl
-       JOIN nba.players p ON p.player_id = dl.player_id
-       JOIN nba.teams   t ON t.team_id   = dl.team_id
+       LEFT JOIN nba.players p ON p.player_name = dl.player_name
        WHERE dl.game_id = @gameId
-       ORDER BY dl.team_id, dl.is_starter DESC, p.player_name`
+       ORDER BY dl.team_tricode, dl.starter_status, dl.player_name`
     );
   return result.recordset;
 }
@@ -141,7 +140,7 @@ export async function getRoster(gameId: string): Promise<RosterRow[]> {
 // ---------------------------------------------------------------------------
 
 export interface PlayerAverageRow {
-  playerId: number;
+  playerId: number | null;
   playerName: string;
   games: number;
   avgPts: number | null;
@@ -154,8 +153,9 @@ export interface PlayerAverageRow {
   avg3pm: number | null;
 }
 
-// Joins nba.games (completed games only) intentionally — box scores only exist
-// for finished games, so averaging against nba.schedule would not add anything.
+// daily_lineups has no player_id — join to players on name to get IDs,
+// then use those IDs to look up box score history.
+// Players with no box score history appear with NULL averages and games = 0.
 export async function getPlayerAverages(
   gameId: string,
   lastN: number
@@ -167,7 +167,12 @@ export async function getPlayerAverages(
     .input('lastN', mssql.Int, lastN)
     .query<PlayerAverageRow>(
       `WITH lineup AS (
-         SELECT player_id FROM nba.daily_lineups WHERE game_id = @gameId
+         SELECT
+           dl.player_name,
+           p.player_id
+         FROM nba.daily_lineups dl
+         LEFT JOIN nba.players p ON p.player_name = dl.player_name
+         WHERE dl.game_id = @gameId
        ),
        ranked AS (
          SELECT
@@ -176,31 +181,31 @@ export async function getPlayerAverages(
            ROW_NUMBER() OVER (PARTITION BY pbs.player_id ORDER BY g.game_date DESC) AS rn
          FROM nba.player_box_score_stats pbs
          JOIN nba.games g ON g.game_id = pbs.game_id
-         WHERE pbs.player_id IN (SELECT player_id FROM lineup)
-           AND pbs.period = 'FullGame'
+         JOIN lineup l ON l.player_id = pbs.player_id
+         WHERE pbs.period = 'FullGame'
        ),
        recent AS (
          SELECT player_id, game_id FROM ranked WHERE rn <= @lastN
        )
        SELECT
-         pbs.player_id        AS playerId,
-         p.player_name        AS playerName,
-         COUNT(DISTINCT pbs.game_id) AS games,
-         AVG(CAST(pbs.pts  AS FLOAT)) AS avgPts,
-         AVG(CAST(pbs.reb  AS FLOAT)) AS avgReb,
-         AVG(CAST(pbs.ast  AS FLOAT)) AS avgAst,
-         AVG(CAST(pbs.stl  AS FLOAT)) AS avgStl,
-         AVG(CAST(pbs.blk  AS FLOAT)) AS avgBlk,
-         AVG(CAST(pbs.tov  AS FLOAT)) AS avgTov,
-         AVG(CAST(pbs.min  AS FLOAT)) AS avgMin,
-         AVG(CAST(pbs.fg3m AS FLOAT)) AS avg3pm
-       FROM nba.player_box_score_stats pbs
-       JOIN nba.players p ON p.player_id = pbs.player_id
-       WHERE pbs.player_id IN (SELECT player_id FROM recent)
-         AND pbs.game_id    IN (SELECT game_id  FROM recent WHERE player_id = pbs.player_id)
+         l.player_id                          AS playerId,
+         l.player_name                        AS playerName,
+         COUNT(DISTINCT pbs.game_id)          AS games,
+         AVG(CAST(pbs.pts  AS FLOAT))         AS avgPts,
+         AVG(CAST(pbs.reb  AS FLOAT))         AS avgReb,
+         AVG(CAST(pbs.ast  AS FLOAT))         AS avgAst,
+         AVG(CAST(pbs.stl  AS FLOAT))         AS avgStl,
+         AVG(CAST(pbs.blk  AS FLOAT))         AS avgBlk,
+         AVG(CAST(pbs.tov  AS FLOAT))         AS avgTov,
+         AVG(CAST(pbs.min  AS FLOAT))         AS avgMin,
+         AVG(CAST(pbs.fg3m AS FLOAT))         AS avg3pm
+       FROM lineup l
+       LEFT JOIN nba.player_box_score_stats pbs
+         ON pbs.player_id = l.player_id
+         AND pbs.game_id IN (SELECT game_id FROM recent WHERE player_id = l.player_id)
          AND pbs.period = 'FullGame'
-       GROUP BY pbs.player_id, p.player_name
-       ORDER BY p.player_name`
+       GROUP BY l.player_id, l.player_name
+       ORDER BY l.player_name`
     );
   return result.recordset;
 }
