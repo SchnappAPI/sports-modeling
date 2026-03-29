@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 
@@ -30,6 +31,11 @@ interface PropLine {
   gameId: string;
   marketKey: string;
   lineValue: number;
+}
+
+interface TeamPlayer {
+  playerId: number;
+  playerName: string;
 }
 
 interface GameSummary {
@@ -65,16 +71,15 @@ interface SplitStats {
   fg3m: number;
 }
 
-// Map Odds API market keys to the stat column they correspond to.
+// Odds API market key -> stat column on GameSummary
 const MARKET_TO_STAT: Record<string, keyof GameSummary> = {
-  player_points:            'pts',
-  player_rebounds:          'reb',
-  player_assists:           'ast',
-  player_steals:            'stl',
-  player_blocks:            'blk',
-  player_turnovers:         'tov',
-  player_threes:            'fg3m',
-  player_points_rebounds_assists: 'pts', // composite — skip coloring for now
+  player_points:    'pts',
+  player_rebounds:  'reb',
+  player_assists:   'ast',
+  player_steals:    'stl',
+  player_blocks:    'blk',
+  player_turnovers: 'tov',
+  player_threes:    'fg3m',
 };
 
 const PERIOD_OPTIONS = [
@@ -88,9 +93,8 @@ const PERIOD_OPTIONS = [
 
 const QUARTER_KEYS = ['1Q', '2Q', '3Q', '4Q', 'OT'];
 
-function sumQuarters(rows: GameLogRow[]): Omit<GameSummary, 'gameId' | 'gameDate' | 'opponentAbbr' | 'isHome' | 'dnp' | 'started'> {
-  const n = (key: keyof GameLogRow) =>
-    rows.reduce((s, r) => s + ((r[key] as number) ?? 0), 0);
+function sumQuarters(rows: GameLogRow[]) {
+  const n = (k: keyof GameLogRow) => rows.reduce((s, r) => s + ((r[k] as number) ?? 0), 0);
   return {
     pts: n('pts'), reb: n('reb'), ast: n('ast'), stl: n('stl'),
     blk: n('blk'), tov: n('tov'), min: n('min'), fg3m: n('fg3m'),
@@ -98,48 +102,43 @@ function sumQuarters(rows: GameLogRow[]): Omit<GameSummary, 'gameId' | 'gameDate
   };
 }
 
-// Collapse per-quarter rows into per-game summaries, applying the active period filter.
 function buildGameSummaries(rows: GameLogRow[], activePeriods: Set<string>): GameSummary[] {
   const byGame = new Map<string, GameLogRow[]>();
   for (const r of rows) {
     if (!byGame.has(r.gameId)) byGame.set(r.gameId, []);
     byGame.get(r.gameId)!.push(r);
   }
-
   const results: GameSummary[] = [];
   for (const [gameId, gameRows] of byGame) {
     const meta = gameRows[0];
     if (meta.dnp) {
       results.push({
         gameId, gameDate: meta.gameDate, opponentAbbr: meta.opponentAbbr,
-        isHome: meta.isHome, dnp: true, started: meta.started,
+        isHome: meta.isHome, dnp: true, started: null,
         pts: null, reb: null, ast: null, stl: null, blk: null, tov: null,
         min: null, fg3m: null, fgm: null, fga: null, ftm: null, fta: null,
       });
       continue;
     }
-
     const isFull = activePeriods.has('full') || activePeriods.size === 0;
     const filtered = isFull
       ? gameRows.filter((r) => QUARTER_KEYS.includes(r.period))
       : gameRows.filter((r) => activePeriods.has(r.period));
-
-    const totals = sumQuarters(filtered);
+    // started comes from any played row (same value across periods for one game)
+    const started = gameRows.find((r) => !r.dnp)?.started ?? null;
     results.push({
       gameId, gameDate: meta.gameDate, opponentAbbr: meta.opponentAbbr,
-      isHome: meta.isHome, dnp: false, started: meta.started,
-      ...totals,
+      isHome: meta.isHome, dnp: false, started,
+      ...sumQuarters(filtered),
     });
   }
-
-  // Sort most recent first.
   results.sort((a, b) => b.gameDate.localeCompare(a.gameDate));
   return results;
 }
 
 function computeSplit(games: GameSummary[]): SplitStats | null {
   const played = games.filter((g) => !g.dnp);
-  if (played.length === 0) return null;
+  if (!played.length) return null;
   const n = played.length;
   return {
     games: n,
@@ -154,36 +153,33 @@ function computeSplit(games: GameSummary[]): SplitStats | null {
   };
 }
 
-function fmt1(val: number): string { return val.toFixed(1); }
-function fmt(val: number | null | undefined, decimals = 0): string {
-  if (val == null) return '-';
-  return val.toFixed(decimals);
-}
-function fmtMin(val: number | null): string {
-  if (val == null) return '-';
-  const m = Math.floor(val);
-  const s = Math.round((val - m) * 60);
+function fmt1(v: number) { return v.toFixed(1); }
+function fmt(v: number | null | undefined, d = 0) { return v == null ? '-' : v.toFixed(d); }
+function fmtMin(v: number | null) {
+  if (v == null) return '-';
+  const m = Math.floor(v), s = Math.round((v - m) * 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
-function fmtShooting(made: number | null, att: number | null): string {
+function fmtShoot(made: number | null, att: number | null) {
   if (made == null || att == null || att === 0) return '-';
   return `${made}/${att}`;
 }
+function statColor(value: number | null, line: number | null | undefined) {
+  if (value == null || line == null) return 'text-gray-300';
+  return value > line ? 'text-green-400 font-medium' : 'text-red-400';
+}
 
 function SplitRow({ label, split }: { label: string; split: SplitStats | null }) {
-  if (!split) {
-    return (
-      <tr className="border-b border-gray-800">
-        <td className="py-1.5 pr-3 text-xs text-gray-400 font-medium">{label}</td>
-        <td colSpan={8} className="py-1.5 text-xs text-gray-600">No games</td>
-      </tr>
-    );
-  }
+  if (!split) return (
+    <tr className="border-b border-gray-800">
+      <td className="py-1.5 pr-3 text-xs text-gray-400 font-medium">{label}</td>
+      <td colSpan={8} className="py-1.5 text-xs text-gray-600">No games</td>
+    </tr>
+  );
   return (
     <tr className="border-b border-gray-800">
       <td className="py-1.5 pr-3 text-xs text-gray-400 font-medium whitespace-nowrap">
-        {label}
-        <span className="ml-1 text-gray-600">({split.games}G)</span>
+        {label}<span className="ml-1 text-gray-600">({split.games}G)</span>
       </td>
       <td className="py-1.5 px-2 text-right text-xs text-gray-300">{fmt1(split.min)}</td>
       <td className="py-1.5 px-2 text-right text-xs text-gray-100 font-medium">{fmt1(split.pts)}</td>
@@ -197,37 +193,58 @@ function SplitRow({ label, split }: { label: string; split: SplitStats | null })
   );
 }
 
-// Colour a stat cell based on whether it beat or missed a prop line.
-function statColor(value: number | null, line: number | null | undefined): string {
-  if (value == null || line == null) return 'text-gray-300';
-  return value > line ? 'text-green-400 font-medium' : 'text-red-400';
-}
-
 export default function PlayerPageInner({ playerId }: { playerId: string }) {
+  const router = useRouter();
   const searchParams = useSearchParams();
-  const [rawLog, setRawLog] = useState<GameLogRow[]>([]);
-  const [propLines, setPropLines] = useState<PropLine[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  // Period filter. 'full' = sum all quarters.
+  const [rawLog, setRawLog]         = useState<GameLogRow[]>([]);
+  const [propLines, setPropLines]   = useState<PropLine[]>([]);
+  const [teamPlayers, setTeamPlayers] = useState<TeamPlayer[]>([]);
+  const [playerName, setPlayerName] = useState<string>('');
+  const [loading, setLoading]       = useState(true);
+  const [error, setError]           = useState<string | null>(null);
   const [activePeriods, setActivePeriods] = useState<Set<string>>(new Set(['full']));
 
   const backGameId = searchParams.get('gameId');
   const backTab    = searchParams.get('tab') ?? 'stats';
   const opp        = searchParams.get('opp') ?? '';
-  const backHref   = backGameId ? `/nba?gameId=${backGameId}&tab=${backTab}` : '/nba';
+  const backDate   = searchParams.get('date') ?? '';
+
+  // Reconstruct back href preserving date and game.
+  const backHref = backGameId
+    ? `/nba?gameId=${backGameId}&tab=${backTab}${backDate ? `&date=${backDate}` : ''}`
+    : `/nba${backDate ? `?date=${backDate}` : ''}`;
 
   useEffect(() => {
+    setLoading(true);
+    setError(null);
+    setRawLog([]);
+    setPropLines([]);
+    setTeamPlayers([]);
+    setPlayerName('');
+    setActivePeriods(new Set(['full']));
+
     Promise.all([
-      fetch(`/api/player?playerId=${playerId}&games=100&sport=nba`)
-        .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-      fetch(`/api/player-grades?playerId=${playerId}`)
-        .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      fetch(`/api/player?playerId=${playerId}&games=100&sport=nba`).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+      fetch(`/api/player-grades?playerId=${playerId}`).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
     ])
       .then(([logData, gradesData]) => {
         setRawLog(logData.log ?? []);
         setPropLines(gradesData.grades ?? []);
+        setPlayerName(logData.playerName ?? '');
+        // Fetch team roster once we know the teamId.
+        if (logData.teamId) {
+          fetch(`/api/team-players?teamId=${logData.teamId}`)
+            .then((r) => r.json())
+            .then((d) => setTeamPlayers(d.players ?? []))
+            .catch(() => {});
+        }
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -248,7 +265,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     });
   }
 
-  // Build a lookup: gameId -> marketKey -> lineValue
+  function navigateToPlayer(pid: string) {
+    // Preserve all existing search params (gameId, tab, opp, date) when switching players.
+    const params = new URLSearchParams(searchParams.toString());
+    router.push(`/nba/player/${pid}?${params.toString()}`);
+  }
+
   const propMap = useMemo(() => {
     const map = new Map<string, Map<string, number>>();
     for (const p of propLines) {
@@ -258,11 +280,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     return map;
   }, [propLines]);
 
-  const games = useMemo(
-    () => buildGameSummaries(rawLog, activePeriods),
-    [rawLog, activePeriods]
-  );
-
+  const games  = useMemo(() => buildGameSummaries(rawLog, activePeriods), [rawLog, activePeriods]);
   const played = useMemo(() => games.filter((g) => !g.dnp), [games]);
 
   const seasonSplit = useMemo(() => computeSplit(played), [played]);
@@ -272,7 +290,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     [played, opp]
   );
 
-  // Prop coloring is only meaningful for full-game stats since lines are for full games.
   const showPropColors = activePeriods.has('full') || activePeriods.size === 0;
 
   function propLine(gameId: string, market: keyof typeof MARKET_TO_STAT): number | null {
@@ -282,13 +299,28 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
   return (
     <div className="flex flex-col min-h-screen">
+      {/* Header */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3">
-        <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">
-          &#8592; Back
-        </Link>
-        <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
-          Player Game Log
-        </span>
+        <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">&#8592; Back</Link>
+
+        {/* Player switcher */}
+        {teamPlayers.length > 0 ? (
+          <select
+            value={playerId}
+            onChange={(e) => navigateToPlayer(e.target.value)}
+            className="text-sm bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200
+                       focus:outline-none focus:border-gray-500 cursor-pointer"
+          >
+            {teamPlayers.map((p) => (
+              <option key={p.playerId} value={String(p.playerId)}>{p.playerName}</option>
+            ))}
+          </select>
+        ) : (
+          <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+            {playerName || 'Player Game Log'}
+          </span>
+        )}
+
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
             {played.length} GP / {games.length} team games
@@ -304,23 +336,23 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           <>
             {/* Period filter */}
             <div className="flex items-center gap-1 mb-5">
-              {PERIOD_OPTIONS.map(({ label, value }) => {
-                const active = activePeriods.has(value);
-                return (
-                  <button
-                    key={value}
-                    onClick={() => togglePeriod(value)}
-                    className={[
-                      'px-2.5 py-1 text-xs font-medium rounded transition-colors',
-                      active
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
-                    ].join(' ')}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
+              {PERIOD_OPTIONS.map(({ label, value }) => (
+                <button
+                  key={value}
+                  onClick={() => togglePeriod(value)}
+                  className={[
+                    'px-2.5 py-1 text-xs font-medium rounded transition-colors',
+                    activePeriods.has(value)
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+                  ].join(' ')}
+                >
+                  {label}
+                </button>
+              ))}
+              {!showPropColors && (
+                <span className="text-xs text-gray-600 ml-2">Prop coloring off (full game only)</span>
+              )}
             </div>
 
             {/* Splits strip */}
@@ -354,7 +386,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   <tr className="text-xs text-gray-500 border-b border-gray-800">
                     <th className="text-left py-1.5 pr-1 font-medium">Date</th>
                     <th className="text-left py-1.5 pr-3 font-medium">Opp</th>
-                    <th className="text-left py-1.5 pr-3 font-medium">Str</th>
+                    <th className="text-left py-1.5 pr-2 font-medium">Str</th>
                     <th className="text-right py-1.5 px-2 font-medium">MIN</th>
                     <th className="text-right py-1.5 px-2 font-medium">PTS</th>
                     <th className="text-right py-1.5 px-2 font-medium">REB</th>
@@ -376,26 +408,18 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                     const blkLine  = propLine(g.gameId, 'player_blocks');
                     const tovLine  = propLine(g.gameId, 'player_turnovers');
                     const fg3mLine = propLine(g.gameId, 'player_threes');
-
-                    const starterLabel = g.started === true ? 'S' : g.started === false ? 'B' : '';
+                    const sl = g.started;
 
                     return (
-                      <tr
-                        key={g.gameId}
-                        className={['border-b border-gray-800', g.dnp ? 'opacity-40' : ''].join(' ')}
-                      >
+                      <tr key={g.gameId} className={['border-b border-gray-800', g.dnp ? 'opacity-40' : ''].join(' ')}>
                         <td className="py-1.5 pr-1 text-gray-300">{g.gameDate}</td>
-                        <td className="py-1.5 pr-3 text-gray-400">
-                          {g.isHome ? '' : '@'}{g.opponentAbbr}
-                        </td>
-                        <td className="py-1.5 pr-3">
-                          {starterLabel && (
-                            <span className={[
-                              'text-xs px-1 rounded',
-                              g.started ? 'bg-blue-900 text-blue-300' : 'text-gray-600'
-                            ].join(' ')}>
-                              {starterLabel}
-                            </span>
+                        <td className="py-1.5 pr-3 text-gray-400">{g.isHome ? '' : '@'}{g.opponentAbbr}</td>
+                        <td className="py-1.5 pr-2">
+                          {sl === true && (
+                            <span className="text-xs px-1 rounded bg-blue-900 text-blue-300">S</span>
+                          )}
+                          {sl === false && (
+                            <span className="text-xs text-gray-600">B</span>
                           )}
                         </td>
                         {g.dnp ? (
@@ -403,15 +427,15 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                         ) : (
                           <>
                             <td className="py-1.5 px-2 text-right text-gray-300">{fmtMin(g.min)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.pts, ptsLine)}`}>{fmt(g.pts)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.reb, rebLine)}`}>{fmt(g.reb)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.ast, astLine)}`}>{fmt(g.ast)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.stl, stlLine)}`}>{fmt(g.stl)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.blk, blkLine)}`}>{fmt(g.blk)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.tov, tovLine)}`}>{fmt(g.tov)}</td>
-                            <td className="py-1.5 px-2 text-right text-gray-300">{fmtShooting(g.fgm, g.fga)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.fg3m, fg3mLine)}`}>{fmtShooting(g.fg3m, g.fga)}</td>
-                            <td className="py-1.5 pl-2 text-right text-gray-300">{fmtShooting(g.ftm, g.fta)}</td>
+                            <td className={`py-1.5 px-2 text-right ${statColor(g.pts,  ptsLine)}`}>{fmt(g.pts)}</td>
+                            <td className={`py-1.5 px-2 text-right ${statColor(g.reb,  rebLine)}`}>{fmt(g.reb)}</td>
+                            <td className={`py-1.5 px-2 text-right ${statColor(g.ast,  astLine)}`}>{fmt(g.ast)}</td>
+                            <td className={`py-1.5 px-2 text-right ${statColor(g.stl,  stlLine)}`}>{fmt(g.stl)}</td>
+                            <td className={`py-1.5 px-2 text-right ${statColor(g.blk,  blkLine)}`}>{fmt(g.blk)}</td>
+                            <td className={`py-1.5 px-2 text-right ${statColor(g.tov,  tovLine)}`}>{fmt(g.tov)}</td>
+                            <td className="py-1.5 px-2 text-right text-gray-300">{fmtShoot(g.fgm, g.fga)}</td>
+                            <td className={`py-1.5 px-2 text-right ${statColor(g.fg3m, fg3mLine)}`}>{fmtShoot(g.fg3m, g.fga)}</td>
+                            <td className="py-1.5 pl-2 text-right text-gray-300">{fmtShoot(g.ftm, g.fta)}</td>
                           </>
                         )}
                       </tr>

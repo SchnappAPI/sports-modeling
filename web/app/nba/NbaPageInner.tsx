@@ -6,18 +6,6 @@ import Link from 'next/link';
 import GameStrip, { type Game } from '@/components/GameStrip';
 import GameTabs from '@/components/GameTabs';
 
-// ---------------------------------------------------------------------------
-// Sort games within a day by start time.
-//
-// game_status_text is "7:30 pm ET" for upcoming games, "Final" for completed,
-// and a clock string like "Q3 4:22" for live. Sort order:
-//   1. Upcoming games, ascending by parsed start time (earliest left)
-//   2. Live games
-//   3. Final games
-//
-// If the time cannot be parsed the game sorts after other upcoming games
-// but before live/final.
-// ---------------------------------------------------------------------------
 function parseStartMinutes(text: string | null): number | null {
   if (!text) return null;
   const m = text.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
@@ -32,13 +20,8 @@ function parseStartMinutes(text: string | null): number | null {
 
 function sortGames(games: Game[]): Game[] {
   return [...games].sort((a, b) => {
-    const statusA = a.gameStatus ?? 1;
-    const statusB = b.gameStatus ?? 1;
-
-    // Both upcoming (status 1 or null)
-    const aUpcoming = statusA === 1 || a.gameStatus == null;
-    const bUpcoming = statusB === 1 || b.gameStatus == null;
-
+    const aUpcoming = a.gameStatus == null || a.gameStatus === 1;
+    const bUpcoming = b.gameStatus == null || b.gameStatus === 1;
     if (aUpcoming && bUpcoming) {
       const tA = parseStartMinutes(a.gameStatusText);
       const tB = parseStartMinutes(b.gameStatusText);
@@ -47,8 +30,6 @@ function sortGames(games: Game[]): Game[] {
       if (tB != null) return 1;
       return 0;
     }
-
-    // Upcoming before live before final
     const bucket = (s: number | null) => (s == null || s === 1 ? 0 : s === 2 ? 1 : 2);
     return bucket(a.gameStatus) - bucket(b.gameStatus);
   });
@@ -59,11 +40,21 @@ function todayLocal(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Add or subtract days from a YYYY-MM-DD string without timezone issues.
+function shiftDate(dateStr: string, days: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + days);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
 export default function NbaPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const [selectedDate, setSelectedDate] = useState<string>(todayLocal);
+  // Initialise date from URL param so navigating back from a player page
+  // restores the same date.
+  const urlDate = searchParams.get('date');
+  const [selectedDate, setSelectedDate] = useState<string>(urlDate ?? todayLocal());
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +62,6 @@ export default function NbaPageInner() {
   const activeGameId = searchParams.get('gameId');
   const activeGame = games.find((g) => g.gameId === activeGameId) ?? null;
 
-  // Fetch games whenever the selected date changes.
   useEffect(() => {
     setLoading(true);
     setError(null);
@@ -85,13 +75,10 @@ export default function NbaPageInner() {
       .then((data: { games: Game[] }) => {
         const sorted = sortGames(data.games ?? []);
         setGames(sorted);
-        // Auto-select first game only when no gameId is in the URL or
-        // when navigating to a new date (the current gameId won't exist
-        // in the new date's game list).
         const currentGameId = searchParams.get('gameId');
         const stillValid = sorted.some((g) => g.gameId === currentGameId);
         if (sorted.length > 0 && !stillValid) {
-          router.replace(`/nba?gameId=${sorted[0].gameId}`);
+          router.replace(`/nba?gameId=${sorted[0].gameId}&date=${selectedDate}`);
         }
       })
       .catch((err) => setError(err.message))
@@ -101,16 +88,19 @@ export default function NbaPageInner() {
   function handleSelectGame(gameId: string) {
     const params = new URLSearchParams();
     params.set('gameId', gameId);
+    params.set('date', selectedDate);
     const currentTab = searchParams.get('tab');
     if (currentTab) params.set('tab', currentTab);
     router.replace(`/nba?${params.toString()}`);
   }
 
+  function applyDate(newDate: string) {
+    setSelectedDate(newDate);
+    router.replace(`/nba?date=${newDate}`);
+  }
+
   function handleDateChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setSelectedDate(e.target.value);
-    // Clear the active game so the tab area doesn't show stale data
-    // while the new date loads.
-    router.replace('/nba');
+    applyDate(e.target.value);
   }
 
   const gradesHref = activeGameId
@@ -122,13 +112,30 @@ export default function NbaPageInner() {
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between gap-3">
         <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">NBA</span>
 
-        <input
-          type="date"
-          value={selectedDate}
-          onChange={handleDateChange}
-          className="text-sm bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300
-                     focus:outline-none focus:border-gray-500 cursor-pointer"
-        />
+        {/* Date picker with prev/next arrows */}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => applyDate(shiftDate(selectedDate, -1))}
+            className="px-2 py-1 text-gray-400 hover:text-gray-200 text-base leading-none"
+            aria-label="Previous day"
+          >
+            &#8249;
+          </button>
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={handleDateChange}
+            className="text-sm bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300
+                       focus:outline-none focus:border-gray-500 cursor-pointer"
+          />
+          <button
+            onClick={() => applyDate(shiftDate(selectedDate, 1))}
+            className="px-2 py-1 text-gray-400 hover:text-gray-200 text-base leading-none"
+            aria-label="Next day"
+          >
+            &#8250;
+          </button>
+        </div>
 
         <Link
           href={gradesHref}
@@ -156,6 +163,7 @@ export default function NbaPageInner() {
             awayTeamId={activeGame.awayTeamId}
             homeTeamAbbr={activeGame.homeTeamAbbr}
             awayTeamAbbr={activeGame.awayTeamAbbr}
+            selectedDate={selectedDate}
           />
         ) : (
           !loading && <div className="py-6 text-sm text-gray-500">Select a game above.</div>

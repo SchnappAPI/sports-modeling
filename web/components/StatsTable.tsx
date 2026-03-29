@@ -26,6 +26,7 @@ interface Props {
   awayTeamId: number;
   homeTeamAbbr: string;
   awayTeamAbbr: string;
+  selectedDate: string;
 }
 
 function fmt(val: number | null | undefined, decimals = 1): string {
@@ -54,11 +55,13 @@ function TeamStatsTable({
   opponentAbbr,
   players,
   gameId,
+  selectedDate,
 }: {
   abbr: string;
   opponentAbbr: string;
   players: PlayerAvg[];
   gameId: string;
+  selectedDate: string;
 }) {
   const searchParams = useSearchParams();
   const tab = searchParams.get('tab') ?? 'stats';
@@ -86,7 +89,7 @@ function TeamStatsTable({
             <tr key={p.playerId} className="border-b border-gray-800">
               <td className="py-1.5 pr-3">
                 <Link
-                  href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}`}
+                  href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}&date=${selectedDate}`}
                   className="text-gray-100 hover:text-blue-400 transition-colors"
                 >
                   {p.playerName}
@@ -109,11 +112,9 @@ function TeamStatsTable({
   );
 }
 
-export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr }: Props) {
-  // Period checkboxes. 'full' means no period filter (sum all quarters).
+export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr, selectedDate }: Props) {
   const [activePeriods, setActivePeriods] = useState<Set<string>>(new Set(['full']));
   const [nGames, setNGames] = useState('20');
-
   const [players, setPlayers] = useState<PlayerAvg[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -121,15 +122,10 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
   function togglePeriod(value: string) {
     setActivePeriods((prev) => {
       const next = new Set(prev);
-      if (value === 'full') {
-        // Selecting Full clears all quarter selections.
-        return new Set(['full']);
-      }
-      // Toggling a quarter clears Full.
+      if (value === 'full') return new Set(['full']);
       next.delete('full');
       if (next.has(value)) {
         next.delete(value);
-        // If nothing left, fall back to Full.
         if (next.size === 0) return new Set(['full']);
       } else {
         next.add(value);
@@ -141,65 +137,44 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
   const fetchStats = useCallback(() => {
     setLoading(true);
     setError(null);
-
-    const periodsParam = activePeriods.has('full')
-      ? ''
-      : Array.from(activePeriods).join(',');
-
+    const periodsParam = activePeriods.has('full') ? '' : Array.from(activePeriods).join(',');
     const url = new URL('/api/team-averages', window.location.origin);
     url.searchParams.set('homeTeamId', String(homeTeamId));
     url.searchParams.set('awayTeamId', String(awayTeamId));
     url.searchParams.set('context', nGames);
     if (periodsParam) url.searchParams.set('periods', periodsParam);
-
     fetch(url.toString())
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((data) => setPlayers(data.players ?? []))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [homeTeamId, awayTeamId, nGames, activePeriods]);
 
-  useEffect(() => {
-    fetchStats();
-  }, [fetchStats]);
+  useEffect(() => { fetchStats(); }, [fetchStats]);
 
-  const homePlayers  = players.filter((p) => p.teamAbbr === homeTeamAbbr);
-  const awayPlayers  = players.filter((p) => p.teamAbbr === awayTeamAbbr);
-  const otherAbbrs   = Array.from(new Set(
-    players
-      .filter((p) => p.teamAbbr !== homeTeamAbbr && p.teamAbbr !== awayTeamAbbr)
-      .map((p) => p.teamAbbr)
+  const homePlayers = players.filter((p) => p.teamAbbr === homeTeamAbbr);
+  const awayPlayers = players.filter((p) => p.teamAbbr === awayTeamAbbr);
+  const otherAbbrs  = Array.from(new Set(
+    players.filter((p) => p.teamAbbr !== homeTeamAbbr && p.teamAbbr !== awayTeamAbbr).map((p) => p.teamAbbr)
   ));
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Controls */}
       <div className="flex flex-wrap items-center gap-4">
-        {/* Period toggles */}
         <div className="flex items-center gap-1">
-          {PERIOD_OPTIONS.map(({ label, value }) => {
-            const active = activePeriods.has(value);
-            return (
-              <button
-                key={value}
-                onClick={() => togglePeriod(value)}
-                className={[
-                  'px-2.5 py-1 text-xs font-medium rounded transition-colors',
-                  active
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
-                ].join(' ')}
-              >
-                {label}
-              </button>
-            );
-          })}
+          {PERIOD_OPTIONS.map(({ label, value }) => (
+            <button
+              key={value}
+              onClick={() => togglePeriod(value)}
+              className={[
+                'px-2.5 py-1 text-xs font-medium rounded transition-colors',
+                activePeriods.has(value) ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+              ].join(' ')}
+            >
+              {label}
+            </button>
+          ))}
         </div>
-
-        {/* N-game selector */}
         <div className="flex items-center gap-1">
           {N_OPTIONS.map(({ label, value }) => (
             <button
@@ -207,9 +182,7 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
               onClick={() => setNGames(value)}
               className={[
                 'px-2.5 py-1 text-xs font-medium rounded transition-colors',
-                nGames === value
-                  ? 'bg-gray-600 text-white'
-                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+                nGames === value ? 'bg-gray-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
               ].join(' ')}
             >
               {label}
@@ -224,33 +197,19 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
       {!loading && !error && (
         <div className="flex flex-col gap-6">
           {awayPlayers.length > 0 && (
-            <TeamStatsTable
-              abbr={awayTeamAbbr}
-              opponentAbbr={homeTeamAbbr}
-              players={awayPlayers}
-              gameId={gameId}
-            />
+            <TeamStatsTable abbr={awayTeamAbbr} opponentAbbr={homeTeamAbbr} players={awayPlayers} gameId={gameId} selectedDate={selectedDate} />
           )}
           {homePlayers.length > 0 && (
-            <TeamStatsTable
-              abbr={homeTeamAbbr}
-              opponentAbbr={awayTeamAbbr}
-              players={homePlayers}
-              gameId={gameId}
-            />
+            <TeamStatsTable abbr={homeTeamAbbr} opponentAbbr={awayTeamAbbr} players={homePlayers} gameId={gameId} selectedDate={selectedDate} />
           )}
           {otherAbbrs.map((abbr) => (
             <TeamStatsTable
-              key={abbr}
-              abbr={abbr}
-              opponentAbbr=''
+              key={abbr} abbr={abbr} opponentAbbr=''
               players={players.filter((p) => p.teamAbbr === abbr)}
-              gameId={gameId}
+              gameId={gameId} selectedDate={selectedDate}
             />
           ))}
-          {players.length === 0 && (
-            <div className="text-sm text-gray-500">No stats available.</div>
-          )}
+          {players.length === 0 && <div className="text-sm text-gray-500">No stats available.</div>}
         </div>
       )}
     </div>

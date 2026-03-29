@@ -11,6 +11,7 @@ interface Props {
   awayTeamId: number;
   homeTeamAbbr: string;
   awayTeamAbbr: string;
+  selectedDate: string;
 }
 
 const TABS = ['roster', 'stats', 'boxscore'] as const;
@@ -22,7 +23,7 @@ const TAB_LABELS: Record<Tab, string> = {
   boxscore: 'Box Score',
 };
 
-export default function GameTabs({ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr }: Props) {
+export default function GameTabs({ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr, selectedDate }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const activeTab = (searchParams.get('tab') as Tab) ?? 'roster';
@@ -60,6 +61,7 @@ export default function GameTabs({ gameId, homeTeamId, awayTeamId, homeTeamAbbr,
           awayTeamId={awayTeamId}
           homeTeamAbbr={homeTeamAbbr}
           awayTeamAbbr={awayTeamAbbr}
+          selectedDate={selectedDate}
         />
       )}
       {activeTab === 'boxscore' && <BoxScoreTable gameId={gameId} />}
