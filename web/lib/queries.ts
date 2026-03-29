@@ -363,8 +363,7 @@ export async function getPlayerGames(
 }
 
 // ---------------------------------------------------------------------------
-// Grades (At a Glance) — with opponent team ID and player position for
-// contextual defense ranks
+// Grades (At a Glance)
 // ---------------------------------------------------------------------------
 
 export interface GradeRow {
@@ -381,9 +380,11 @@ export interface GradeRow {
   sampleSize20: number | null;
   weightedHitRate: number | null;
   grade: number | null;
-  // contextual fields — populated for today's grades when schedule data available
   oppTeamId: number | null;
   position: string | null;
+  gameId: string | null;
+  homeTeamAbbr: string | null;
+  awayTeamAbbr: string | null;
 }
 
 export async function getGrades(
@@ -434,13 +435,18 @@ export async function getGrades(
          WHEN p.team_id = s.home_team_id THEN s.away_team_id
          ELSE s.home_team_id
        END                  AS oppTeamId,
-       p.position           AS position
+       p.position           AS position,
+       egm.game_id          AS gameId,
+       ht.team_tricode      AS homeTeamAbbr,
+       at.team_tricode      AS awayTeamAbbr
      FROM common.daily_grades dg
      LEFT JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
      LEFT JOIN best_price bp
        ON bp.event_id = dg.event_id AND bp.market_key = dg.market_key AND bp.player_id = dg.player_id
      LEFT JOIN nba.players p ON p.player_id = dg.player_id
      LEFT JOIN nba.schedule s ON s.game_id = egm.game_id
+     LEFT JOIN nba.teams ht ON ht.team_id = s.home_team_id
+     LEFT JOIN nba.teams at ON at.team_id = s.away_team_id
      WHERE CONVERT(VARCHAR(10), dg.grade_date, 120) = @gradeDate
      ${gameFilter}
      ORDER BY dg.grade DESC`
@@ -515,16 +521,12 @@ export async function getPlayerProps(playerId: number): Promise<PlayerPropRow[]>
 }
 
 // ---------------------------------------------------------------------------
-// Matchup defense — how a team defends each stat category at a given position
-//
-// Returns per-stat averages allowed and ranks across all 30 teams.
-// Rank 1 = most allowed (best matchup for overs). Rank 30 = fewest allowed.
-// Position matching is loose: G covers PG/SG/G, F covers SF/PF/F, C is exact.
+// Matchup defense
 // ---------------------------------------------------------------------------
 
 export interface MatchupStatLine {
   avg: number;
-  rank: number;   // 1 = most allowed
+  rank: number;
   gamesDefended: number;
 }
 
@@ -547,9 +549,6 @@ export async function getMatchupDefense(
 ): Promise<MatchupDefenseRow | null> {
   const pool = await getPool();
 
-  // Normalize position to broad group for matching.
-  // NBA positions in nba.players are typically: G, F, C, G-F, F-G, F-C, C-F.
-  // We match on the primary position character.
   const posGroup =
     position.startsWith('G') ? 'G' :
     position.startsWith('F') ? 'F' :
@@ -562,9 +561,7 @@ export async function getMatchupDefense(
     .input('oppTeamId', mssql.Int, oppTeamId)
     .input('posGroup', mssql.VarChar, posGroup)
     .query(
-      `-- Season start: October 1 of the current NBA season year.
-       -- If today is before October, the season started in the prior calendar year.
-       WITH season_start AS (
+      `WITH season_start AS (
          SELECT CAST(
            CAST(
              CASE WHEN MONTH(GETUTCDATE()) < 10
