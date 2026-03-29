@@ -405,7 +405,10 @@ export interface GradeRow {
   momentumGrade: number | null;
   matchupGrade: number | null;
   regressionGrade: number | null;
+  hitRateOpp: number | null;
+  sampleSizeOpp: number | null;
   oppTeamId: number | null;
+  oppTeamAbbr: string | null;  // opponent tricode for display
   position: string | null;
   gameId: string | null;
   homeTeamAbbr: string | null;
@@ -461,10 +464,17 @@ export async function getGrades(
        dg.momentum_grade    AS momentumGrade,
        dg.matchup_grade     AS matchupGrade,
        dg.regression_grade  AS regressionGrade,
+       dg.hit_rate_opp      AS hitRateOpp,
+       dg.sample_size_opp   AS sampleSizeOpp,
        CASE
          WHEN p.team_id = s.home_team_id THEN s.away_team_id
          ELSE s.home_team_id
        END                  AS oppTeamId,
+       -- Opponent tricode: the team the player is NOT on
+       CASE
+         WHEN p.team_id = s.home_team_id THEN at.team_tricode
+         ELSE ht.team_tricode
+       END                  AS oppTeamAbbr,
        p.position           AS position,
        egm.game_id          AS gameId,
        ht.team_tricode      AS homeTeamAbbr,

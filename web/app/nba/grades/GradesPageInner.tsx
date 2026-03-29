@@ -23,6 +23,9 @@ interface GradeRow {
   momentumGrade: number | null;
   matchupGrade: number | null;
   regressionGrade: number | null;
+  hitRateOpp: number | null;
+  sampleSizeOpp: number | null;
+  oppTeamAbbr: string | null;
   oppTeamId: number | null;
   position: string | null;
   gameId: string | null;
@@ -165,11 +168,17 @@ const ODDS_DEFAULT = ODDS_MIN;
 // ---------------------------------------------------------------------------
 // Sort
 // ---------------------------------------------------------------------------
-type SortKey = 'playerName' | 'marketKey' | 'lineValue' | 'overPrice' | 'grade' | 'compositeGrade' | 'hitRate20' | 'hitRate60' | 'sampleSize20' | 'sampleSize60' | 'def';
+type SortKey =
+  | 'playerName' | 'marketKey' | 'lineValue' | 'overPrice'
+  | 'grade' | 'compositeGrade' | 'hitRate20' | 'hitRate60'
+  | 'hitRateOpp' | 'sampleSize20' | 'sampleSize60' | 'def';
 
 type SortDir = 'asc' | 'desc';
 
-const SORT_NULLS_LAST_DESC: SortKey[] = ['grade', 'compositeGrade', 'hitRate20', 'hitRate60', 'sampleSize20', 'sampleSize60', 'overPrice', 'def'];
+const SORT_NULLS_LAST_DESC: SortKey[] = [
+  'grade', 'compositeGrade', 'hitRate20', 'hitRate60',
+  'hitRateOpp', 'sampleSize20', 'sampleSize60', 'overPrice', 'def',
+];
 
 type RefreshState = 'idle' | 'dispatching' | 'running' | 'reloading' | 'done' | 'error';
 
@@ -334,7 +343,6 @@ export default function GradesPageInner() {
     return rows;
   }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds]);
 
-  // Compute def rank per row for sorting
   function getDefRank(row: GradeRow): number | null {
     const pg = posGroup(row.position);
     if (!row.oppTeamId || !pg) return null;
@@ -355,28 +363,26 @@ export default function GradesPageInner() {
       let va: number | string | null = null;
       let vb: number | string | null = null;
 
-      if (sortKey === 'playerName') { va = a.playerName; vb = b.playerName; }
-      else if (sortKey === 'marketKey') { va = marketAbbr(a.marketKey); vb = marketAbbr(b.marketKey); }
-      else if (sortKey === 'lineValue') { va = a.lineValue; vb = b.lineValue; }
-      else if (sortKey === 'overPrice') { va = a.overPrice; vb = b.overPrice; }
-      else if (sortKey === 'grade') { va = a.grade; vb = b.grade; }
+      if (sortKey === 'playerName')     { va = a.playerName; vb = b.playerName; }
+      else if (sortKey === 'marketKey')      { va = marketAbbr(a.marketKey); vb = marketAbbr(b.marketKey); }
+      else if (sortKey === 'lineValue')      { va = a.lineValue; vb = b.lineValue; }
+      else if (sortKey === 'overPrice')      { va = a.overPrice; vb = b.overPrice; }
+      else if (sortKey === 'grade')          { va = a.grade; vb = b.grade; }
       else if (sortKey === 'compositeGrade') { va = a.compositeGrade; vb = b.compositeGrade; }
-      else if (sortKey === 'hitRate20') { va = a.hitRate20; vb = b.hitRate20; }
-      else if (sortKey === 'hitRate60') { va = a.hitRate60; vb = b.hitRate60; }
-      else if (sortKey === 'sampleSize20') { va = a.sampleSize20; vb = b.sampleSize20; }
-      else if (sortKey === 'sampleSize60') { va = a.sampleSize60; vb = b.sampleSize60; }
-      else if (sortKey === 'def') { va = getDefRank(a); vb = getDefRank(b); }
+      else if (sortKey === 'hitRate20')      { va = a.hitRate20; vb = b.hitRate20; }
+      else if (sortKey === 'hitRate60')      { va = a.hitRate60; vb = b.hitRate60; }
+      else if (sortKey === 'hitRateOpp')     { va = a.hitRateOpp; vb = b.hitRateOpp; }
+      else if (sortKey === 'sampleSize20')   { va = a.sampleSize20; vb = b.sampleSize20; }
+      else if (sortKey === 'sampleSize60')   { va = a.sampleSize60; vb = b.sampleSize60; }
+      else if (sortKey === 'def')            { va = getDefRank(a); vb = getDefRank(b); }
 
-      // Handle nulls
       const aN = va == null;
       const bN = vb == null;
       if (aN && bN) return 0;
       if (aN) return nullsLast ? 1 : -1 * dir;
       if (bN) return nullsLast ? -1 : 1 * dir;
 
-      if (typeof va === 'string' && typeof vb === 'string') {
-        return dir * va.localeCompare(vb);
-      }
+      if (typeof va === 'string' && typeof vb === 'string') return dir * va.localeCompare(vb);
       return dir * ((va as number) - (vb as number));
     });
     return rows;
@@ -452,6 +458,15 @@ export default function GradesPageInner() {
       </th>
     );
   }
+
+  // Derive a label for the vs-opp column header from the grades data.
+  // Most rows on a given date will share a small set of opponents; show the
+  // first one encountered or fall back to a generic label.
+  const oppLabel = useMemo(() => {
+    const abbrs = new Set(sorted.map((r) => r.oppTeamAbbr).filter(Boolean));
+    if (abbrs.size === 1) return `vs ${Array.from(abbrs)[0]}`;
+    return 'vs Opp';
+  }, [sorted]);
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -576,6 +591,7 @@ export default function GradesPageInner() {
                   <SortTh col="grade" label="HR%" title="Hit rate grade (weighted 20/60 day)" right />
                   <SortTh col="hitRate20" label="L20%" right />
                   <SortTh col="hitRate60" label="L60%" right />
+                  <SortTh col="hitRateOpp" label={oppLabel} title="Hit rate vs today's opponent (60-day window)" right />
                   <SortTh col="sampleSize20" label="N20" right />
                   <SortTh col="sampleSize60" label="N60" right />
                   <SortTh col="def" label="Def" title="Opponent defense rank for this stat at this position. 1st = most allowed." right />
@@ -585,6 +601,11 @@ export default function GradesPageInner() {
                 {sorted.map((row) => {
                   const def = defRankCell(row);
                   const alt = isAlternate(row.marketKey);
+                  // vs-opp cell: show % with sample count in tooltip
+                  const oppPct = fmtPct(row.hitRateOpp);
+                  const oppTitle = row.sampleSizeOpp
+                    ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'}`
+                    : undefined;
                   return (
                     <tr key={row.gradeId} className="border-b border-gray-800">
                       <td className="py-1.5 pr-3">
@@ -616,6 +637,17 @@ export default function GradesPageInner() {
                       </td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate60)}</td>
+                      <td
+                        className={`py-1.5 px-2 text-right tabular-nums ${
+                          row.hitRateOpp != null ? gradeColor(row.hitRateOpp * 100) : 'text-gray-600'
+                        }`}
+                        title={oppTitle}
+                      >
+                        {oppPct}
+                        {row.sampleSizeOpp != null && (
+                          <span className="text-gray-600 text-xs ml-0.5">({row.sampleSizeOpp})</span>
+                        )}
+                      </td>
                       <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize20 ?? '-'}</td>
                       <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize60 ?? '-'}</td>
                       <td className={`py-1.5 pl-2 text-right tabular-nums text-xs ${
