@@ -57,7 +57,7 @@ export default function NbaPageInner() {
   const [error, setError] = useState<string | null>(null);
 
   const activeGameId = searchParams.get('gameId');
-  const activeGame = games.find((g) => g.gameId === activeGameId) ?? null;
+  const activeGame   = games.find((g) => g.gameId === activeGameId) ?? null;
 
   useEffect(() => {
     setLoading(true);
@@ -100,9 +100,6 @@ export default function NbaPageInner() {
     applyDate(e.target.value);
   }
 
-  // Always link to the full-day grades view so the user sees all games.
-  // A gameId scoped link is available from within the grades page itself
-  // if they navigate there from a specific game context.
   const gradesHref = `/nba/grades?date=${selectedDate}`;
 
   return (
@@ -161,6 +158,7 @@ export default function NbaPageInner() {
             homeTeamAbbr={activeGame.homeTeamAbbr}
             awayTeamAbbr={activeGame.awayTeamAbbr}
             selectedDate={selectedDate}
+            gameStatus={activeGame.gameStatus}
           />
         ) : (
           !loading && <div className="py-6 text-sm text-gray-500">Select a game above.</div>

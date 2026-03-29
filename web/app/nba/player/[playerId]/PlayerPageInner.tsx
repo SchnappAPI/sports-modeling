@@ -1,9 +1,12 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface GameLogRow {
   gameId: string;
@@ -27,15 +30,10 @@ interface GameLogRow {
   fta: number | null;
 }
 
-interface PropLine {
+interface GradeLine {
   gameId: string;
   marketKey: string;
   lineValue: number;
-}
-
-interface TeamPlayer {
-  playerId: number;
-  playerName: string;
 }
 
 interface GameSummary {
@@ -45,22 +43,6 @@ interface GameSummary {
   isHome: boolean;
   dnp: boolean;
   started: boolean | null;
-  pts: number | null;
-  reb: number | null;
-  ast: number | null;
-  stl: number | null;
-  blk: number | null;
-  tov: number | null;
-  min: number | null;
-  fg3m: number | null;
-  fgm: number | null;
-  fga: number | null;
-  ftm: number | null;
-  fta: number | null;
-}
-
-interface SplitStats {
-  games: number;
   pts: number;
   reb: number;
   ast: number;
@@ -69,178 +51,185 @@ interface SplitStats {
   tov: number;
   min: number;
   fg3m: number;
+  fgm: number;
+  fga: number;
+  ftm: number;
+  fta: number;
 }
 
-// Odds API market key -> stat column on GameSummary
-const MARKET_TO_STAT: Record<string, keyof GameSummary> = {
-  player_points:    'pts',
-  player_rebounds:  'reb',
-  player_assists:   'ast',
-  player_steals:    'stl',
-  player_blocks:    'blk',
-  player_turnovers: 'tov',
-  player_threes:    'fg3m',
-};
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-const PERIOD_OPTIONS = [
-  { label: 'Full', value: 'full' },
-  { label: '1Q',   value: '1Q' },
-  { label: '2Q',   value: '2Q' },
-  { label: '3Q',   value: '3Q' },
-  { label: '4Q',   value: '4Q' },
-  { label: 'OT',   value: 'OT' },
-] as const;
+const ALL_PERIODS = ['1Q', '2Q', '3Q', '4Q', 'OT'] as const;
+type QuarterKey = typeof ALL_PERIODS[number];
 
-const QUARTER_KEYS = ['1Q', '2Q', '3Q', '4Q', 'OT'];
-
-function sumQuarters(rows: GameLogRow[]) {
-  const n = (k: keyof GameLogRow) => rows.reduce((s, r) => s + ((r[k] as number) ?? 0), 0);
-  return {
-    pts: n('pts'), reb: n('reb'), ast: n('ast'), stl: n('stl'),
-    blk: n('blk'), tov: n('tov'), min: n('min'), fg3m: n('fg3m'),
-    fgm: n('fgm'), fga: n('fga'), ftm: n('ftm'), fta: n('fta'),
-  };
-}
-
-function buildGameSummaries(rows: GameLogRow[], activePeriods: Set<string>): GameSummary[] {
-  const byGame = new Map<string, GameLogRow[]>();
+function buildGameSummaries(
+  rows: GameLogRow[],
+  selectedPeriods: Set<QuarterKey>,
+): GameSummary[] {
+  // Collect all unique game identities from the full (unfiltered) row set.
+  const gameOrder: string[] = [];
+  const gameMeta = new Map<string, Pick<GameSummary, 'gameDate' | 'opponentAbbr' | 'isHome' | 'dnp' | 'started'>>();
   for (const r of rows) {
-    if (!byGame.has(r.gameId)) byGame.set(r.gameId, []);
-    byGame.get(r.gameId)!.push(r);
-  }
-  const results: GameSummary[] = [];
-  for (const [gameId, gameRows] of byGame) {
-    const meta = gameRows[0];
-    if (meta.dnp) {
-      results.push({
-        gameId, gameDate: meta.gameDate, opponentAbbr: meta.opponentAbbr,
-        isHome: meta.isHome, dnp: true, started: null,
-        pts: null, reb: null, ast: null, stl: null, blk: null, tov: null,
-        min: null, fg3m: null, fgm: null, fga: null, ftm: null, fta: null,
+    if (!gameMeta.has(r.gameId)) {
+      gameOrder.push(r.gameId);
+      gameMeta.set(r.gameId, {
+        gameDate:     r.gameDate,
+        opponentAbbr: r.opponentAbbr,
+        isHome:       r.isHome,
+        dnp:          r.dnp,
+        started:      r.started,
       });
-      continue;
     }
-    const isFull = activePeriods.has('full') || activePeriods.size === 0;
-    const filtered = isFull
-      ? gameRows.filter((r) => QUARTER_KEYS.includes(r.period))
-      : gameRows.filter((r) => activePeriods.has(r.period));
-    // started comes from any played row (same value across periods for one game)
-    const started = gameRows.find((r) => !r.dnp)?.started ?? null;
-    results.push({
-      gameId, gameDate: meta.gameDate, opponentAbbr: meta.opponentAbbr,
-      isHome: meta.isHome, dnp: false, started,
-      ...sumQuarters(filtered),
-    });
   }
-  results.sort((a, b) => b.gameDate.localeCompare(a.gameDate));
-  return results;
+
+  // Sum stats only for rows that pass the period filter.
+  const filtered = selectedPeriods.size === 0
+    ? rows
+    : rows.filter((r) => selectedPeriods.has(r.period as QuarterKey));
+
+  const totals = new Map<string, Omit<GameSummary, 'gameId' | 'gameDate' | 'opponentAbbr' | 'isHome' | 'dnp' | 'started'>>();
+  for (const r of filtered) {
+    if (r.dnp) continue;
+    const t = totals.get(r.gameId) ?? { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 };
+    t.pts  += r.pts  ?? 0;
+    t.reb  += r.reb  ?? 0;
+    t.ast  += r.ast  ?? 0;
+    t.stl  += r.stl  ?? 0;
+    t.blk  += r.blk  ?? 0;
+    t.tov  += r.tov  ?? 0;
+    t.min  += r.min  ?? 0;
+    t.fg3m += r.fg3m ?? 0;
+    t.fgm  += r.fgm  ?? 0;
+    t.fga  += r.fga  ?? 0;
+    t.ftm  += r.ftm  ?? 0;
+    t.fta  += r.fta  ?? 0;
+    totals.set(r.gameId, t);
+  }
+
+  const ZERO = { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 };
+  return gameOrder.map((gid) => ({
+    gameId: gid,
+    ...gameMeta.get(gid)!,
+    ...(totals.get(gid) ?? ZERO),
+  }));
 }
 
-function computeSplit(games: GameSummary[]): SplitStats | null {
-  const played = games.filter((g) => !g.dnp);
-  if (!played.length) return null;
-  const n = played.length;
-  return {
-    games: n,
-    pts:  played.reduce((s, g) => s + (g.pts  ?? 0), 0) / n,
-    reb:  played.reduce((s, g) => s + (g.reb  ?? 0), 0) / n,
-    ast:  played.reduce((s, g) => s + (g.ast  ?? 0), 0) / n,
-    stl:  played.reduce((s, g) => s + (g.stl  ?? 0), 0) / n,
-    blk:  played.reduce((s, g) => s + (g.blk  ?? 0), 0) / n,
-    tov:  played.reduce((s, g) => s + (g.tov  ?? 0), 0) / n,
-    min:  played.reduce((s, g) => s + (g.min  ?? 0), 0) / n,
-    fg3m: played.reduce((s, g) => s + (g.fg3m ?? 0), 0) / n,
-  };
+type SplitKey = 'season' | 'l10' | 'opp';
+
+interface SplitStats {
+  gp: number;
+  pts: number; reb: number; ast: number; stl: number; blk: number; tov: number;
+  min: number; fg3m: number; fgm: number; fga: number; ftm: number; fta: number;
 }
 
-function fmt1(v: number) { return v.toFixed(1); }
-function fmt(v: number | null | undefined, d = 0) { return v == null ? '-' : v.toFixed(d); }
-function fmtMin(v: number | null) {
-  if (v == null) return '-';
-  const m = Math.floor(v), s = Math.round((v - m) * 60);
+function computeSplit(summaries: GameSummary[], opp: string | null): Record<SplitKey, SplitStats> {
+  const zero = (): SplitStats => ({ gp:0, pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 });
+  const acc  = { season: zero(), l10: zero(), opp: zero() };
+
+  const played = summaries.filter((g) => !g.dnp);
+  const l10    = played.slice(0, 10);
+  const vs     = opp ? played.filter((g) => g.opponentAbbr === opp) : [];
+
+  function add(target: SplitStats, g: GameSummary) {
+    target.gp++;  target.pts += g.pts; target.reb += g.reb; target.ast += g.ast;
+    target.stl += g.stl; target.blk += g.blk; target.tov += g.tov; target.min += g.min;
+    target.fg3m += g.fg3m; target.fgm += g.fgm; target.fga += g.fga;
+    target.ftm += g.ftm;  target.fta += g.fta;
+  }
+  played.forEach((g) => add(acc.season, g));
+  l10.forEach((g)    => add(acc.l10, g));
+  vs.forEach((g)     => add(acc.opp, g));
+  return acc;
+}
+
+function avg(total: number, gp: number): string {
+  if (gp === 0) return '-';
+  return (total / gp).toFixed(1);
+}
+
+function fmtMin(min: number, gp: number): string {
+  if (gp === 0) return '-';
+  const m = Math.floor(min / gp);
+  const s = Math.round(((min / gp) - m) * 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
-function fmtShoot(made: number | null, att: number | null) {
-  if (made == null || att == null || att === 0) return '-';
-  return `${made}/${att}`;
-}
-function statColor(value: number | null, line: number | null | undefined) {
-  if (value == null || line == null) return 'text-gray-300';
-  return value > line ? 'text-green-400 font-medium' : 'text-red-400';
+
+function fmtShoot(made: number, att: number, gp: number): string {
+  if (gp === 0 || att === 0) return '-';
+  const pct = ((made / att) * 100).toFixed(0);
+  return `${pct}%`;
 }
 
-function SplitRow({ label, split }: { label: string; split: SplitStats | null }) {
-  if (!split) return (
-    <tr className="border-b border-gray-800">
-      <td className="py-1.5 pr-3 text-xs text-gray-400 font-medium">{label}</td>
-      <td colSpan={8} className="py-1.5 text-xs text-gray-600">No games</td>
-    </tr>
-  );
-  return (
-    <tr className="border-b border-gray-800">
-      <td className="py-1.5 pr-3 text-xs text-gray-400 font-medium whitespace-nowrap">
-        {label}<span className="ml-1 text-gray-600">({split.games}G)</span>
-      </td>
-      <td className="py-1.5 px-2 text-right text-xs text-gray-300">{fmt1(split.min)}</td>
-      <td className="py-1.5 px-2 text-right text-xs text-gray-100 font-medium">{fmt1(split.pts)}</td>
-      <td className="py-1.5 px-2 text-right text-xs text-gray-300">{fmt1(split.reb)}</td>
-      <td className="py-1.5 px-2 text-right text-xs text-gray-300">{fmt1(split.ast)}</td>
-      <td className="py-1.5 px-2 text-right text-xs text-gray-300">{fmt1(split.stl)}</td>
-      <td className="py-1.5 px-2 text-right text-xs text-gray-300">{fmt1(split.blk)}</td>
-      <td className="py-1.5 px-2 text-right text-xs text-gray-300">{fmt1(split.tov)}</td>
-      <td className="py-1.5 pl-2 text-right text-xs text-gray-300">{fmt1(split.fg3m)}</td>
-    </tr>
-  );
-}
+const MARKET_STAT: Record<string, keyof GameSummary> = {
+  player_points:            'pts',
+  player_points_alternate:  'pts',
+  player_rebounds:          'reb',
+  player_rebounds_alternate:'reb',
+  player_assists:           'ast',
+  player_assists_alternate: 'ast',
+  player_steals:            'stl',
+  player_steals_alternate:  'stl',
+  player_blocks:            'blk',
+  player_blocks_alternate:  'blk',
+  player_threes:            'fg3m',
+  player_threes_alternate:  'fg3m',
+  player_turnovers:         'tov',
+};
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export default function PlayerPageInner({ playerId }: { playerId: string }) {
-  const router = useRouter();
+  const router       = useRouter();
   const searchParams = useSearchParams();
 
-  const [rawLog, setRawLog]         = useState<GameLogRow[]>([]);
-  const [propLines, setPropLines]   = useState<PropLine[]>([]);
-  const [teamPlayers, setTeamPlayers] = useState<TeamPlayer[]>([]);
-  const [playerName, setPlayerName] = useState<string>('');
-  const [loading, setLoading]       = useState(true);
-  const [error, setError]           = useState<string | null>(null);
-  const [activePeriods, setActivePeriods] = useState<Set<string>>(new Set(['full']));
+  const backGameId   = searchParams.get('gameId');
+  const backTab      = searchParams.get('tab') ?? 'boxscore';
+  const backDate     = searchParams.get('date');
+  const oppParam     = searchParams.get('opp');
 
-  const backGameId = searchParams.get('gameId');
-  const backTab    = searchParams.get('tab') ?? 'stats';
-  const opp        = searchParams.get('opp') ?? '';
-  const backDate   = searchParams.get('date') ?? '';
+  const backHref = (() => {
+    const p = new URLSearchParams();
+    if (backGameId) p.set('gameId', backGameId);
+    if (backTab)    p.set('tab', backTab);
+    if (backDate)   p.set('date', backDate);
+    const qs = p.toString();
+    return qs ? `/nba?${qs}` : '/nba';
+  })();
 
-  // Reconstruct back href preserving date and game.
-  const backHref = backGameId
-    ? `/nba?gameId=${backGameId}&tab=${backTab}${backDate ? `&date=${backDate}` : ''}`
-    : `/nba${backDate ? `?date=${backDate}` : ''}`;
+  const [log, setLog]       = useState<GameLogRow[]>([]);
+  const [grades, setGrades] = useState<GradeLine[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState<string | null>(null);
+  const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
+
+  // Team players for switcher
+  const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
 
   useEffect(() => {
     setLoading(true);
     setError(null);
-    setRawLog([]);
-    setPropLines([]);
-    setTeamPlayers([]);
-    setPlayerName('');
-    setActivePeriods(new Set(['full']));
+    setLog([]);
+    setGrades([]);
+    setSelectedPeriods(new Set());
 
     Promise.all([
-      fetch(`/api/player?playerId=${playerId}&games=100&sport=nba`).then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      }),
-      fetch(`/api/player-grades?playerId=${playerId}`).then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      }),
+      fetch(`/api/player?playerId=${playerId}&lastN=9999&sport=nba`)
+        .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+      fetch(`/api/player-grades?playerId=${playerId}`)
+        .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
     ])
-      .then(([logData, gradesData]) => {
-        setRawLog(logData.log ?? []);
-        setPropLines(gradesData.grades ?? []);
-        setPlayerName(logData.playerName ?? '');
-        // Fetch team roster once we know the teamId.
-        if (logData.teamId) {
-          fetch(`/api/team-players?teamId=${logData.teamId}`)
+      .then(([playerData, gradeData]) => {
+        setLog(playerData.log ?? []);
+        setGrades(gradeData.grades ?? []);
+
+        // Fetch team players for switcher once we know the teamId
+        const firstRow = (playerData.log ?? [])[0];
+        if (firstRow && backGameId) {
+          fetch(`/api/team-players?gameId=${backGameId}`)
             .then((r) => r.json())
             .then((d) => setTeamPlayers(d.players ?? []))
             .catch(() => {});
@@ -250,206 +239,249 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       .finally(() => setLoading(false));
   }, [playerId]);
 
-  function togglePeriod(value: string) {
-    setActivePeriods((prev) => {
-      const next = new Set(prev);
-      if (value === 'full') return new Set(['full']);
-      next.delete('full');
-      if (next.has(value)) {
-        next.delete(value);
-        if (next.size === 0) return new Set(['full']);
-      } else {
-        next.add(value);
+  // Grade lookup: gameId -> marketKey -> lineValue
+  const gradeMap = useMemo(() => {
+    const m = new Map<string, Map<string, number>>();
+    for (const g of grades) {
+      if (!m.has(g.gameId)) m.set(g.gameId, new Map());
+      if (!m.get(g.gameId)!.has(g.marketKey)) {
+        m.get(g.gameId)!.set(g.marketKey, g.lineValue);
       }
+    }
+    return m;
+  }, [grades]);
+
+  const summaries = useMemo(
+    () => buildGameSummaries(log, selectedPeriods),
+    [log, selectedPeriods],
+  );
+
+  const splits = useMemo(
+    () => computeSplit(summaries, oppParam),
+    [summaries, oppParam],
+  );
+
+  const availablePeriods = useMemo(
+    () => ALL_PERIODS.filter((p) => log.some((r) => r.period === p)),
+    [log],
+  );
+
+  const showPropColors = selectedPeriods.size === 0;
+
+  const teamGameCount = useMemo(() => new Set(summaries.map((s) => s.gameId)).size, [summaries]);
+  const playedCount   = useMemo(() => summaries.filter((s) => !s.dnp).length, [summaries]);
+
+  function togglePeriod(p: QuarterKey) {
+    setSelectedPeriods((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p); else next.add(p);
       return next;
     });
   }
 
-  function navigateToPlayer(pid: string) {
-    // Preserve all existing search params (gameId, tab, opp, date) when switching players.
-    const params = new URLSearchParams(searchParams.toString());
-    router.push(`/nba/player/${pid}?${params.toString()}`);
+  function getLineCls(gameId: string, market: keyof typeof MARKET_STAT, value: number): string {
+    if (!showPropColors) return 'text-gray-300';
+    const statKey = MARKET_STAT[market];
+    const gameMap = gradeMap.get(gameId);
+    if (!gameMap || !statKey) return 'text-gray-300';
+    const line = gameMap.get(market);
+    if (line == null) return 'text-gray-300';
+    return value > line ? 'text-green-400' : 'text-red-400';
   }
 
-  const propMap = useMemo(() => {
-    const map = new Map<string, Map<string, number>>();
-    for (const p of propLines) {
-      if (!map.has(p.gameId)) map.set(p.gameId, new Map());
-      map.get(p.gameId)!.set(p.marketKey, p.lineValue);
-    }
-    return map;
-  }, [propLines]);
+  // Derive player name from first non-DNP row
+  const playerName = log.find((r) => !r.dnp)?.opponentAbbr
+    ? undefined
+    : undefined; // resolved via API
+  const displayName = (log[0] as any)?.playerName ?? `Player ${playerId}`;
 
-  const games  = useMemo(() => buildGameSummaries(rawLog, activePeriods), [rawLog, activePeriods]);
-  const played = useMemo(() => games.filter((g) => !g.dnp), [games]);
+  if (loading) return <div className="px-4 py-6 text-sm text-gray-500">Loading...</div>;
+  if (error)   return <div className="px-4 py-6 text-sm text-red-400">Error: {error}</div>;
 
-  const seasonSplit = useMemo(() => computeSplit(played), [played]);
-  const last10Split = useMemo(() => computeSplit(played.slice(0, 10)), [played]);
-  const vsOppSplit  = useMemo(
-    () => opp ? computeSplit(played.filter((g) => g.opponentAbbr === opp)) : null,
-    [played, opp]
-  );
-
-  const showPropColors = activePeriods.has('full') || activePeriods.size === 0;
-
-  function propLine(gameId: string, market: keyof typeof MARKET_TO_STAT): number | null {
-    if (!showPropColors) return null;
-    return propMap.get(gameId)?.get(market) ?? null;
-  }
+  const splitLabels: { key: SplitKey; label: string }[] = [
+    { key: 'season', label: 'Season' },
+    { key: 'l10',    label: 'Last 10' },
+    ...(oppParam ? [{ key: 'opp' as SplitKey, label: `vs ${oppParam}` }] : []),
+  ];
 
   return (
     <div className="flex flex-col min-h-screen">
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3">
-        <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">&#8592; Back</Link>
+        <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">&#8592;</Link>
 
         {/* Player switcher */}
         {teamPlayers.length > 0 ? (
           <select
             value={playerId}
-            onChange={(e) => navigateToPlayer(e.target.value)}
-            className="text-sm bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200
-                       focus:outline-none focus:border-gray-500 cursor-pointer"
+            onChange={(e) => {
+              const params = new URLSearchParams(searchParams.toString());
+              router.push(`/nba/player/${e.target.value}?${params.toString()}`);
+            }}
+            className="bg-transparent text-sm font-semibold text-gray-200 border-none outline-none cursor-pointer"
           >
             {teamPlayers.map((p) => (
-              <option key={p.playerId} value={String(p.playerId)}>{p.playerName}</option>
+              <option key={p.playerId} value={String(p.playerId)}
+                      className="bg-gray-900 text-gray-200">
+                {p.playerName}
+              </option>
             ))}
           </select>
         ) : (
-          <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
-            {playerName || 'Player Game Log'}
-          </span>
+          <span className="text-sm font-semibold text-gray-200">{displayName}</span>
         )}
 
-        {!loading && !error && (
-          <span className="text-xs text-gray-600 ml-auto">
-            {played.length} GP / {games.length} team games
-          </span>
+        <span className="text-xs text-gray-600 ml-auto">
+          {playedCount} GP / {teamGameCount} team games
+        </span>
+      </div>
+
+      {/* Splits strip */}
+      <div className="overflow-x-auto border-b border-gray-800">
+        <table className="text-xs w-full">
+          <thead>
+            <tr className="text-gray-500">
+              <th className="text-left px-4 py-2 font-medium">Split</th>
+              <th className="text-right px-2 py-2 font-medium">GP</th>
+              <th className="text-right px-2 py-2 font-medium">MIN</th>
+              <th className="text-right px-2 py-2 font-medium">PTS</th>
+              <th className="text-right px-2 py-2 font-medium">REB</th>
+              <th className="text-right px-2 py-2 font-medium">AST</th>
+              <th className="text-right px-2 py-2 font-medium">STL</th>
+              <th className="text-right px-2 py-2 font-medium">BLK</th>
+              <th className="text-right px-2 py-2 font-medium">TOV</th>
+              <th className="text-right px-2 py-2 font-medium">FG%</th>
+              <th className="text-right px-2 py-2 font-medium">3P%</th>
+              <th className="text-right px-2 py-2 font-medium">FT%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {splitLabels.map(({ key, label }) => {
+              const s = splits[key];
+              return (
+                <tr key={key} className="border-t border-gray-800">
+                  <td className="px-4 py-2 text-gray-400 font-medium">{label}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{s.gp}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{fmtMin(s.min, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.pts, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.reb, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.ast, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.stl, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.blk, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.tov, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{fmtShoot(s.fgm, s.fga, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{fmtShoot(s.fg3m, s.fg3m > 0 ? s.fg3m / s.gp * s.gp : s.fga, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300">{fmtShoot(s.ftm, s.fta, s.gp)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Period filter */}
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
+        <span className="text-xs text-gray-600">All</span>
+        {availablePeriods.map((p) => (
+          <button
+            key={p}
+            onClick={() => togglePeriod(p)}
+            className={[
+              'px-3 py-1 text-xs font-medium rounded transition-colors',
+              selectedPeriods.has(p)
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+            ].join(' ')}
+          >
+            {p}
+          </button>
+        ))}
+        {selectedPeriods.size > 0 && (
+          <button
+            onClick={() => setSelectedPeriods(new Set())}
+            className="text-xs text-gray-600 hover:text-gray-400 ml-1"
+          >
+            Clear
+          </button>
+        )}
+        {!showPropColors && grades.length > 0 && (
+          <span className="text-xs text-gray-600 ml-2">Prop coloring off (full game only)</span>
         )}
       </div>
 
-      <div className="flex-1 px-4 py-4">
-        {loading && <div className="text-sm text-gray-500">Loading game log...</div>}
-        {error   && <div className="text-sm text-red-400">Error: {error}</div>}
-
-        {!loading && !error && games.length > 0 && (
-          <>
-            {/* Period filter */}
-            <div className="flex items-center gap-1 mb-5">
-              {PERIOD_OPTIONS.map(({ label, value }) => (
-                <button
-                  key={value}
-                  onClick={() => togglePeriod(value)}
-                  className={[
-                    'px-2.5 py-1 text-xs font-medium rounded transition-colors',
-                    activePeriods.has(value)
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
-                  ].join(' ')}
-                >
-                  {label}
-                </button>
-              ))}
-              {!showPropColors && (
-                <span className="text-xs text-gray-600 ml-2">Prop coloring off (full game only)</span>
-              )}
-            </div>
-
-            {/* Splits strip */}
-            <div className="overflow-x-auto mb-6">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-xs text-gray-500 border-b border-gray-800">
-                    <th className="text-left py-1.5 pr-3 font-medium">Split</th>
-                    <th className="text-right py-1.5 px-2 font-medium">MIN</th>
-                    <th className="text-right py-1.5 px-2 font-medium">PTS</th>
-                    <th className="text-right py-1.5 px-2 font-medium">REB</th>
-                    <th className="text-right py-1.5 px-2 font-medium">AST</th>
-                    <th className="text-right py-1.5 px-2 font-medium">STL</th>
-                    <th className="text-right py-1.5 px-2 font-medium">BLK</th>
-                    <th className="text-right py-1.5 px-2 font-medium">TOV</th>
-                    <th className="text-right py-1.5 pl-2 font-medium">3PM</th>
+      {/* Game log */}
+      <div className="flex-1 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs text-gray-500 border-b border-gray-800">
+              <th className="text-left px-4 py-1.5 font-medium">Date</th>
+              <th className="text-left px-2 py-1.5 font-medium">Opp</th>
+              <th className="text-right px-2 py-1.5 font-medium">Str</th>
+              <th className="text-right px-2 py-1.5 font-medium">MIN</th>
+              <th className="text-right px-2 py-1.5 font-medium">PTS</th>
+              <th className="text-right px-2 py-1.5 font-medium">REB</th>
+              <th className="text-right px-2 py-1.5 font-medium">AST</th>
+              <th className="text-right px-2 py-1.5 font-medium">STL</th>
+              <th className="text-right px-2 py-1.5 font-medium">BLK</th>
+              <th className="text-right px-2 py-1.5 font-medium">TOV</th>
+              <th className="text-right px-2 py-1.5 font-medium">3PM</th>
+              <th className="text-right px-2 py-1.5 font-medium">FG</th>
+              <th className="text-right px-4 py-1.5 font-medium">FT</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summaries.map((g) => {
+              if (g.dnp) {
+                return (
+                  <tr key={g.gameId} className="border-b border-gray-800 opacity-40">
+                    <td className="px-4 py-1.5 text-gray-400">{g.gameDate.slice(5)}</td>
+                    <td className="px-2 py-1.5 text-gray-400">
+                      {g.isHome ? '' : '@'}{g.opponentAbbr}
+                    </td>
+                    <td colSpan={11} className="px-2 py-1.5 text-xs text-gray-600">DNP</td>
                   </tr>
-                </thead>
-                <tbody>
-                  <SplitRow label="Season" split={seasonSplit} />
-                  <SplitRow label="Last 10" split={last10Split} />
-                  {opp && <SplitRow label={`vs ${opp}`} split={vsOppSplit} />}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Game log */}
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-xs text-gray-500 border-b border-gray-800">
-                    <th className="text-left py-1.5 pr-1 font-medium">Date</th>
-                    <th className="text-left py-1.5 pr-3 font-medium">Opp</th>
-                    <th className="text-left py-1.5 pr-2 font-medium">Str</th>
-                    <th className="text-right py-1.5 px-2 font-medium">MIN</th>
-                    <th className="text-right py-1.5 px-2 font-medium">PTS</th>
-                    <th className="text-right py-1.5 px-2 font-medium">REB</th>
-                    <th className="text-right py-1.5 px-2 font-medium">AST</th>
-                    <th className="text-right py-1.5 px-2 font-medium">STL</th>
-                    <th className="text-right py-1.5 px-2 font-medium">BLK</th>
-                    <th className="text-right py-1.5 px-2 font-medium">TOV</th>
-                    <th className="text-right py-1.5 px-2 font-medium">FG</th>
-                    <th className="text-right py-1.5 px-2 font-medium">3P</th>
-                    <th className="text-right py-1.5 pl-2 font-medium">FT</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {games.map((g) => {
-                    const ptsLine  = propLine(g.gameId, 'player_points');
-                    const rebLine  = propLine(g.gameId, 'player_rebounds');
-                    const astLine  = propLine(g.gameId, 'player_assists');
-                    const stlLine  = propLine(g.gameId, 'player_steals');
-                    const blkLine  = propLine(g.gameId, 'player_blocks');
-                    const tovLine  = propLine(g.gameId, 'player_turnovers');
-                    const fg3mLine = propLine(g.gameId, 'player_threes');
-                    const sl = g.started;
-
-                    return (
-                      <tr key={g.gameId} className={['border-b border-gray-800', g.dnp ? 'opacity-40' : ''].join(' ')}>
-                        <td className="py-1.5 pr-1 text-gray-300">{g.gameDate}</td>
-                        <td className="py-1.5 pr-3 text-gray-400">{g.isHome ? '' : '@'}{g.opponentAbbr}</td>
-                        <td className="py-1.5 pr-2">
-                          {sl === true && (
-                            <span className="text-xs px-1 rounded bg-blue-900 text-blue-300">S</span>
-                          )}
-                          {sl === false && (
-                            <span className="text-xs text-gray-600">B</span>
-                          )}
-                        </td>
-                        {g.dnp ? (
-                          <td colSpan={10} className="py-1.5 px-2 text-gray-500 text-xs">DNP</td>
-                        ) : (
-                          <>
-                            <td className="py-1.5 px-2 text-right text-gray-300">{fmtMin(g.min)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.pts,  ptsLine)}`}>{fmt(g.pts)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.reb,  rebLine)}`}>{fmt(g.reb)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.ast,  astLine)}`}>{fmt(g.ast)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.stl,  stlLine)}`}>{fmt(g.stl)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.blk,  blkLine)}`}>{fmt(g.blk)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.tov,  tovLine)}`}>{fmt(g.tov)}</td>
-                            <td className="py-1.5 px-2 text-right text-gray-300">{fmtShoot(g.fgm, g.fga)}</td>
-                            <td className={`py-1.5 px-2 text-right ${statColor(g.fg3m, fg3mLine)}`}>{fmtShoot(g.fg3m, g.fga)}</td>
-                            <td className="py-1.5 pl-2 text-right text-gray-300">{fmtShoot(g.ftm, g.fta)}</td>
-                          </>
-                        )}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-
-        {!loading && !error && games.length === 0 && (
-          <div className="text-sm text-gray-500">No game log available.</div>
-        )}
+                );
+              }
+              const ptsLine = getLineCls(g.gameId, 'player_points', g.pts);
+              const rebLine = getLineCls(g.gameId, 'player_rebounds', g.reb);
+              const astLine = getLineCls(g.gameId, 'player_assists', g.ast);
+              const stlLine = getLineCls(g.gameId, 'player_steals', g.stl);
+              const blkLine = getLineCls(g.gameId, 'player_blocks', g.blk);
+              const fg3Line = getLineCls(g.gameId, 'player_threes', g.fg3m);
+              const fmtM = (min: number) => {
+                const m = Math.floor(min);
+                const s = Math.round((min - m) * 60);
+                return `${m}:${s.toString().padStart(2, '0')}`;
+              };
+              const fmtS = (made: number, att: number) =>
+                att === 0 ? '-' : `${made}/${att}`;
+              const starterBadge = g.started === true
+                ? <span className="text-blue-500 font-medium">S</span>
+                : g.started === false
+                ? <span className="text-gray-600">B</span>
+                : null;
+              return (
+                <tr key={g.gameId} className="border-b border-gray-800">
+                  <td className="px-4 py-1.5 text-gray-400">{g.gameDate.slice(5)}</td>
+                  <td className="px-2 py-1.5 text-gray-400">
+                    {g.isHome ? '' : '@'}{g.opponentAbbr}
+                  </td>
+                  <td className="px-2 py-1.5 text-right text-xs">{starterBadge}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300">{fmtM(g.min)}</td>
+                  <td className={`px-2 py-1.5 text-right ${ptsLine}`}>{g.pts}</td>
+                  <td className={`px-2 py-1.5 text-right ${rebLine}`}>{g.reb}</td>
+                  <td className={`px-2 py-1.5 text-right ${astLine}`}>{g.ast}</td>
+                  <td className={`px-2 py-1.5 text-right ${stlLine}`}>{g.stl}</td>
+                  <td className={`px-2 py-1.5 text-right ${blkLine}`}>{g.blk}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300">{g.tov}</td>
+                  <td className={`px-2 py-1.5 text-right ${fg3Line}`}>{g.fg3m}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300">{fmtS(g.fgm, g.fga)}</td>
+                  <td className="px-4 py-1.5 text-right text-gray-300">{fmtS(g.ftm, g.fta)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );
