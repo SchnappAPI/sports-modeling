@@ -106,6 +106,7 @@ export interface RosterRow {
   teamAbbr: string;
   position: string | null;
   isStarter: boolean;
+  lineupStatus: string | null;   // 'Confirmed' | 'Projected' | null
 }
 
 export async function getRoster(gameId: string): Promise<RosterRow[]> {
@@ -119,7 +120,8 @@ export async function getRoster(gameId: string): Promise<RosterRow[]> {
          dl.player_name                                 AS playerName,
          dl.team_tricode                                AS teamAbbr,
          dl.position                                    AS position,
-         CASE WHEN dl.starter_status = 'Starter' THEN 1 ELSE 0 END AS isStarter
+         CASE WHEN dl.starter_status = 'Starter' THEN 1 ELSE 0 END AS isStarter,
+         dl.lineup_status                               AS lineupStatus
        FROM nba.daily_lineups dl
        LEFT JOIN nba.players p ON p.player_name = dl.player_name
        WHERE dl.game_id = @gameId
@@ -252,9 +254,6 @@ export async function getBoxscore(gameId: string): Promise<BoxscoreRow[]> {
 // ---------------------------------------------------------------------------
 // Player detail — per-quarter game log rows
 // ---------------------------------------------------------------------------
-// Each row is one (game, period) combination so the client can filter
-// by period and re-sum without additional API calls. DNP games are returned
-// as a single synthetic row with period='FullGame' and all stats null.
 
 export interface PlayerGameRow {
   gameId: string;
@@ -262,7 +261,7 @@ export interface PlayerGameRow {
   opponentAbbr: string;
   isHome: boolean;
   dnp: boolean;
-  started: boolean | null;  // null when no lineup data
+  started: boolean | null;
   period: string;
   pts: number | null;
   reb: number | null;
@@ -325,7 +324,6 @@ export async function getPlayerGames(
          JOIN nba.players p ON p.player_name = dl.player_name
          WHERE p.player_id = @playerId
        )
-       -- Played rows: one row per (game, period)
        SELECT
          tg.game_id                              AS gameId,
          CONVERT(VARCHAR(10), tg.game_date, 120) AS gameDate,
@@ -345,7 +343,6 @@ export async function getPlayerGames(
 
        UNION ALL
 
-       -- DNP rows: one synthetic row per missed game
        SELECT
          tg.game_id                              AS gameId,
          CONVERT(VARCHAR(10), tg.game_date, 120) AS gameDate,
@@ -376,7 +373,7 @@ export interface GradeRow {
   playerName: string;
   marketKey: string;
   lineValue: number;
-  overPrice: number | null;   // FanDuel American odds for the Over
+  overPrice: number | null;
   hitRate60: number | null;
   hitRate20: number | null;
   sampleSize60: number | null;
@@ -394,14 +391,9 @@ export async function getGrades(
   const gameFilter = gameId != null ? `AND egm.game_id = @gameId` : '';
   if (gameId != null) req.input('gameId', mssql.VarChar, gameId);
   const result = await req.query<GradeRow>(
-    `-- Combine upcoming and historical FanDuel Over prices so the At a Glance
-     -- screen can show odds for both today's pre-game props and past results.
-     WITH prop_prices AS (
-       SELECT
-         event_id,
-         market_key,
-         player_id,
-         MIN(outcome_price) AS over_price   -- lowest listed Over price
+    `WITH prop_prices AS (
+       SELECT event_id, market_key, player_id,
+              MIN(outcome_price) AS over_price
        FROM odds.upcoming_player_props
        WHERE bookmaker_key = 'fanduel'
          AND outcome_name  = 'Over'
@@ -410,11 +402,8 @@ export async function getGrades(
 
        UNION ALL
 
-       SELECT
-         pp.event_id,
-         pp.market_key,
-         pm.player_id,
-         MIN(pp.outcome_price) AS over_price
+       SELECT pp.event_id, pp.market_key, pm.player_id,
+              MIN(pp.outcome_price) AS over_price
        FROM odds.player_props pp
        JOIN odds.player_map pm
          ON pm.odds_player_name = pp.player_name
