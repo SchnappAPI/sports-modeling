@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 import GameStrip, { type Game } from '@/components/GameStrip';
 import GameTabs from '@/components/GameTabs';
 
@@ -42,10 +43,20 @@ export default function NbaPageInner() {
     router.replace(`/nba?${params.toString()}`);
   }
 
+  const gradesHref = activeGameId
+    ? `/nba/grades?gameId=${activeGameId}`
+    : '/nba/grades';
+
   return (
     <div className="flex flex-col min-h-screen">
-      <div className="px-4 py-3 border-b border-gray-800">
+      <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">NBA</span>
+        <Link
+          href={gradesHref}
+          className="text-sm font-medium text-gray-400 hover:text-blue-400 transition-colors"
+        >
+          At a Glance
+        </Link>
       </div>
 
       {loading && <div className="px-4 py-3 text-sm text-gray-500">Loading games...</div>}
