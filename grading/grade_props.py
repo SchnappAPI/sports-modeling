@@ -291,6 +291,24 @@ def ensure_tables(engine):
                 )
             )
         """))
+        # Idempotent migrations: add component columns when they are missing
+        # (existing databases created before Step 13 won't have them).
+        for col, dtype in [
+            ("trend_grade",      "FLOAT"),
+            ("momentum_grade",   "FLOAT"),
+            ("pattern_grade",    "FLOAT"),
+            ("matchup_grade",    "FLOAT"),
+            ("regression_grade", "FLOAT"),
+            ("composite_grade",  "FLOAT"),
+        ]:
+            conn.execute(text(f"""
+                IF NOT EXISTS (
+                    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = 'common' AND TABLE_NAME = 'daily_grades'
+                      AND COLUMN_NAME = '{col}'
+                )
+                ALTER TABLE common.daily_grades ADD {col} {dtype} NULL
+            """))
     log.info("Schema verified.")
 
 
