@@ -27,7 +27,7 @@ Three layers:
 - Connection: SQLAlchemy + pyodbc, ODBC Driver 18, `fast_executemany=True` (grading uses `False` to prevent NVARCHAR(MAX) truncation)
 - Retry logic: 3 attempts, 45s wait — handles auto-pause resume
 - No MSSQL MCP available. DB queries run via Python in GitHub Actions or via ETL scripts through the GitHub MCP.
-- Cold start mitigation: `/api/ping` is public (anonymous role). Keep-alive workflow (`keepalive.yml`) pings it every 45 min UTC 10:00–05:00. Should eliminate morning cold starts.
+- Cold start mitigation: `/api/ping` is public (anonymous role). Keep-alive workflow (`keepalive.yml`) pings it every 45 min UTC 10:00–05:00.
 
 ### GitHub Actions
 - Repo: `SchnappAPI/sports-modeling` (private)
@@ -45,7 +45,7 @@ Three layers:
 - Next.js 15.2.8, React 19
 - Auth: GitHub identity provider. All routes require `authenticated` role EXCEPT `/api/ping` which is `anonymous`. 401 redirects to GitHub login.
 - DB connection string in SWA application settings — env var: `AZURE_SQL_CONNECTION_STRING`
-- Status: **Steps 1–10 complete. Step 11 next.**
+- Status: **Steps 1–11 complete. Step 12 next.**
 
 ### Local Dev
 - Node.js v24.12.0 installed. `npm run dev` blocked by ThreatLocker (next.cmd blocked).
@@ -58,6 +58,7 @@ Three layers:
 ```
 .github/workflows/
   nba-etl.yml                                         # Nightly cron + manual dispatch. ACTIVE
+  nba-live.yml                                        # Every 5 min UTC 17:00-06:00. Live box score. ACTIVE (step 11)
   mlb-etl.yml                                         # Manual dispatch only. INCOMPLETE
   odds-etl.yml                                        # Nightly cron UTC 10:00 + manual. ACTIVE
   grading.yml                                         # Nightly cron UTC 10:30 + manual. ACTIVE
@@ -71,6 +72,7 @@ Three layers:
 
 etl/
   db.py / nba_etl.py / mlb_etl.py / nfl_etl.py / odds_etl.py
+  nba_live.py       # Intra-day live box score updater (step 11). ACTIVE.
   lineup_poll.py    # Standalone lineup poller (step 10). ACTIVE.
   requirements.txt
 
@@ -99,14 +101,17 @@ web/
       boxscore/route.ts       # Auth. {gameId, rows:[]}
       player/route.ts         # Auth. {playerId, lastN, sport, log:[]} — full season with DNP
       grades/route.ts         # Auth. {date, gameId, grades:[]}
-      live/route.ts           # Stub — TO BUILD (step 11)
+      game-grades/route.ts    # Auth. {gameId, grades:[]} — per-game prop lines for box score coloring
+      player-grades/route.ts  # Auth. {playerId, grades:[]} — all grades for a player
+      team-players/route.ts   # Auth. {gameId, players:[]} — roster for player switcher
       contextual/route.ts     # Stub — TO BUILD (step 12)
   components/
-    GameStrip.tsx      # Scrollable game cards. Game interface includes homeTeamId/awayTeamId/homeTeamAbbr/awayTeamAbbr.
-    GameTabs.tsx       # Roster/Stats/Box Score tabs. Props: gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr.
+    GameStrip.tsx      # Scrollable game cards. Pulsing red dot for live games (gameStatus=2).
+    GameTabs.tsx       # Live/Roster/Stats/Box Score tabs. Live tab only shown when gameStatus=2.
+    LiveBoxScore.tsx   # Polls /api/boxscore every 60s. Keys BoxScoreTable on tick to force remount.
     RosterTable.tsx    # From nba.daily_lineups. Populated pre-game by lineup-poll.yml.
     StatsTable.tsx     # From /api/team-averages. Player links pass opp= param for vs-split.
-    BoxScoreTable.tsx  # Period filter (All/1Q/2Q/3Q/4Q/OT). Client-side aggregation.
+    BoxScoreTable.tsx  # Period filter (All/1Q/2Q/3Q/4Q/OT). Client-side aggregation. Player links.
   lib/
     db.ts / queries.ts
   staticwebapp.config.json   # /api/ping anonymous; all others authenticated
@@ -123,15 +128,15 @@ web/
 
 ### NBA Tables
 - `nba.games` — completed games only (box score ETL source)
-- `nba.schedule` — ALL games regardless of status. USE THIS for game queries.
+- `nba.schedule` — ALL games regardless of status. USE THIS for game queries. home_score/away_score updated live by nba_live.py.
 - `nba.teams` — hardcoded static dict in ETL
 - `nba.players` — `player_id`, `player_name`, `team_id`, `team_tricode`, `roster_status` (1=active). Stats tab queries by team_id directly.
 - `nba.daily_lineups` — NO player_id/team_id. Keyed by `player_name` + `team_tricode`. `starter_status` = 'Starter'/'Bench'. Coverage: prior day and earlier. Now updated pre-game by lineup-poll.yml.
-- `nba.player_box_score_stats` — quarters only: '1Q','2Q','3Q','4Q','OT'. NO 'FullGame'. Minutes column = `minutes` (DECIMAL). Sum quarters for game totals.
+- `nba.player_box_score_stats` — quarters only: '1Q','2Q','3Q','4Q','OT'. NO 'FullGame'. Minutes column = `minutes` (DECIMAL). Sum quarters for game totals. Written live by nba_live.py every 5 min during games.
 - `nba.player_passing_stats` / `nba.player_rebound_chances` — game-level PT stats
 
 ### Odds Tables
-- `odds.event_game_map` — event_id → game_id + game_date. Coverage through 2026-03-23.
+- `odds.event_game_map` — event_id → game_id + game_date. Coverage through 2026-03-23. Upcoming entries written by odds_etl upcoming mode.
 - `odds.upcoming_player_props` — today's FanDuel lines
 - `odds.player_props` — historical FanDuel lines
 - `odds.upcoming_game_lines` / `odds.upcoming_events` — today's game lines
@@ -164,23 +169,28 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 - PT stats: direct HTTP to `leaguedashptstats` with `proxies={"http": None, "https": None}`
 - Proxy: Webshare rotating residential. Secret: `NBA_PROXY_URL`.
 
+### NBA Live ETL (step 11)
+- Script: `etl/nba_live.py` — imports helpers from nba_etl.py (safe to import; nba_etl guards main() under `if __name__ == "__main__"`)
+- Gate: queries `nba.schedule` for `game_status = 2` today. Exits if none.
+- When gate passes: calls `ScoreboardV3` once to update all scores in `nba.schedule`, then `BoxScoreTraditionalV3` per in-progress game_id.
+- Upserts into `nba.player_box_score_stats` on PK `(game_id, player_id, period)` — idempotent.
+- Period mapping from V3 integers: 1→1Q, 2→2Q, 3→3Q, 4→4Q, 5+→OT.
+- Minutes parsed from PT##M##.##S clock string format.
+- Workflow: `nba-live.yml` — every 5 min UTC 17:00–06:00 (noon–1am ET). Two cron entries to span midnight.
+
 ### Odds ETL
 - Modes: `discover`, `probe`, `backfill`, `mappings`, `upcoming`
 - Nightly cron UTC 10:00: `upcoming/nba/days-ahead=1`
+- Upcoming mode now also writes to `odds.event_game_map` so grading engine can join on event_id.
 
 ### Lineup Poll (step 10)
 - Script: `etl/lineup_poll.py` — standalone, does not import from nba_etl.py
-- Queries `nba.schedule` for today's non-final games whose `game_status_text` parses to a start time within `--hours-ahead` hours (default 4). Unparseable times are included conservatively.
-- Fetches `https://stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json` via proxy (single call covers all games for the day).
-- Deletes existing rows for qualifying game_ids before upserting so scratches are removed on refresh.
 - Workflow: `lineup-poll.yml` — every 15 min UTC 16:00–03:59 (noon–midnight ET).
-- Time parsing assumes EDT (UTC-4). Acceptable 30-minute error for gate purposes.
 
 ### Pre-Game Refresh (step 10)
 - Workflow: `pregame-refresh.yml` — every 30 min UTC 14:00–03:30 (10 AM–midnight ET).
-- Gate: inline Python checks `nba.schedule` for any non-final game starting within 3 hours. Skip both ETL steps if none qualify.
+- Gate: inline Python checks `nba.schedule` for any non-final game starting within 3 hours.
 - When gate passes: runs `odds_etl.py --mode upcoming --sport nba --days-ahead 1`, then `grade_props.py --mode upcoming`.
-- `skip_gate=true` input bypasses the gate for manual dispatch.
 
 ---
 
@@ -206,10 +216,19 @@ Falls back to hit_rate_60 if sample_size_20 < 5.
 ## 7. Web Application
 
 ### Navigation
-- `/nba` — game strip + tabs. Header has "At a Glance" link top-right.
-- `/nba?gameId=&tab=` — active game with Roster/Stats/Box Score tabs
+- `/nba` — game strip + tabs. Header has "At a Glance" link (always all-games for selected date).
+- `/nba?gameId=&tab=` — active game. Live tab appears automatically when gameStatus=2.
 - `/nba/player/[playerId]?gameId=&tab=&opp=` — splits strip + full season game log
-- `/nba/grades?gameId=` — ranked prop grades
+- `/nba/grades?date=` — ranked prop grades for all games on date (market filter dropdown)
+
+### Live Data Flow
+1. `nba-live.yml` fires every 5 min UTC 17:00–06:00
+2. Gate: check `nba.schedule` for `game_status = 2`. Exit if none.
+3. `ScoreboardV3` → update `nba.schedule` home_score/away_score/game_status_text
+4. `BoxScoreTraditionalV3` per game → upsert `nba.player_box_score_stats`
+5. Front end: `GameStrip` shows pulsing red dot + live score text for in-progress games
+6. `GameTabs` auto-selects "Live" tab when `gameStatus === 2`
+7. `LiveBoxScore` component polls `/api/boxscore` every 60s by keying `BoxScoreTable` on a tick counter
 
 ### API Response Shapes
 - `/api/games` → `{ sport, date, games: GameRow[] }`
@@ -218,7 +237,7 @@ Falls back to hit_rate_60 if sample_size_20 < 5.
 - `/api/player-averages` → `{ gameId, lastN, players: PlayerAvg[] }` — lineup-anchored
 - `/api/boxscore` → `{ gameId, rows: BoxRow[] }`
 - `/api/player` → `{ playerId, lastN, sport, log: GameLogRow[] }` — full season, includes dnp:boolean
-- `/api/grades` → `{ date, gameId, grades: GradeRow[] }`
+- `/api/grades` → `{ date, gameId, grades: GradeRow[] }` — includes overPrice from FanDuel
 
 ### Game Interface
 ```typescript
@@ -231,12 +250,11 @@ interface Game {
 }
 ```
 
-### Player Detail Page
-- Splits strip at top: Season, Last 10, vs [opp] (when opp= param present)
-- All three computed client-side from game log — no extra API call
-- `opp=` passed from StatsTable player link (opponent team abbreviation)
-- Full season game log below: every team game, DNP rows dimmed at opacity-40 with "DNP" spanning stat columns
-- Header shows "X GP / Y team games"
+### GameTabs Props
+```typescript
+{ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr, selectedDate, gameStatus }
+```
+`gameStatus` required to conditionally show Live tab.
 
 ### Next.js 15 Patterns
 - `useSearchParams()` requires `<Suspense>` wrapper. Pattern: thin `page.tsx` → Suspense → `*Inner.tsx`
@@ -248,11 +266,11 @@ interface Game {
 ## 8. Sport Status
 
 ### NBA
-- Data: ACTIVE. Box scores current through 2026-03-28.
-- Odds: event_game_map and daily_grades through 2026-03-23; backfill running.
-- Grading: FUNCTIONAL (hit rate only). Through 2026-03-23.
-- Web: ALL VIEWS LIVE. Game strip, Roster, Stats, Box Score, Player Detail (splits + game log), At a Glance.
-- Lineup polling: ACTIVE (step 10). Pre-game refresh: ACTIVE (step 10).
+- Data: ACTIVE. Box scores current through 2026-03-28. Live updates via nba-live.yml during games.
+- Odds: event_game_map and daily_grades through 2026-03-23; nightly chain catching up.
+- Grading: FUNCTIONAL (hit rate only).
+- Web: ALL VIEWS LIVE including Live tab (step 11).
+- Lineup polling: ACTIVE. Pre-game refresh: ACTIVE.
 
 ### MLB / NFL
 - ETL partially built. Not wired to web or grading. After NBA.
@@ -261,9 +279,8 @@ interface Game {
 
 ## 9. Build Sequence
 
-1–10. ~~DONE~~ — NBA data pipeline, odds ETL, SWA setup, API routes, all NBA UI views, keep-alive, lineup poll, pre-game refresh.
-11. **Step 11: Live data layer** — `/api/live`, Live View tab, front-end polling.
-12. **Step 12: Contextual comparison**
+1–11. ~~DONE~~ — NBA data pipeline, odds ETL, SWA setup, API routes, all NBA UI views, keep-alive, lineup poll, pre-game refresh, live data layer.
+12. **Step 12: Contextual comparison** — `/api/contextual`, matchup defense view.
 13. **Step 13: Grading model expansion** — trend + matchup components first, then migration script.
 14. **Step 14: MLB ETL and web views**
 15. **Step 15: NFL ETL automation and web views**
@@ -279,10 +296,9 @@ interface Game {
 | PFF DDL not finalized | Pending CSV column confirmation. |
 | Grading: one component only | Hit rate only. Migration + 6 more components planned. |
 | `flags` + component columns not in `common.daily_grades` | Migration required before any flag-producing component. |
-| odds/grading backfill gap | event_game_map and daily_grades only through 2026-03-23. |
-| `/api/live` + `/api/contextual` not built | Steps 11–12. |
-| Box Score tab empty for today | Today's games not yet played. Populates overnight. |
-| At a Glance empty for today | Grades through 2026-03-23. Populates as backfill + nightly ETL catches up. |
+| odds/grading backfill gap | event_game_map and daily_grades only through 2026-03-23. Nightly chain running. |
+| Box Score tab empty for today | Today's games not yet played. Live tab populates during games via nba-live.yml. |
+| nba_live.py untested against actual live game | First test opportunity when next NBA game is in progress. |
 
 ---
 
@@ -318,8 +334,15 @@ interface Game {
 | FanDuel as sole grading bookmaker | Most complete prop line coverage. |
 | Teams dict hardcoded in NBA ETL | Eliminated HTTP dependency after persistent proxy failures. |
 | PT stats via direct HTTP with explicit proxy bypass | nba_api wrapper missing required headers; env var proxy must be explicitly bypassed. |
-| lineup_poll.py standalone, not imported from nba_etl.py | nba_etl.py has top-level argparse/main; importing it would trigger argument parsing and side effects. Duplicating the small helpers needed is simpler and safer. |
-| Lineup poll deletes before upsert per game_id | Ensures scratches and late roster changes are reflected on every refresh, not just first load. |
-| Pre-game refresh gate uses 3-hour window | Avoids burning Odds API quota on days with no upcoming games. Gate is conservative: unparseable times are treated as qualifying. |
+| lineup_poll.py standalone, not imported from nba_etl.py | nba_etl.py has top-level argparse/main; importing it triggers argument parsing. Safer to duplicate small helpers. |
+| nba_live.py imports from nba_etl.py | nba_etl.py guards main() under __name__ == "__main__" so imports are safe. Avoids duplicating all helpers. |
+| Live box score via DB poll not direct browser API call | Browser never hits stats.nba.com. DB is always source of truth. Clean separation. |
+| LiveBoxScore keys BoxScoreTable on tick | Forces full remount + re-fetch each interval without modifying BoxScoreTable. No new props needed. |
+| 60-second front-end poll interval | Fast enough for live scores; slow enough to not hammer the DB. nba_live.py writes every 5 min anyway. |
+| ScoreboardV3 called once per nba_live.py run | One call updates all games' scores/status; cheaper than per-game score fetches. |
+| Lineup poll deletes before upsert per game_id | Ensures scratches are reflected on every refresh. |
+| Pre-game refresh gate uses 3-hour window | Avoids burning Odds API quota on days with no upcoming games. |
 | EDT (UTC-4) assumed for game time parsing | NBA season runs Oct-Jun, mostly EDT. 30-minute gate error is acceptable. |
 | Two cron entries per workflow that spans midnight | GHA cron cannot span midnight in a single expression. |
+| At a Glance link always navigates to all-games view | Per-game scoping was confusing; market filter dropdown handles narrowing. |
+| odds_etl upcoming mode writes to event_game_map | Grading engine JOINs event_game_map on event_id with game_id IS NOT NULL. Without this, upcoming props are invisible to grading. |
