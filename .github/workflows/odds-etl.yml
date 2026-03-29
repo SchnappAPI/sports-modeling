@@ -18,7 +18,7 @@ on:
         required: false
         default: "2025"
       snapshots:
-        description: "Discover mode: max calendar dates to walk per run. Default 50."
+        description: "Discover mode: max calendar dates to walk per run."
         required: false
         default: "50"
       games:
@@ -26,13 +26,13 @@ on:
         required: false
         default: "20"
       days_ahead:
-        description: "Upcoming mode: days ahead to fetch. Default 1 = next game day only."
+        description: "Upcoming mode: days ahead to fetch."
         required: false
         default: "1"
-      quota_floor:
-        description: "Stop if credits fall below this."
+      budget:
+        description: "Max credits to spend this run. 0 = unlimited."
         required: false
-        default: "4500000"
+        default: "0"
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -68,17 +68,15 @@ jobs:
       - name: Build CLI flags
         id: flags
         run: |
-          # Scheduled runs always execute upcoming mode for NBA.
-          # Manual dispatch uses the provided inputs.
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            FLAGS="--mode upcoming --sport nba --days-ahead 1 --quota-floor 4500000"
+            FLAGS="--mode upcoming --sport nba --days-ahead 1"
           else
             FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
             FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'nba' }}"
             FLAGS="$FLAGS --snapshots ${{ github.event.inputs.snapshots || '50' }}"
             FLAGS="$FLAGS --games ${{ github.event.inputs.games || '20' }}"
             FLAGS="$FLAGS --days-ahead ${{ github.event.inputs.days_ahead || '1' }}"
-            FLAGS="$FLAGS --quota-floor ${{ github.event.inputs.quota_floor || '4500000' }}"
+            FLAGS="$FLAGS --budget ${{ github.event.inputs.budget || '0' }}"
             SEASON="${{ github.event.inputs.season }}"
             [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
           fi

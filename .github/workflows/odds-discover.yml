@@ -5,14 +5,19 @@ name: Odds Discover
 # its cursor to odds.discover_cursors before returning. If the job dies at
 # any point, re-dispatching resumes from each sport's last saved cursor.
 #
-# GitHub Actions hard limit is 6 hours per job. At ~4 seconds per date
-# (1 API call + sleep) a 6-hour job processes roughly 5,000 dates. An NBA or
+# GitHub Actions hard limit is 6 hours per job. At ~2 seconds per date
+# (1 API call + sleep) a 6-hour job processes roughly 10,000 dates. An NBA or
 # MLB season spans ~200-250 relevant dates; an NFL season ~25. Three seasons
 # per sport = ~1,400 total dates across all nine pairs, well within one run.
 #
 # The inner bash loop calls Python repeatedly in batches of snapshots_per_batch
 # so that each batch is its own DB commit. There is no checkpoint stored on the
 # runner filesystem -- the DB is the only state.
+#
+# Budget: each Python invocation is given a per-call budget. Discover costs
+# 1 credit per calendar date, so budget_per_batch = snapshots_per_batch + a
+# small buffer. The Python process exits cleanly when the budget is reached;
+# the bash loop moves on to the next pair.
 
 on:
   workflow_dispatch:
@@ -22,13 +27,17 @@ on:
         required: false
         default: "2023,2024,2025"
       snapshots_per_batch:
-        description: "Calendar dates to process per Python call before looping. Lower = more frequent DB commits."
+        description: "Calendar dates to process per Python call before looping."
         required: false
         default: "30"
-      quota_floor:
-        description: "Stop if Odds API credits fall below this number."
+      budget_per_batch:
+        description: "Max credits per Python call. Should be slightly above snapshots_per_batch to cover retries. 0 = unlimited."
         required: false
-        default: "4500000"
+        default: "40"
+      quota_floor:
+        description: "(Unused -- kept for reference only. Budget cap replaced this.)"
+        required: false
+        default: ""
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -66,14 +75,13 @@ jobs:
 
       - name: Walk all sport-season pairs
         env:
-          SEASONS:              ${{ github.event.inputs.seasons || '2023,2024,2025' }}
-          SNAPSHOTS_PER_BATCH:  ${{ github.event.inputs.snapshots_per_batch || '30' }}
-          QUOTA_FLOOR:          ${{ github.event.inputs.quota_floor || '4500000' }}
+          SEASONS:            ${{ github.event.inputs.seasons || '2023,2024,2025' }}
+          SNAPSHOTS_PER_BATCH: ${{ github.event.inputs.snapshots_per_batch || '30' }}
+          BUDGET_PER_BATCH:   ${{ github.event.inputs.budget_per_batch || '40' }}
         run: |
           set -euo pipefail
           IFS=',' read -ra SEASON_LIST <<< "$SEASONS"
 
-          # Process in season order within each sport so older data loads first.
           for SPORT in nba mlb nfl; do
             for SEASON in "${SEASON_LIST[@]}"; do
               SEASON="$(echo "$SEASON" | tr -d ' ')"
@@ -82,38 +90,38 @@ jobs:
               echo "  Discovering: $SPORT season $SEASON"
               echo "========================================"
 
-              # Loop in small batches. Each Python call exits after
-              # SNAPSHOTS_PER_BATCH dates and writes its cursor to the DB.
-              # We keep looping until the script prints "Walk complete" or
-              # "Reached beginning of history", indicating this sport-season
-              # is fully walked. We cap at 500 iterations as a safety rail
-              # (500 * 30 = 15,000 dates -- far more than any season needs).
               ITER=0
               MAX_ITER=500
               while [ $ITER -lt $MAX_ITER ]; do
                 ITER=$((ITER + 1))
                 echo "  --- Batch $ITER (sport=$SPORT season=$SEASON) ---"
 
-                # Capture output so we can detect completion signals.
                 OUTPUT=$(python etl/odds_etl.py \
                   --mode discover \
                   --sport "$SPORT" \
                   --season "$SEASON" \
                   --snapshots "$SNAPSHOTS_PER_BATCH" \
-                  --quota-floor "$QUOTA_FLOOR" 2>&1) || {
-                    echo "  Python exited non-zero (likely quota floor hit). Stopping entire job."
+                  --budget "$BUDGET_PER_BATCH" 2>&1) || {
+                    echo "  Python exited non-zero. Stopping entire job."
                     echo "$OUTPUT"
                     exit 1
                   }
 
                 echo "$OUTPUT"
 
-                # Detect natural completion signals from run_discover output.
+                # Detect natural completion or budget-stop signals.
                 if echo "$OUTPUT" | grep -qE \
                   "Walk complete|Reached beginning of history|Season has not started|Nothing to do|All .* discovered events loaded"; then
                   echo "  $SPORT $SEASON: fully walked. Moving to next pair."
                   break
                 fi
+
+                # Budget reached is a clean exit (code 0) with this message.
+                # The cursor is already saved; the next iteration resumes from it.
+                if echo "$OUTPUT" | grep -q "BUDGET REACHED"; then
+                  echo "  Budget reached for this batch. Continuing loop (cursor saved)."
+                fi
+
               done
 
               if [ $ITER -ge $MAX_ITER ]; then

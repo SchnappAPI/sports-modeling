@@ -55,6 +55,12 @@ Snapshot timing
 
 Bookmaker
   FanDuel only (bookmakers=fanduel). DraftKings not stored.
+
+Budget tracking
+  --budget caps credits spent during this process invocation. Spend is
+  computed as (current x-requests-used) - (x-requests-used at first response).
+  This is independent of account balance, never needs updating between runs,
+  and stops a runaway loop from consuming more than intended.
 """
 
 import argparse
@@ -675,14 +681,55 @@ def clean_dataframe(df):
 
 
 # ---------------------------------------------------------------------------
+# Budget tracking
+#
+# _used_at_start  -- x-requests-used value captured from the first API
+#                    response of this process invocation. None until set.
+# _used_current   -- most recent x-requests-used value seen.
+# _budget         -- maximum credits this invocation is allowed to spend.
+#                    0 = unlimited.
+#
+# Spend = _used_current - _used_at_start.
+# Checked after every successful API response via _check_budget().
+# ---------------------------------------------------------------------------
+
+_used_at_start  = None
+_used_current   = None
+_budget         = 0       # set from --budget arg in main()
+
+
+def _check_budget():
+    """Exit if this invocation has spent more than _budget credits."""
+    if _budget <= 0:
+        return
+    if _used_at_start is None or _used_current is None:
+        return
+    spent = _used_current - _used_at_start
+    if spent >= _budget:
+        print(f"BUDGET REACHED: spent {spent:,} credits this run (budget={_budget:,}). Stopping.")
+        sys.exit(0)
+
+
+def _record_quota_headers(headers):
+    """Update global tracking from API response headers."""
+    global _used_at_start, _used_current
+    used_str = headers.get("x-requests-used") if headers else None
+    if used_str is None:
+        return
+    try:
+        used = int(used_str)
+    except (ValueError, TypeError):
+        return
+    if _used_at_start is None:
+        _used_at_start = used
+    _used_current = used
+
+
+# ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
 
-_remaining_credits = None
-
-
-def _request(url, params, quota_floor, retries=3):
-    global _remaining_credits
+def _request(url, params, retries=3):
     wait_times = [10, 30, 60]
     last_exc = None
     for attempt in range(retries):
@@ -695,17 +742,15 @@ def _request(url, params, quota_floor, retries=3):
                 time.sleep(wait_times[attempt])
             continue
 
-        rh = resp.headers.get("x-requests-remaining")
-        uh = resp.headers.get("x-requests-used")
-        lh = resp.headers.get("x-requests-last")
-        if rh is not None:
-            _remaining_credits = int(rh)
-            print(f"    [quota] remaining={rh}  used={uh}  last={lh}")
+        remaining = resp.headers.get("x-requests-remaining")
+        used      = resp.headers.get("x-requests-used")
+        last      = resp.headers.get("x-requests-last")
 
         if resp.status_code == 200:
-            if _remaining_credits is not None and _remaining_credits < quota_floor:
-                print(f"WARNING: {_remaining_credits} credits remaining, below floor {quota_floor}. Stopping.")
-                sys.exit(1)
+            _record_quota_headers(resp.headers)
+            spent = (_used_current - _used_at_start) if (_used_at_start and _used_current) else 0
+            print(f"    [quota] remaining={remaining}  used={used}  last={last}  spent_this_run={spent}")
+            _check_budget()
             return resp.json(), resp.headers
 
         if resp.status_code in (401, 403, 404):
@@ -723,12 +768,6 @@ def _request(url, params, quota_floor, retries=3):
 
     print(f"    [skip] All retries exhausted. Last: {last_exc}")
     return None, None
-
-
-def _check_quota(quota_floor):
-    if _remaining_credits is not None and _remaining_credits < quota_floor:
-        print(f"WARNING: {_remaining_credits} credits remaining, below floor {quota_floor}. Stopping.")
-        sys.exit(1)
 
 
 def _query_rows(engine, sql, params):
@@ -763,12 +802,10 @@ def _season_date_range(sport, season_year):
 # DISCOVER mode
 # ---------------------------------------------------------------------------
 
-def _api_discover_snapshot(sport_key, snapshot_ts_iso, api_key, quota_floor):
-    _check_quota(quota_floor)
+def _api_discover_snapshot(sport_key, snapshot_ts_iso, api_key):
     data, _ = _request(
         f"{BASE_URL}/v4/historical/sports/{sport_key}/events",
         {"apiKey": api_key, "date": snapshot_ts_iso},
-        quota_floor,
     )
     return data
 
@@ -803,7 +840,7 @@ def _save_cursor(engine, sport_key, season_year, oldest_ts_iso, snapshots_delta,
                "sw": snapshots_delta, "ef": events_delta})
 
 
-def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engine):
+def run_discover(sport, api_key, season_year, snapshots_limit, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Discover: {sport.upper()} Season {season_year} ===")
 
@@ -832,10 +869,9 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
     events_stored = 0
 
     while dates_walked < snapshots_limit:
-        _check_quota(quota_floor)
         print(f"  Date {dates_walked + 1}: requesting {next_request_iso} ...")
 
-        resp = _api_discover_snapshot(sport_key, next_request_iso, api_key, quota_floor)
+        resp = _api_discover_snapshot(sport_key, next_request_iso, api_key)
         if resp is None:
             print("  API returned None. Stopping.")
             break
@@ -895,32 +931,28 @@ def run_discover(sport, api_key, quota_floor, season_year, snapshots_limit, engi
         time.sleep(1.0)
 
     print(f"\n  Run complete. Dates walked: {dates_walked}  Events stored this run: {events_stored}")
-    if _remaining_credits is not None:
-        print(f"  Credits remaining: {_remaining_credits:,}")
+    if _used_at_start is not None and _used_current is not None:
+        print(f"  Credits spent this run: {_used_current - _used_at_start:,}")
 
 
 # ---------------------------------------------------------------------------
 # Odds fetching (historical)
 # ---------------------------------------------------------------------------
 
-def _fetch_bulk(sport_key, snap_iso, markets, api_key, quota_floor):
-    _check_quota(quota_floor)
+def _fetch_bulk(sport_key, snap_iso, markets, api_key):
     data, _ = _request(
         f"{BASE_URL}/v4/historical/sports/{sport_key}/odds",
         {"apiKey": api_key, "bookmakers": BOOKMAKERS,
          "markets": ",".join(markets), "oddsFormat": "american", "date": snap_iso},
-        quota_floor,
     )
     return ((data.get("data") or []), data.get("timestamp")) if data else ([], None)
 
 
-def _fetch_event(sport_key, event_id, snap_iso, markets, api_key, quota_floor):
-    _check_quota(quota_floor)
+def _fetch_event(sport_key, event_id, snap_iso, markets, api_key):
     data, _ = _request(
         f"{BASE_URL}/v4/historical/sports/{sport_key}/events/{event_id}/odds",
         {"apiKey": api_key, "bookmakers": BOOKMAKERS,
          "markets": ",".join(markets), "oddsFormat": "american", "date": snap_iso},
-        quota_floor,
     )
     return (data.get("data"), data.get("timestamp")) if data else (None, None)
 
@@ -1036,7 +1068,7 @@ def _filter_markets(probe, all_markets, label):
     return covered
 
 
-def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
+def run_backfill(sport, api_key, games_limit, season_year, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Backfill: {sport.upper()} Season {season_year} ===")
 
@@ -1103,9 +1135,7 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
 
         gl_all, pp_all = [], []
 
-        # Bulk call: h2h, spreads, totals. One call returns all games on the
-        # slate; we find this event in the response by event_id.
-        bulk_data, bulk_ts = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key, quota_floor)
+        bulk_data, bulk_ts = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key)
         ev_obj = next((e for e in bulk_data if e.get("id") == eid), None)
         if ev_obj:
             gl, pp = _parse_bookmakers(ev_obj, eid, sport_key, bulk_ts)
@@ -1113,24 +1143,22 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         else:
             print("    Not found in bulk response.")
 
-        # Per-event call: all game period markets beyond the bulk three.
         if event_feat:
-            ef_obj, ef_ts = _fetch_event(sport_key, eid, snap, event_feat, api_key, quota_floor)
+            ef_obj, ef_ts = _fetch_event(sport_key, eid, snap, event_feat, api_key)
             if ef_obj:
                 gl, pp = _parse_bookmakers(ef_obj, eid, sport_key, ef_ts)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
 
-        # Per-event calls: props and alt props. Gated on PROPS_CUTOFF.
         if cdt and cdt >= PROPS_CUTOFF:
             if prop_markets:
-                p_obj, p_ts = _fetch_event(sport_key, eid, snap, prop_markets, api_key, quota_floor)
+                p_obj, p_ts = _fetch_event(sport_key, eid, snap, prop_markets, api_key)
                 if p_obj:
                     gl, pp = _parse_bookmakers(p_obj, eid, sport_key, p_ts)
                     gl_all.extend(gl); pp_all.extend(pp)
                 time.sleep(1.5)
             if alt_markets:
-                a_obj, a_ts = _fetch_event(sport_key, eid, snap, alt_markets, api_key, quota_floor)
+                a_obj, a_ts = _fetch_event(sport_key, eid, snap, alt_markets, api_key)
                 if a_obj:
                     gl, pp = _parse_bookmakers(a_obj, eid, sport_key, a_ts)
                     gl_all.extend(gl); pp_all.extend(pp)
@@ -1162,7 +1190,8 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
                    keys=["event_id", "market_key", "bookmaker_key", "player_name", "outcome_name"])
             pp_n = len(pp_all)
 
-        print(f"    events=1  game_lines={gl_n}  player_props={pp_n}  credits={_remaining_credits}")
+        spent = (_used_current - _used_at_start) if (_used_at_start and _used_current) else 0
+        print(f"    events=1  game_lines={gl_n}  player_props={pp_n}  spent_this_run={spent}")
         time.sleep(1.5)
 
 
@@ -1182,19 +1211,19 @@ PROBE_WORST_CASE = {
 }
 
 
-def _probe_select_events(sport, sport_key, api_key, quota_floor):
+def _probe_select_events(sport, sport_key, api_key):
     candidate_dates = PROBE_BEST_CASE[sport] + PROBE_WORST_CASE[sport]
     selected, seen_ids = [], set()
 
     for target_date in candidate_dates:
         snap_iso = f"{target_date.isoformat()}T12:00:00Z"
-        resp = _api_discover_snapshot(sport_key, snap_iso, api_key, quota_floor)
+        resp = _api_discover_snapshot(sport_key, snap_iso, api_key)
         if not resp:
             continue
         events = resp.get("data") or []
         hops = 0
         while not events and resp.get("next_timestamp") and hops < 7:
-            resp = _api_discover_snapshot(sport_key, resp["next_timestamp"], api_key, quota_floor)
+            resp = _api_discover_snapshot(sport_key, resp["next_timestamp"], api_key)
             if not resp:
                 break
             events = resp.get("data") or []
@@ -1211,10 +1240,10 @@ def _probe_select_events(sport, sport_key, api_key, quota_floor):
     return selected[:5]
 
 
-def run_probe(sport, api_key, quota_floor, engine):
+def run_probe(sport, api_key, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Probe: {sport.upper()} ({sport_key}) ===")
-    events = _probe_select_events(sport, sport_key, api_key, quota_floor)
+    events = _probe_select_events(sport, sport_key, api_key)
     if not events:
         print("  No sample events found. Skipping.")
         return
@@ -1247,16 +1276,16 @@ def run_probe(sport, api_key, quota_floor, engine):
                             coverage[mk]["outcomes"] += len(outs)
                             coverage[mk]["hits"] += 1
 
-        bulk_data, _ = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key, quota_floor)
+        bulk_data, _ = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key)
         _tally(next((e for e in bulk_data if e.get("id") == eid), None))
-        ef_obj, _ = _fetch_event(sport_key, eid, snap, EVENT_FEATURED_MARKETS[sport], api_key, quota_floor)
+        ef_obj, _ = _fetch_event(sport_key, eid, snap, EVENT_FEATURED_MARKETS[sport], api_key)
         _tally(ef_obj)
         time.sleep(1.5)
         if cdt and cdt >= PROPS_CUTOFF:
-            p_obj, _ = _fetch_event(sport_key, eid, snap, PROP_MARKETS[sport], api_key, quota_floor)
+            p_obj, _ = _fetch_event(sport_key, eid, snap, PROP_MARKETS[sport], api_key)
             _tally(p_obj)
             time.sleep(1.5)
-            a_obj, _ = _fetch_event(sport_key, eid, snap, ALT_PROP_MARKETS[sport], api_key, quota_floor)
+            a_obj, _ = _fetch_event(sport_key, eid, snap, ALT_PROP_MARKETS[sport], api_key)
             _tally(a_obj)
             time.sleep(1.5)
         else:
@@ -1312,16 +1341,6 @@ _NBA_PLAYER_ALIASES = {
 
 
 def _normalize_name(name):
-    """
-    Canonical form for player name matching.
-
-    Steps applied to both the odds API name and the sport-specific player name:
-      1. Unicode NFD decomposition to strip combining marks
-      2. Lowercase
-      3. Strip generational suffixes (Jr, Sr, II, III, IV)
-      4. Remove all characters except a-z, 0-9, and space
-      5. Collapse whitespace and strip
-    """
     if not name:
         return ""
     name = unicodedata.normalize("NFD", name)
@@ -1335,7 +1354,6 @@ def _normalize_name(name):
 def run_mappings(sport, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Mappings: {sport.upper()} ===")
-
     if sport == "nba":
         _run_mappings_nba(sport_key, engine)
     elif sport == "mlb":
@@ -1474,43 +1492,29 @@ def _run_mappings_nba(sport_key, engine):
 # UPCOMING mode
 # ---------------------------------------------------------------------------
 
-def _fetch_upcoming_bulk(sport_key, markets, api_key, quota_floor):
-    _check_quota(quota_floor)
+def _fetch_upcoming_bulk(sport_key, markets, api_key):
     data, _ = _request(
         f"{BASE_URL}/v4/sports/{sport_key}/odds",
         {"apiKey": api_key, "bookmakers": BOOKMAKERS,
          "markets": ",".join(markets), "oddsFormat": "american"},
-        quota_floor,
     )
     if data is None: return []
     if isinstance(data, list): return data
     return data.get("data") or []
 
 
-def _fetch_upcoming_event(sport_key, event_id, markets, api_key, quota_floor):
-    _check_quota(quota_floor)
+def _fetch_upcoming_event(sport_key, event_id, markets, api_key):
     data, _ = _request(
         f"{BASE_URL}/v4/sports/{sport_key}/events/{event_id}/odds",
         {"apiKey": api_key, "bookmakers": BOOKMAKERS,
          "markets": ",".join(markets), "oddsFormat": "american"},
-        quota_floor,
     )
     if data is None: return None, None
     if isinstance(data, dict) and "bookmakers" in data: return data, None
     return data.get("data"), None
 
 
-def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
-    """
-    Fetch current pre-game lines for upcoming games.
-
-    Game day scoping uses Eastern time. All NBA games are scheduled on an
-    Eastern calendar date regardless of when they tip off in UTC. A 10 PM ET
-    game has a UTC commence_time of 03:00 the next UTC day, so UTC-based date
-    grouping incorrectly splits same-day games. Converting to Eastern before
-    extracting the date ensures all games on the same slate are grouped
-    together.
-    """
+def run_upcoming(sport, api_key, days_ahead, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Upcoming: {sport.upper()} (next {days_ahead} game day(s)) ===")
 
@@ -1519,7 +1523,7 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
     prop_markets = _filter_markets(probe, PROP_MARKETS[sport], "prop")
     alt_markets  = _filter_markets(probe, ALT_PROP_MARKETS[sport], "alt_prop")
 
-    all_upcoming = _fetch_upcoming_bulk(sport_key, ["h2h"], api_key, quota_floor)
+    all_upcoming = _fetch_upcoming_bulk(sport_key, ["h2h"], api_key)
     if not all_upcoming:
         print("  No upcoming events found.")
         return
@@ -1580,26 +1584,26 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
         print(f"\n  {away_name or ''} @ {home_name or ''} ({eastern_date or '?'})")
 
         gl_all, pp_all = [], []
-        bulk_data = _fetch_upcoming_bulk(sport_key, BULK_FEATURED_MARKETS, api_key, quota_floor)
+        bulk_data = _fetch_upcoming_bulk(sport_key, BULK_FEATURED_MARKETS, api_key)
         ev_obj = next((e for e in bulk_data if e.get("id") == eid), None)
         if ev_obj:
             gl, pp = _parse_bookmakers(ev_obj, eid, sport_key, snap_ts)
             gl_all.extend(gl); pp_all.extend(pp)
         time.sleep(1.5)
         if event_feat:
-            ef_obj, _ = _fetch_upcoming_event(sport_key, eid, event_feat, api_key, quota_floor)
+            ef_obj, _ = _fetch_upcoming_event(sport_key, eid, event_feat, api_key)
             if ef_obj:
                 gl, pp = _parse_bookmakers(ef_obj, eid, sport_key, snap_ts)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
         if prop_markets:
-            p_obj, _ = _fetch_upcoming_event(sport_key, eid, prop_markets, api_key, quota_floor)
+            p_obj, _ = _fetch_upcoming_event(sport_key, eid, prop_markets, api_key)
             if p_obj:
                 gl, pp = _parse_bookmakers(p_obj, eid, sport_key, snap_ts)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
         if alt_markets:
-            a_obj, _ = _fetch_upcoming_event(sport_key, eid, alt_markets, api_key, quota_floor)
+            a_obj, _ = _fetch_upcoming_event(sport_key, eid, alt_markets, api_key)
             if a_obj:
                 gl, pp = _parse_bookmakers(a_obj, eid, sport_key, snap_ts)
                 gl_all.extend(gl); pp_all.extend(pp)
@@ -1630,8 +1634,9 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
                    keys=["event_id", "market_key", "bookmaker_key", "player_name", "outcome_name"])
             pp_total += len(pp_all)
 
+        spent = (_used_current - _used_at_start) if (_used_at_start and _used_current) else 0
         print(f"    game_lines={len(gl_all)}  player_props={len(pp_all)}  "
-              f"game_id={game_id or 'not resolved'}  credits={_remaining_credits}")
+              f"game_id={game_id or 'not resolved'}  spent_this_run={spent}")
 
     print(f"\n  Totals: {len(in_window)} events  game_lines={gl_total}  player_props={pp_total}")
 
@@ -1641,6 +1646,8 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
 # ---------------------------------------------------------------------------
 
 def main():
+    global _budget
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode",
                         choices=["discover", "probe", "backfill", "mappings", "upcoming"],
@@ -1653,15 +1660,20 @@ def main():
                         help="Discover mode: max calendar dates to walk per run. Default 50.")
     parser.add_argument("--days-ahead", type=int, default=1, dest="days_ahead",
                         help="Upcoming mode: calendar days ahead to fetch.")
-    parser.add_argument("--quota-floor",type=int, default=50000, dest="quota_floor")
+    parser.add_argument("--budget",     type=int, default=0, dest="budget",
+                        help="Max credits to spend this invocation. 0 = unlimited.")
     args = parser.parse_args()
+
+    _budget = args.budget
+    if _budget > 0:
+        print(f"Budget cap: {_budget:,} credits for this run.")
 
     api_key = os.environ.get("ODDS_API_KEY")
     if not api_key and args.mode not in ("mappings",):
         raise EnvironmentError("ODDS_API_KEY environment variable is not set.")
 
     sports = ["nfl", "nba", "mlb"] if args.sport == "all" else [args.sport]
-    print(f"Mode: {args.mode}  Sports: {', '.join(sports)}  Quota floor: {args.quota_floor:,}")
+    print(f"Mode: {args.mode}  Sports: {', '.join(sports)}")
 
     engine = get_engine()
     ensure_schema(engine)
@@ -1669,18 +1681,18 @@ def main():
     for sport in sports:
         season_year = args.season or _default_season(sport)
         if args.mode == "discover":
-            run_discover(sport, api_key, args.quota_floor, season_year, args.snapshots, engine)
+            run_discover(sport, api_key, season_year, args.snapshots, engine)
         elif args.mode == "probe":
-            run_probe(sport, api_key, args.quota_floor, engine)
+            run_probe(sport, api_key, engine)
         elif args.mode == "backfill":
-            run_backfill(sport, api_key, args.quota_floor, args.games, season_year, engine)
+            run_backfill(sport, api_key, args.games, season_year, engine)
         elif args.mode == "mappings":
             run_mappings(sport, engine)
         elif args.mode == "upcoming":
-            run_upcoming(sport, api_key, args.quota_floor, args.days_ahead, engine)
+            run_upcoming(sport, api_key, args.days_ahead, engine)
 
-    if _remaining_credits is not None:
-        print(f"\nFinal credits remaining: {_remaining_credits:,}")
+    if _used_at_start is not None and _used_current is not None:
+        print(f"\nTotal credits spent this run: {_used_current - _used_at_start:,}")
 
 
 if __name__ == "__main__":
