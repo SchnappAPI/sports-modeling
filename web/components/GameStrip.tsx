@@ -5,6 +5,8 @@ export interface Game {
   gameDate: string;
   gameStatus: number | null;
   gameStatusText: string | null;
+  homeTeamId: number;
+  awayTeamId: number;
   homeTeamAbbr: string;
   awayTeamAbbr: string;
   homeTeamName: string;
