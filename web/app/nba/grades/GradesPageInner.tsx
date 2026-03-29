@@ -44,6 +44,11 @@ function fmtPct(val: number | null): string {
   return `${(val * 100).toFixed(0)}%`;
 }
 
+function todayLocal(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 export default function GradesPageInner() {
   const searchParams = useSearchParams();
   const [grades, setGrades] = useState<GradeRow[]>([]);
@@ -51,11 +56,18 @@ export default function GradesPageInner() {
   const [error, setError] = useState<string | null>(null);
 
   const backGameId = searchParams.get('gameId');
+  // Use date from URL param if present (passed from main page date picker),
+  // otherwise fall back to today.
+  const gradeDate = searchParams.get('date') ?? todayLocal();
+
   const backHref = backGameId ? `/nba?gameId=${backGameId}` : '/nba';
 
   useEffect(() => {
-    const today = new Date().toISOString().slice(0, 10);
-    fetch(`/api/grades?date=${today}`)
+    const url = backGameId
+      ? `/api/grades?date=${gradeDate}&gameId=${backGameId}`
+      : `/api/grades?date=${gradeDate}`;
+
+    fetch(url)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -63,7 +75,9 @@ export default function GradesPageInner() {
       .then((data) => setGrades(data.grades ?? []))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [gradeDate, backGameId]);
+
+  const displayDate = gradeDate;
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -74,6 +88,7 @@ export default function GradesPageInner() {
         <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
           At a Glance
         </span>
+        <span className="text-xs text-gray-600">{displayDate}</span>
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
             {grades.length} props
@@ -86,7 +101,7 @@ export default function GradesPageInner() {
         {error && <div className="text-sm text-red-400">Error: {error}</div>}
         {!loading && !error && grades.length === 0 && (
           <div className="text-sm text-gray-500">
-            No grades available for today. Grades populate nightly after the ETL runs.
+            No grades available for {displayDate}. Grades populate nightly after the ETL runs.
           </div>
         )}
         {!loading && !error && grades.length > 0 && (
