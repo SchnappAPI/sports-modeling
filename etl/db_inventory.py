@@ -1,6 +1,5 @@
 """
-Diagnostic: inspect alternate prop market keys and sample line values
-from both odds.upcoming_player_props and odds.player_props.
+Diagnostic: alternate prop market keys and line values from odds tables.
 """
 import os, time
 import pandas as pd
@@ -29,52 +28,55 @@ def run():
     engine = get_engine()
     print('Connected.\n')
 
-    # 1. All distinct market_keys containing 'alternate' in upcoming props
-    print('=== upcoming_player_props: alternate market_keys ===')
+    print('=== 1. upcoming_player_props: distinct alternate market_keys (all bookmakers) ===')
     df = pd.read_sql(text("""
-        SELECT DISTINCT market_key, bookmaker_key, outcome_name
+        SELECT DISTINCT market_key, bookmaker_key
         FROM odds.upcoming_player_props
         WHERE market_key LIKE '%alternate%'
         ORDER BY market_key, bookmaker_key
     """), engine)
-    print(df.to_string(index=False))
+    print(df.to_string(index=False) if not df.empty else '  (no rows)')
 
-    # 2. Sample line values per alternate market from upcoming props
-    print('\n=== upcoming_player_props: sample outcome_point per alt market (fanduel, Over) ===')
+    print('\n=== 2. upcoming_player_props: line values per alt market (fanduel Over) ===')
     df2 = pd.read_sql(text("""
         SELECT
             market_key,
+            COUNT(DISTINCT outcome_point) AS distinct_lines,
+            MIN(outcome_point) AS min_line,
+            MAX(outcome_point) AS max_line,
             STRING_AGG(CAST(CAST(outcome_point AS DECIMAL(6,1)) AS VARCHAR), ', ')
                 WITHIN GROUP (ORDER BY outcome_point) AS line_values
         FROM (
             SELECT DISTINCT market_key, outcome_point
             FROM odds.upcoming_player_props
-            WHERE market_key   LIKE '%alternate%'
-              AND bookmaker_key = 'fanduel'
-              AND outcome_name  = 'Over'
-              AND outcome_point IS NOT NULL
+            WHERE market_key    LIKE '%alternate%'
+              AND bookmaker_key  = 'fanduel'
+              AND outcome_name   = 'Over'
+              AND outcome_point  IS NOT NULL
         ) x
         GROUP BY market_key
         ORDER BY market_key
     """), engine)
-    print(df2.to_string(index=False))
+    print(df2.to_string(index=False) if not df2.empty else '  (no rows)')
 
-    # 3. Same check against historical player_props for broader coverage
-    print('\n=== player_props: distinct alternate market_keys (fanduel) ===')
+    print('\n=== 3. player_props: distinct alternate market_keys (fanduel, last 60 days) ===')
     df3 = pd.read_sql(text("""
         SELECT DISTINCT market_key
         FROM odds.player_props
-        WHERE market_key   LIKE '%alternate%'
-          AND bookmaker_key = 'fanduel'
+        WHERE market_key    LIKE '%alternate%'
+          AND bookmaker_key  = 'fanduel'
+          AND commence_time >= DATEADD(day, -60, GETUTCDATE())
         ORDER BY market_key
     """), engine)
-    print(df3.to_string(index=False))
+    print(df3.to_string(index=False) if not df3.empty else '  (no rows)')
 
-    # 4. Sample line values per alt market from historical props (last 30 days)
-    print('\n=== player_props: outcome_point per alt market (fanduel, Over, last 30 days) ===')
+    print('\n=== 4. player_props: line values per alt market (fanduel Over, last 60 days) ===')
     df4 = pd.read_sql(text("""
         SELECT
             market_key,
+            COUNT(DISTINCT outcome_point) AS distinct_lines,
+            MIN(outcome_point) AS min_line,
+            MAX(outcome_point) AS max_line,
             STRING_AGG(CAST(CAST(outcome_point AS DECIMAL(6,1)) AS VARCHAR), ', ')
                 WITHIN GROUP (ORDER BY outcome_point) AS line_values
         FROM (
@@ -84,12 +86,12 @@ def run():
               AND bookmaker_key  = 'fanduel'
               AND outcome_name   = 'Over'
               AND outcome_point  IS NOT NULL
-              AND commence_time >= DATEADD(day, -30, GETUTCDATE())
+              AND commence_time >= DATEADD(day, -60, GETUTCDATE())
         ) x
         GROUP BY market_key
         ORDER BY market_key
     """), engine)
-    print(df4.to_string(index=False))
+    print(df4.to_string(index=False) if not df4.empty else '  (no rows)')
 
 if __name__ == '__main__':
     run()
