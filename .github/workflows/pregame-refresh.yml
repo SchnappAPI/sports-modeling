@@ -1,8 +1,10 @@
 name: Pre-Game Refresh
 
 # Runs every 30 minutes from 10:00 AM ET (UTC 14:00) through 11:00 PM ET (UTC 03:00).
-# Chains odds ETL (upcoming) then grading (upcoming) so grades reflect
-# the latest published lines before tip-off.
+# Chains odds ETL (upcoming) then grading in intraday mode.
+#
+# Intraday grading only re-grades standard lines where the posted line has
+# moved since the last grade. Alternate lines are never re-graded intraday.
 #
 # Game gate: a Python one-liner checks nba.schedule for any non-final game
 # starting within 3 hours. If none qualify, both ETL steps are skipped.
@@ -112,7 +114,7 @@ for row in rows:
     gst = row.get("game_status_text") or ""
     m   = time_re.search(gst)
     if not m:
-        print("true")   # unparseable, include conservatively
+        print("true")
         sys.exit(0)
     hour   = int(m.group(1))
     minute = int(m.group(2))
@@ -138,6 +140,6 @@ PYEOF
         if: steps.gate.outputs.run == 'true'
         run: python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
 
-      - name: Run grading (upcoming)
+      - name: Run grading (intraday — moved standard lines only)
         if: steps.gate.outputs.run == 'true'
-        run: python grading/grade_props.py --mode upcoming
+        run: python grading/grade_props.py --mode intraday
