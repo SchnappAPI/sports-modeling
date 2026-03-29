@@ -29,7 +29,7 @@ Modes
 
 Featured market routing
   Bulk /odds endpoint:         h2h, spreads, totals only.
-  Per-event /events/{id}/odds: all other markets.
+  Per-event /events/{id}/odds: all other markets (game period + props + alts).
 
 Datetime handling
   All datetime values stored in row dicts are naive UTC strings (no tzinfo).
@@ -47,6 +47,14 @@ Response shapes
   Live bulk /odds:     top-level list (no "data" wrapper).
   Historical /events:  top-level dict with keys timestamp, previous_timestamp,
                        next_timestamp, data (list of event objects).
+
+Snapshot timing
+  Historical backfill uses commence_time - 1 minute as the snapshot request
+  time. The API returns the snapshot at or before the requested time, so this
+  yields the closest available pre-game line for each event.
+
+Bookmaker
+  FanDuel only (bookmakers=fanduel). DraftKings not stored.
 """
 
 import argparse
@@ -89,63 +97,131 @@ SEASON_MONTHS = {
 }
 
 PROPS_CUTOFF = datetime(2023, 5, 3, 5, 30, 0, tzinfo=timezone.utc)
-BOOKMAKERS   = "fanduel,draftkings"
+BOOKMAKERS   = "fanduel"
 
 # ---------------------------------------------------------------------------
 # Market constants
+#
+# These lists are derived from the AllMarkets audit run against live FanDuel
+# data (March-April 2026). GamePeriod markets that are genuinely team-level
+# (team_totals and all variants) are kept here for completeness but routed to
+# game_lines rather than player_props by the parser.
 # ---------------------------------------------------------------------------
 
+# The three core markets sent via the cheaper bulk /odds endpoint.
+# One bulk call returns all games on the slate.
 BULK_FEATURED_MARKETS = ["h2h", "spreads", "totals"]
 
-NFL_EVENT_FEATURED = [
-    "team_totals",
-    "h2h_h1", "spreads_h1", "totals_h1",
-    "h2h_q1", "spreads_q1", "totals_q1",
-    "team_totals_h1",
+# ---------------------------------------------------------------------------
+# NFL markets
+# ---------------------------------------------------------------------------
+NFL_EVENT_GAME_PERIOD = [
+    # moneyline
+    "h2h_h1", "h2h_h2",
+    "h2h_q1", "h2h_q2", "h2h_q3", "h2h_q4",
+    # spreads
+    "spreads_h1", "spreads_h2",
+    "spreads_q1", "spreads_q2", "spreads_q3", "spreads_q4",
+    # totals
+    "totals_h1", "totals_h2",
+    "totals_q1", "totals_q2", "totals_q3", "totals_q4",
+    # team totals
+    "team_totals", "team_totals_h1", "team_totals_h2",
+    # alternate game lines
+    "alternate_spreads", "alternate_spreads_h1", "alternate_spreads_h2",
+    "alternate_spreads_q1", "alternate_spreads_q2", "alternate_spreads_q3", "alternate_spreads_q4",
+    "alternate_totals", "alternate_totals_h1", "alternate_totals_h2",
+    "alternate_totals_q1", "alternate_totals_q2", "alternate_totals_q3", "alternate_totals_q4",
+    "alternate_team_totals",
 ]
+
 NFL_PROPS = [
     "player_pass_yds", "player_pass_tds", "player_pass_attempts",
     "player_pass_completions", "player_pass_interceptions",
     "player_pass_longest_completion",
-    "player_rush_yds", "player_rush_longest",
+    "player_rush_yds", "player_rush_longest", "player_rush_attempts",
     "player_reception_yds", "player_receptions", "player_reception_longest",
     "player_pass_rush_yds", "player_rush_reception_yds",
     "player_1st_td", "player_anytime_td", "player_last_td",
+    "player_sacks",
 ]
+
 NFL_ALT_PROPS = [
     "player_pass_yds_alternate", "player_pass_tds_alternate",
-    "player_rush_yds_alternate", "player_reception_yds_alternate",
-    "player_receptions_alternate", "player_pass_rush_yds_alternate",
+    "player_pass_attempts_alternate", "player_pass_completions_alternate",
+    "player_pass_interceptions_alternate",
+    "player_rush_yds_alternate", "player_rush_attempts_alternate",
+    "player_reception_yds_alternate", "player_receptions_alternate",
     "player_rush_reception_yds_alternate",
 ]
 
-NBA_EVENT_FEATURED = [
-    "team_totals",
-    "h2h_h1", "spreads_h1", "totals_h1",
-    "h2h_q1", "spreads_q1", "totals_q1",
-    "team_totals_h1",
+# ---------------------------------------------------------------------------
+# NBA markets
+# ---------------------------------------------------------------------------
+NBA_EVENT_GAME_PERIOD = [
+    # moneyline
+    "h2h_h1", "h2h_h2",
+    "h2h_q1", "h2h_q2", "h2h_q3", "h2h_q4",
+    # spreads
+    "spreads_h1",
+    "spreads_q1", "spreads_q2", "spreads_q3", "spreads_q4",
+    # totals
+    "totals_h1",
+    "totals_q1", "totals_q2", "totals_q3", "totals_q4",
+    # team totals
+    "team_totals", "team_totals_h1",
+    "team_totals_q1", "team_totals_q2", "team_totals_q3", "team_totals_q4",
+    # alternate game lines
+    "alternate_spreads", "alternate_totals",
+    "alternate_team_totals",
 ]
+
 NBA_PROPS = [
-    "player_points", "player_rebounds", "player_assists",
-    "player_threes", "player_blocks", "player_steals",
-    "player_points_rebounds_assists", "player_points_rebounds",
-    "player_points_assists", "player_rebounds_assists",
-    "player_first_basket", "player_double_double", "player_triple_double",
+    "player_points", "player_points_q1",
+    "player_rebounds",
+    "player_assists",
+    "player_threes",
+    "player_blocks",
+    "player_steals",
+    "player_points_rebounds_assists",
+    "player_points_rebounds",
+    "player_points_assists",
+    "player_rebounds_assists",
+    "player_first_basket", "player_first_team_basket",
+    "player_double_double", "player_triple_double",
 ]
+
 NBA_ALT_PROPS = [
-    "player_points_alternate", "player_rebounds_alternate",
-    "player_assists_alternate", "player_blocks_alternate",
-    "player_steals_alternate", "player_threes_alternate",
-    "player_points_assists_alternate", "player_points_rebounds_alternate",
+    "player_points_alternate",
+    "player_rebounds_alternate",
+    "player_assists_alternate",
+    "player_blocks_alternate",
+    "player_steals_alternate",
+    "player_threes_alternate",
+    "player_points_assists_alternate",
+    "player_points_rebounds_alternate",
     "player_rebounds_assists_alternate",
     "player_points_rebounds_assists_alternate",
 ]
 
-MLB_EVENT_FEATURED = [
+# ---------------------------------------------------------------------------
+# MLB markets
+# ---------------------------------------------------------------------------
+MLB_EVENT_GAME_PERIOD = [
+    # moneyline
+    "h2h_1st_5_innings", "h2h_1st_7_innings",
+    # spreads
+    "spreads_1st_5_innings", "spreads_1st_7_innings",
+    # totals
+    "totals_1st_5_innings", "totals_1st_7_innings",
+    # team totals
     "team_totals",
-    "h2h_1st_5_innings", "spreads_1st_5_innings", "totals_1st_5_innings",
-    "totals_1st_1_innings",
+    # alternate game lines
+    "alternate_spreads", "alternate_spreads_1st_5_innings",
+    "alternate_totals", "alternate_totals_1st_5_innings",
+    "alternate_team_totals",
 ]
+
 MLB_PROPS = [
     "batter_home_runs", "batter_first_home_run",
     "batter_hits", "batter_total_bases", "batter_rbis",
@@ -155,31 +231,40 @@ MLB_PROPS = [
     "pitcher_strikeouts", "pitcher_hits_allowed", "pitcher_walks",
     "pitcher_earned_runs",
 ]
+
 MLB_ALT_PROPS = [
     "batter_total_bases_alternate", "batter_home_runs_alternate",
     "batter_hits_alternate", "batter_rbis_alternate",
+    "batter_runs_scored_alternate",
+    "batter_singles_alternate", "batter_doubles_alternate", "batter_triples_alternate",
     "pitcher_strikeouts_alternate",
 ]
 
+# ---------------------------------------------------------------------------
+# Aggregated market dicts
+# ---------------------------------------------------------------------------
+
 ALL_FEATURED_MARKETS = {
-    "nfl": BULK_FEATURED_MARKETS + NFL_EVENT_FEATURED,
-    "nba": BULK_FEATURED_MARKETS + NBA_EVENT_FEATURED,
-    "mlb": BULK_FEATURED_MARKETS + MLB_EVENT_FEATURED,
+    "nfl": BULK_FEATURED_MARKETS + NFL_EVENT_GAME_PERIOD,
+    "nba": BULK_FEATURED_MARKETS + NBA_EVENT_GAME_PERIOD,
+    "mlb": BULK_FEATURED_MARKETS + MLB_EVENT_GAME_PERIOD,
 }
 EVENT_FEATURED_MARKETS = {
-    "nfl": NFL_EVENT_FEATURED,
-    "nba": NBA_EVENT_FEATURED,
-    "mlb": MLB_EVENT_FEATURED,
+    "nfl": NFL_EVENT_GAME_PERIOD,
+    "nba": NBA_EVENT_GAME_PERIOD,
+    "mlb": MLB_EVENT_GAME_PERIOD,
 }
 PROP_MARKETS     = {"nfl": NFL_PROPS,     "nba": NBA_PROPS,     "mlb": MLB_PROPS}
 ALT_PROP_MARKETS = {"nfl": NFL_ALT_PROPS, "nba": NBA_ALT_PROPS, "mlb": MLB_ALT_PROPS}
 
 # Markets that are always team-level, never player-level.
-# The odds API puts the team name in the outcome description for these markets,
+# The odds API populates the outcome description with a team name for these,
 # which would otherwise cause them to be misrouted into player_props.
 TEAM_LEVEL_MARKETS = {
-    "team_totals", "team_totals_h1", "team_totals_q1",
-    "team_totals_h2", "team_totals_q2", "team_totals_q3", "team_totals_q4",
+    "team_totals",
+    "team_totals_h1", "team_totals_h2",
+    "team_totals_q1", "team_totals_q2", "team_totals_q3", "team_totals_q4",
+    "alternate_team_totals",
 }
 
 # ---------------------------------------------------------------------------
@@ -851,9 +936,6 @@ def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
     Routing logic:
       - Any market in TEAM_LEVEL_MARKETS always goes to game_lines, even if the
         odds API populates the outcome description field with a team name.
-        (team_totals and team_totals_h1 use description to identify which team
-        the total applies to, which would otherwise cause them to be misrouted
-        into player_props.)
       - All other markets: outcomes with a description go to player_props;
         outcomes without a description go to game_lines.
     """
@@ -885,11 +967,18 @@ def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
 
 
 def _snap_iso(commence_raw):
+    """
+    Return a snapshot ISO string 1 minute before game start.
+
+    The historical odds API returns the snapshot at or before the requested
+    time. Requesting commence_time - 1 minute yields the closest available
+    pre-game line for each event.
+    """
     if not commence_raw:
         return None
     try:
         dt = datetime.fromisoformat(str(commence_raw).replace("Z", "+00:00"))
-        return (dt - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return (dt - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception:
         return None
 
@@ -1014,6 +1103,8 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
 
         gl_all, pp_all = [], []
 
+        # Bulk call: h2h, spreads, totals. One call returns all games on the
+        # slate; we find this event in the response by event_id.
         bulk_data, bulk_ts = _fetch_bulk(sport_key, snap, BULK_FEATURED_MARKETS, api_key, quota_floor)
         ev_obj = next((e for e in bulk_data if e.get("id") == eid), None)
         if ev_obj:
@@ -1022,6 +1113,7 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
         else:
             print("    Not found in bulk response.")
 
+        # Per-event call: all game period markets beyond the bulk three.
         if event_feat:
             ef_obj, ef_ts = _fetch_event(sport_key, eid, snap, event_feat, api_key, quota_floor)
             if ef_obj:
@@ -1029,6 +1121,7 @@ def run_backfill(sport, api_key, quota_floor, games_limit, season_year, engine):
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
 
+        # Per-event calls: props and alt props. Gated on PROPS_CUTOFF.
         if cdt and cdt >= PROPS_CUTOFF:
             if prop_markets:
                 p_obj, p_ts = _fetch_event(sport_key, eid, snap, prop_markets, api_key, quota_floor)
@@ -1180,11 +1273,11 @@ def run_probe(sport, api_key, quota_floor, engine):
         bks = sorted(cov["bk_set"])
         mtype = (
             "bulk_featured" if mkt in BULK_FEATURED_MARKETS
-            else "event_featured" if mkt in EVENT_FEATURED_MARKETS[sport]
+            else "event_game_period" if mkt in EVENT_FEATURED_MARKETS[sport]
             else "alt_prop" if mkt in ALT_PROP_MARKETS[sport]
             else "prop"
         )
-        print(f"  {'COVERED    ' if covered else 'NOT COVERED'} {mkt:<45} "
+        print(f"  {'COVERED    ' if covered else 'NOT COVERED'} {mkt:<50} "
               f"{len(bks)} books  {cov['outcomes']} outcomes")
         rows.append({
             "sport_key": sport_key, "market_key": mkt, "market_type": mtype,
@@ -1203,16 +1296,11 @@ def run_probe(sport, api_key, quota_floor, engine):
 # MAPPINGS mode
 # ---------------------------------------------------------------------------
 
-# Suffixes that appear in odds API names but are absent from nba.players,
-# or vice versa. Stripped from both sides before comparison so matching
-# is robust to inconsistent suffix usage across sources.
 _NAME_SUFFIXES = re.compile(
     r'\b(jr\.?|sr\.?|ii|iii|iv)\s*$',
     re.IGNORECASE
 )
 
-# Maps Odds API player names to their canonical NBA player names.
-# Add entries here whenever a player's Odds API name doesn't match nba.players.
 _NBA_PLAYER_ALIASES = {
     "Moe Wagner":          "Moritz Wagner",
     "Herb Jones":          "Herbert Jones",
@@ -1227,8 +1315,8 @@ def _normalize_name(name):
     """
     Canonical form for player name matching.
 
-    Steps applied to both the odds API name and the nba.players name:
-      1. Unicode NFD decomposition to strip combining marks (ö -> o, é -> e)
+    Steps applied to both the odds API name and the sport-specific player name:
+      1. Unicode NFD decomposition to strip combining marks
       2. Lowercase
       3. Strip generational suffixes (Jr, Sr, II, III, IV)
       4. Remove all characters except a-z, 0-9, and space
@@ -1249,128 +1337,137 @@ def run_mappings(sport, engine):
     print(f"\n=== Mappings: {sport.upper()} ===")
 
     if sport == "nba":
-        with engine.connect() as conn:
-            tricode_to_id = {r[0]: r[1] for r in conn.execute(
-                text("SELECT team_tricode, team_id FROM nba.teams")
-            ).fetchall()}
-        team_rows = [
-            {"odds_team_name": n, "sport_key": sport_key,
-             "team_tricode": tc, "team_id": tricode_to_id.get(tc)}
-            for n, tc in NBA_TEAM_NAME_TO_TRICODE.items()
-        ]
-        upsert(engine, clean_dataframe(pd.DataFrame(team_rows)),
-               schema="odds", table="team_map", keys=["odds_team_name"])
-        print(f"  team_map: {len(team_rows)} rows.")
+        _run_mappings_nba(sport_key, engine)
+    elif sport == "mlb":
+        print("  MLB mappings not yet implemented. Skipping.")
+    elif sport == "nfl":
+        print("  NFL mappings not yet implemented. Skipping.")
 
-        with engine.connect() as conn:
-            db_players = conn.execute(
-                text("SELECT player_id, player_name FROM nba.players")
-            ).fetchall()
-        norm_to_pid  = {_normalize_name(n): pid  for pid, n in db_players}
-        norm_to_name = {_normalize_name(n): n    for _, n  in db_players}
 
-        with engine.connect() as conn:
-            hist_names = [r[0] for r in conn.execute(
-                text("SELECT DISTINCT player_name FROM odds.player_props WHERE sport_key = :sk"),
-                {"sk": sport_key},
-            ).fetchall() if r[0]]
-            upco_names = [r[0] for r in conn.execute(
-                text("SELECT DISTINCT player_name FROM odds.upcoming_player_props WHERE sport_key = :sk"),
-                {"sk": sport_key},
-            ).fetchall() if r[0]]
-        all_names = list(set(hist_names + upco_names))
+def _run_mappings_nba(sport_key, engine):
+    with engine.connect() as conn:
+        tricode_to_id = {r[0]: r[1] for r in conn.execute(
+            text("SELECT team_tricode, team_id FROM nba.teams")
+        ).fetchall()}
+    team_rows = [
+        {"odds_team_name": n, "sport_key": sport_key,
+         "team_tricode": tc, "team_id": tricode_to_id.get(tc)}
+        for n, tc in NBA_TEAM_NAME_TO_TRICODE.items()
+    ]
+    upsert(engine, clean_dataframe(pd.DataFrame(team_rows)),
+           schema="odds", table="team_map", keys=["odds_team_name"])
+    print(f"  team_map: {len(team_rows)} rows.")
 
-        pm_rows = []
-        matched = unmatched = 0
-        for oname in all_names:
-            lookup_name = _NBA_PLAYER_ALIASES.get(oname, oname)
-            norm  = _normalize_name(lookup_name)
-            pid   = norm_to_pid.get(norm)
-            mname = norm_to_name.get(norm)
-            if pid: matched += 1
-            else:
-                unmatched += 1
-                print(f"  [no_match] {oname!r}")
-            pm_rows.append({"odds_player_name": oname, "sport_key": sport_key,
-                            "player_id": pid, "matched_name": mname,
-                            "match_method": "exact" if pid else "no_match"})
-        if pm_rows:
-            upsert(engine, clean_dataframe(pd.DataFrame(pm_rows)),
-                   schema="odds", table="player_map", keys=["odds_player_name", "sport_key"])
-            print(f"  player_map: {len(pm_rows)} rows ({matched} matched, {unmatched} unmatched).")
+    with engine.connect() as conn:
+        db_players = conn.execute(
+            text("SELECT player_id, player_name FROM nba.players")
+        ).fetchall()
+    norm_to_pid  = {_normalize_name(n): pid  for pid, n in db_players}
+    norm_to_name = {_normalize_name(n): n    for _, n  in db_players}
 
-        with engine.connect() as conn:
-            all_events = conn.execute(
-                text("""
-                    SELECT e.event_id, e.commence_time, e.home_team, e.away_team
-                    FROM odds.events e
-                    WHERE e.sport_key = :sk
-                """),
-                {"sk": sport_key},
-            ).fetchall()
+    with engine.connect() as conn:
+        hist_names = [r[0] for r in conn.execute(
+            text("SELECT DISTINCT player_name FROM odds.player_props WHERE sport_key = :sk"),
+            {"sk": sport_key},
+        ).fetchall() if r[0]]
+        upco_names = [r[0] for r in conn.execute(
+            text("SELECT DISTINCT player_name FROM odds.upcoming_player_props WHERE sport_key = :sk"),
+            {"sk": sport_key},
+        ).fetchall() if r[0]]
+    all_names = list(set(hist_names + upco_names))
 
-        if not all_events:
-            print("  event_game_map: no events to map.")
+    pm_rows = []
+    matched = unmatched = 0
+    for oname in all_names:
+        lookup_name = _NBA_PLAYER_ALIASES.get(oname, oname)
+        norm  = _normalize_name(lookup_name)
+        pid   = norm_to_pid.get(norm)
+        mname = norm_to_name.get(norm)
+        if pid: matched += 1
         else:
-            with engine.connect() as conn:
-                nba_games = conn.execute(
-                    text("SELECT game_id, game_date, home_team_tricode, away_team_tricode FROM nba.games")
-                ).fetchall()
-            game_lookup = {(str(gdate), htc): gid for gid, gdate, htc, atc in nba_games}
+            unmatched += 1
+            print(f"  [no_match] {oname!r}")
+        pm_rows.append({"odds_player_name": oname, "sport_key": sport_key,
+                        "player_id": pid, "matched_name": mname,
+                        "match_method": "exact" if pid else "no_match"})
+    if pm_rows:
+        upsert(engine, clean_dataframe(pd.DataFrame(pm_rows)),
+               schema="odds", table="player_map", keys=["odds_player_name", "sport_key"])
+        print(f"  player_map: {len(pm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
-            with engine.connect() as conn:
-                name_to_tc = {r[0]: r[1] for r in conn.execute(
-                    text("SELECT odds_team_name, team_tricode FROM odds.team_map WHERE sport_key = :sk"),
-                    {"sk": sport_key},
-                ).fetchall()}
+    with engine.connect() as conn:
+        all_events = conn.execute(
+            text("""
+                SELECT e.event_id, e.commence_time, e.home_team, e.away_team
+                FROM odds.events e
+                WHERE e.sport_key = :sk
+            """),
+            {"sk": sport_key},
+        ).fetchall()
 
-            egm_rows = []
-            matched = unmatched = 0
-            for eid, ctime, home_name, away_name in all_events:
-                try:
-                    ctime_dt = (
-                        datetime.fromisoformat(str(ctime).replace("Z", "+00:00"))
-                        if isinstance(ctime, str) else ctime
-                    )
-                    if hasattr(ctime_dt, "tzinfo") and ctime_dt.tzinfo is None:
-                        ctime_dt = ctime_dt.replace(tzinfo=timezone.utc)
-                    utc_date      = ctime_dt.date() if hasattr(ctime_dt, "date") else None
-                    utc_prev_date = (utc_date - timedelta(days=1)) if utc_date else None
-                except Exception:
-                    utc_date = utc_prev_date = None
+    if not all_events:
+        print("  event_game_map: no events to map.")
+        return
 
-                home_tc = name_to_tc.get(home_name)
-                away_tc = name_to_tc.get(away_name)
+    with engine.connect() as conn:
+        nba_games = conn.execute(
+            text("SELECT game_id, game_date, home_team_tricode, away_team_tricode FROM nba.games")
+        ).fetchall()
+    game_lookup = {(str(gdate), htc): gid for gid, gdate, htc, atc in nba_games}
 
-                game_id = None
-                used_date = None
-                if home_tc:
-                    for candidate in [utc_date, utc_prev_date]:
-                        if candidate is None:
-                            continue
-                        game_id = game_lookup.get((str(candidate), home_tc))
-                        if game_id:
-                            used_date = candidate
-                            break
+    with engine.connect() as conn:
+        name_to_tc = {r[0]: r[1] for r in conn.execute(
+            text("SELECT odds_team_name, team_tricode FROM odds.team_map WHERE sport_key = :sk"),
+            {"sk": sport_key},
+        ).fetchall()}
 
+    egm_rows = []
+    matched = unmatched = 0
+    for eid, ctime, home_name, away_name in all_events:
+        try:
+            ctime_dt = (
+                datetime.fromisoformat(str(ctime).replace("Z", "+00:00"))
+                if isinstance(ctime, str) else ctime
+            )
+            if hasattr(ctime_dt, "tzinfo") and ctime_dt.tzinfo is None:
+                ctime_dt = ctime_dt.replace(tzinfo=timezone.utc)
+            utc_date      = ctime_dt.date() if hasattr(ctime_dt, "date") else None
+            utc_prev_date = (utc_date - timedelta(days=1)) if utc_date else None
+        except Exception:
+            utc_date = utc_prev_date = None
+
+        home_tc = name_to_tc.get(home_name)
+        away_tc = name_to_tc.get(away_name)
+
+        game_id = None
+        used_date = None
+        if home_tc:
+            for candidate in [utc_date, utc_prev_date]:
+                if candidate is None:
+                    continue
+                game_id = game_lookup.get((str(candidate), home_tc))
                 if game_id:
-                    matched += 1
-                else:
-                    unmatched += 1
+                    used_date = candidate
+                    break
 
-                egm_rows.append({
-                    "event_id":     eid,
-                    "sport_key":    sport_key,
-                    "game_id":      game_id,
-                    "game_date":    str(used_date) if used_date else (str(utc_date) if utc_date else None),
-                    "home_tricode": home_tc,
-                    "away_tricode": away_tc,
-                    "match_method": "date_home_tricode" if game_id else "unmatched",
-                })
+        if game_id:
+            matched += 1
+        else:
+            unmatched += 1
 
-            upsert(engine, clean_dataframe(pd.DataFrame(egm_rows)),
-                   schema="odds", table="event_game_map", keys=["event_id"])
-            print(f"  event_game_map: {len(egm_rows)} rows ({matched} matched, {unmatched} unmatched).")
+        egm_rows.append({
+            "event_id":     eid,
+            "sport_key":    sport_key,
+            "game_id":      game_id,
+            "game_date":    str(used_date) if used_date else (str(utc_date) if utc_date else None),
+            "home_tricode": home_tc,
+            "away_tricode": away_tc,
+            "match_method": "date_home_tricode" if game_id else "unmatched",
+        })
+
+    upsert(engine, clean_dataframe(pd.DataFrame(egm_rows)),
+           schema="odds", table="event_game_map", keys=["event_id"])
+    print(f"  event_game_map: {len(egm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
 
 # ---------------------------------------------------------------------------
@@ -1431,7 +1528,6 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
     today_eastern    = now_eastern.date()
     cutoff_eastern   = today_eastern + timedelta(days=days_ahead - 1)
 
-    # Filter to events whose Eastern game date falls within the window
     in_window = [
         ev for ev in all_upcoming
         if _cdt(ev) and _eastern_date(_cdt(ev)) is not None
@@ -1443,7 +1539,6 @@ def run_upcoming(sport, api_key, quota_floor, days_ahead, engine):
         return
 
     if days_ahead <= 1:
-        # Scope to today's Eastern date only
         in_window = [ev for ev in in_window if _eastern_date(_cdt(ev)) == today_eastern]
         print(f"  Next game day: {today_eastern} ({len(in_window)} events).")
     else:
