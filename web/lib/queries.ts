@@ -229,20 +229,23 @@ export async function getBoxscore(gameId: string): Promise<BoxscoreRow[]> {
     .request()
     .input('gameId', mssql.VarChar, gameId)
     .query<BoxscoreRow>(
+      // LEFT JOIN nba.players so players whose player_id was written by the
+      // live ETL but not yet in nba.players (two-ways, call-ups) are still
+      // returned. Fall back to pbs.player_name when the join misses.
       `SELECT
-         pbs.player_id        AS playerId,
-         p.player_name        AS playerName,
-         pbs.team_id          AS teamId,
-         pbs.period           AS period,
-         dl.starter_status    AS starterStatus,
+         pbs.player_id                              AS playerId,
+         COALESCE(p.player_name, pbs.player_name)  AS playerName,
+         pbs.team_id                                AS teamId,
+         pbs.period                                 AS period,
+         dl.starter_status                          AS starterStatus,
          pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk, pbs.tov,
          pbs.minutes AS min,
          pbs.fg3m, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta
        FROM nba.player_box_score_stats pbs
-       JOIN nba.players p ON p.player_id = pbs.player_id
+       LEFT JOIN nba.players p ON p.player_id = pbs.player_id
        LEFT JOIN nba.daily_lineups dl
          ON dl.game_id = pbs.game_id
-         AND dl.player_name = p.player_name
+         AND dl.player_name = COALESCE(p.player_name, pbs.player_name)
        WHERE pbs.game_id = @gameId
        ORDER BY
          CASE WHEN dl.starter_status = 'Starter' THEN 0 ELSE 1 END,
@@ -287,22 +290,24 @@ export async function getPlayerGames(
     .input('playerId', mssql.Int, playerId)
     .input('lastN', mssql.Int, lastN)
     .query<PlayerGameRow>(
+      // Uses nba.schedule (not nba.games) so in-progress games appear in the
+      // log alongside completed ones. nba.games only contains final box scores.
       `WITH player_team AS (
          SELECT team_id FROM nba.players WHERE player_id = @playerId
        ),
        team_games AS (
          SELECT TOP (@lastN)
-           g.game_id,
-           g.game_date,
-           g.home_team_id,
+           s.game_id,
+           s.game_date,
+           s.home_team_id,
            ht.team_tricode AS home_tricode,
            at.team_tricode AS away_tricode
-         FROM nba.games g
-         JOIN nba.teams ht ON ht.team_id = g.home_team_id
-         JOIN nba.teams at ON at.team_id = g.away_team_id
-         WHERE g.home_team_id = (SELECT team_id FROM player_team)
-            OR g.away_team_id = (SELECT team_id FROM player_team)
-         ORDER BY g.game_date DESC
+         FROM nba.schedule s
+         JOIN nba.teams ht ON ht.team_id = s.home_team_id
+         JOIN nba.teams at ON at.team_id = s.away_team_id
+         WHERE s.home_team_id = (SELECT team_id FROM player_team)
+            OR s.away_team_id = (SELECT team_id FROM player_team)
+         ORDER BY s.game_date DESC
        ),
        player_quarters AS (
          SELECT
@@ -380,6 +385,11 @@ export interface GradeRow {
   sampleSize20: number | null;
   weightedHitRate: number | null;
   grade: number | null;
+  compositeGrade: number | null;
+  trendGrade: number | null;
+  momentumGrade: number | null;
+  matchupGrade: number | null;
+  regressionGrade: number | null;
   oppTeamId: number | null;
   position: string | null;
   gameId: string | null;
@@ -431,6 +441,11 @@ export async function getGrades(
        dg.sample_size_20    AS sampleSize20,
        dg.weighted_hit_rate AS weightedHitRate,
        dg.grade             AS grade,
+       dg.composite_grade   AS compositeGrade,
+       dg.trend_grade       AS trendGrade,
+       dg.momentum_grade    AS momentumGrade,
+       dg.matchup_grade     AS matchupGrade,
+       dg.regression_grade  AS regressionGrade,
        CASE
          WHEN p.team_id = s.home_team_id THEN s.away_team_id
          ELSE s.home_team_id
@@ -449,7 +464,7 @@ export async function getGrades(
      LEFT JOIN nba.teams at ON at.team_id = s.away_team_id
      WHERE CONVERT(VARCHAR(10), dg.grade_date, 120) = @gradeDate
      ${gameFilter}
-     ORDER BY dg.grade DESC`
+     ORDER BY COALESCE(dg.composite_grade, dg.grade) DESC`
   );
   return result.recordset;
 }
@@ -469,6 +484,7 @@ export interface PlayerPropRow {
   sampleSize60: number | null;
   sampleSize20: number | null;
   grade: number | null;
+  compositeGrade: number | null;
 }
 
 export async function getPlayerProps(playerId: number): Promise<PlayerPropRow[]> {
@@ -508,7 +524,8 @@ export async function getPlayerProps(playerId: number): Promise<PlayerPropRow[]>
          dg.hit_rate_20       AS hitRate20,
          dg.sample_size_60    AS sampleSize60,
          dg.sample_size_20    AS sampleSize20,
-         dg.grade             AS grade
+         dg.grade             AS grade,
+         dg.composite_grade   AS compositeGrade
        FROM common.daily_grades dg
        LEFT JOIN best_price bp
          ON bp.event_id = dg.event_id AND bp.market_key = dg.market_key AND bp.player_id = dg.player_id
