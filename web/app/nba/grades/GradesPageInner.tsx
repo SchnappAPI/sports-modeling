@@ -11,6 +11,7 @@ interface GradeRow {
   playerName: string;
   marketKey: string;
   lineValue: number;
+  overPrice: number | null;
   hitRate60: number | null;
   hitRate20: number | null;
   sampleSize60: number | null;
@@ -44,6 +45,20 @@ function fmtPct(val: number | null): string {
   return `${(val * 100).toFixed(0)}%`;
 }
 
+// Format an American odds integer: +120, -110, etc.
+function fmtOdds(price: number | null): string {
+  if (price == null) return '-';
+  return price >= 0 ? `+${price}` : `${price}`;
+}
+
+// Colour the odds: grey for standard juice (-105 to -115), lighter for long shots.
+function oddsColor(price: number | null): string {
+  if (price == null) return 'text-gray-600';
+  if (price > 0) return 'text-gray-400';
+  if (price >= -115) return 'text-gray-500';  // standard juice
+  return 'text-gray-400';
+}
+
 function todayLocal(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -56,8 +71,6 @@ export default function GradesPageInner() {
   const [error, setError] = useState<string | null>(null);
 
   const backGameId = searchParams.get('gameId');
-  // Use date from URL param if present (passed from main page date picker),
-  // otherwise fall back to today.
   const gradeDate = searchParams.get('date') ?? todayLocal();
 
   const backHref = backGameId ? `/nba?gameId=${backGameId}` : '/nba';
@@ -112,6 +125,7 @@ export default function GradesPageInner() {
                   <th className="text-left py-1.5 pr-3 font-medium">Player</th>
                   <th className="text-left py-1.5 pr-3 font-medium">Market</th>
                   <th className="text-right py-1.5 px-2 font-medium">Line</th>
+                  <th className="text-right py-1.5 px-2 font-medium">Odds</th>
                   <th className="text-right py-1.5 px-2 font-medium">Grade</th>
                   <th className="text-right py-1.5 px-2 font-medium">L20%</th>
                   <th className="text-right py-1.5 px-2 font-medium">L60%</th>
@@ -132,6 +146,9 @@ export default function GradesPageInner() {
                     </td>
                     <td className="py-1.5 pr-3 text-gray-400">{formatMarket(row.marketKey)}</td>
                     <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.lineValue)}</td>
+                    <td className={`py-1.5 px-2 text-right tabular-nums ${oddsColor(row.overPrice)}`}>
+                      {fmtOdds(row.overPrice)}
+                    </td>
                     <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.grade)}`}>
                       {fmt(row.grade)}
                     </td>
