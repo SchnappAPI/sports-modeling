@@ -1,0 +1,53 @@
+name: Lineup Poll
+
+# Runs every 15 minutes from noon ET (UTC 16:00) through 11:00 PM ET (UTC 03:00).
+# GHA cron cannot span midnight in a single entry, so two schedules are used.
+# The window covers all NBA tip-off times including late west-coast games.
+
+on:
+  schedule:
+    - cron: '*/15 16-23 * * *'   # UTC 16:00-23:59 (noon-7:59 PM ET)
+    - cron: '*/15 0-3  * * *'    # UTC 00:00-03:59 (8:00-11:59 PM ET)
+  workflow_dispatch:
+    inputs:
+      hours_ahead:
+        description: "Include games starting within this many hours. Default: 4."
+        required: false
+        default: "4"
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+  NBA_PROXY_URL:      ${{ secrets.NBA_PROXY_URL }}
+
+jobs:
+  lineup-poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ODBC Driver 18
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y curl gnupg apt-transport-https
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+            | gpg --dearmor --batch --yes --no-tty \
+            | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
+          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update -q
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
+      - name: Install Python dependencies
+        run: pip install -r etl/requirements.txt
+
+      - name: Run lineup poll
+        run: |
+          HOURS="${{ github.event.inputs.hours_ahead }}"
+          if [ -z "$HOURS" ]; then HOURS="4"; fi
+          python etl/lineup_poll.py --hours-ahead "$HOURS"
