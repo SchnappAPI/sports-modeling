@@ -14,6 +14,7 @@ export default function NbaPageInner() {
   const [error, setError] = useState<string | null>(null);
 
   const activeGameId = searchParams.get('gameId');
+  const activeGame = games.find((g) => g.gameId === activeGameId) ?? null;
 
   useEffect(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -58,8 +59,12 @@ export default function NbaPageInner() {
       )}
 
       <div className="flex-1 px-4">
-        {activeGameId ? (
-          <GameTabs gameId={activeGameId} />
+        {activeGame ? (
+          <GameTabs
+            gameId={activeGame.gameId}
+            homeTeamId={activeGame.homeTeamId}
+            awayTeamId={activeGame.awayTeamId}
+          />
         ) : (
           !loading && <div className="py-6 text-sm text-gray-500">Select a game above.</div>
         )}

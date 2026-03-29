@@ -7,6 +7,8 @@ import BoxScoreTable from './BoxScoreTable';
 
 interface Props {
   gameId: string;
+  homeTeamId: number;
+  awayTeamId: number;
 }
 
 const TABS = ['roster', 'stats', 'boxscore'] as const;
@@ -18,7 +20,7 @@ const TAB_LABELS: Record<Tab, string> = {
   boxscore: 'Box Score',
 };
 
-export default function GameTabs({ gameId }: Props) {
+export default function GameTabs({ gameId, homeTeamId, awayTeamId }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const activeTab = (searchParams.get('tab') as Tab) ?? 'roster';
@@ -49,7 +51,13 @@ export default function GameTabs({ gameId }: Props) {
       </div>
 
       {activeTab === 'roster' && <RosterTable gameId={gameId} />}
-      {activeTab === 'stats' && <StatsTable gameId={gameId} />}
+      {activeTab === 'stats' && (
+        <StatsTable
+          gameId={gameId}
+          homeTeamId={homeTeamId}
+          awayTeamId={awayTeamId}
+        />
+      )}
       {activeTab === 'boxscore' && <BoxScoreTable gameId={gameId} />}
     </div>
   );
