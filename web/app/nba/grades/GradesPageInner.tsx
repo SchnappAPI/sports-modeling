@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 
@@ -30,35 +30,31 @@ interface DefenseCache {
 // Market helpers
 // ---------------------------------------------------------------------------
 
-// Maps any market key to a short abbreviation for display in the table.
 const MARKET_ABBR: Record<string, string> = {
-  player_points:                       'PTS',
-  player_points_alternate:             'PTS',
-  player_rebounds:                     'REB',
-  player_rebounds_alternate:           'REB',
-  player_assists:                      'AST',
-  player_assists_alternate:            'AST',
-  player_steals:                       'STL',
-  player_steals_alternate:             'STL',
-  player_blocks:                       'BLK',
-  player_blocks_alternate:             'BLK',
-  player_threes:                       '3PM',
-  player_threes_alternate:             '3PM',
-  player_turnovers:                    'TOV',
-  player_turnovers_alternate:          'TOV',
-  player_points_rebounds_assists:      'PRA',
-  player_points_rebounds_assists_alternate: 'PRA',
-  player_points_rebounds:              'PR',
-  player_points_rebounds_alternate:    'PR',
-  player_points_assists:               'PA',
-  player_points_assists_alternate:     'PA',
-  player_rebounds_assists:             'RA',
-  player_rebounds_assists_alternate:   'RA',
+  player_points:                           'PTS',
+  player_points_alternate:                 'PTS',
+  player_rebounds:                         'REB',
+  player_rebounds_alternate:               'REB',
+  player_assists:                          'AST',
+  player_assists_alternate:                'AST',
+  player_steals:                           'STL',
+  player_steals_alternate:                 'STL',
+  player_blocks:                           'BLK',
+  player_blocks_alternate:                 'BLK',
+  player_threes:                           '3PM',
+  player_threes_alternate:                 '3PM',
+  player_turnovers:                        'TOV',
+  player_turnovers_alternate:              'TOV',
+  player_points_rebounds_assists:          'PRA',
+  player_points_rebounds_assists_alternate:'PRA',
+  player_points_rebounds:                  'PR',
+  player_points_rebounds_alternate:        'PR',
+  player_points_assists:                   'PA',
+  player_points_assists_alternate:         'PA',
+  player_rebounds_assists:                 'RA',
+  player_rebounds_assists_alternate:       'RA',
 };
 
-// Maps a market key to the canonical (non-alternate) base key, used for
-// collapsing the market dropdown so "Points" and "Points (Alt)" become
-// a single "PTS" option.
 function baseMarket(key: string): string {
   return key.replace(/_alternate$/, '');
 }
@@ -71,7 +67,6 @@ function marketAbbr(key: string): string {
   return MARKET_ABBR[key] ?? key.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
 
-// Human-readable label for the dropdown (uses abbreviation only).
 function marketDropdownLabel(baseKey: string): string {
   return MARKET_ABBR[baseKey] ?? baseKey.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
@@ -150,6 +145,9 @@ function posGroup(position: string | null): string | null {
 const ODDS_MIN = -300;
 const ODDS_MAX = 300;
 
+// Refresh states
+type RefreshState = 'idle' | 'dispatching' | 'running' | 'reloading' | 'done' | 'error';
+
 export default function GradesPageInner() {
   const searchParams = useSearchParams();
   const [grades, setGrades]           = useState<GradeRow[]>([]);
@@ -160,22 +158,21 @@ export default function GradesPageInner() {
   const [oddsRange, setOddsRange]           = useState<[number, number]>([ODDS_MIN, ODDS_MAX]);
   const [defenseCache, setDefenseCache]     = useState<DefenseCache>({});
 
+  // Refresh state
+  const [refreshState, setRefreshState] = useState<RefreshState>('idle');
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const backGameId = searchParams.get('gameId');
   const gradeDate  = searchParams.get('date') ?? todayLocal();
   const backHref   = backGameId ? `/nba?gameId=${backGameId}` : '/nba';
 
-  useEffect(() => {
+  const loadGrades = useCallback(() => {
     setLoading(true);
     setError(null);
-    setSelectedMarket('');
-    setPlayerFilter('');
-    setOddsRange([ODDS_MIN, ODDS_MAX]);
-    setDefenseCache({});
-
     const url = backGameId
       ? `/api/grades?date=${gradeDate}&gameId=${backGameId}`
       : `/api/grades?date=${gradeDate}`;
-
     fetch(url)
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((data) => setGrades(data.grades ?? []))
@@ -183,22 +180,27 @@ export default function GradesPageInner() {
       .finally(() => setLoading(false));
   }, [gradeDate, backGameId]);
 
-  // After grades load, fetch defense data for each unique (oppTeamId, posGroup) pair.
+  useEffect(() => {
+    setSelectedMarket('');
+    setPlayerFilter('');
+    setOddsRange([ODDS_MIN, ODDS_MAX]);
+    setDefenseCache({});
+    loadGrades();
+  }, [loadGrades]);
+
+  // Defense data fetching
   useEffect(() => {
     if (grades.length === 0) return;
-
     const pairs = new Set<string>();
     for (const g of grades) {
       const pg = posGroup(g.position);
       if (g.oppTeamId && pg) pairs.add(`${g.oppTeamId}:${pg}`);
     }
-
     for (const key of pairs) {
       setDefenseCache((prev) => {
         if (prev[key]) return prev;
         return { ...prev, [key]: 'loading' };
       });
-
       const [tid, pg] = key.split(':');
       fetch(`/api/contextual?oppTeamId=${tid}&position=${pg}`)
         .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
@@ -215,23 +217,82 @@ export default function GradesPageInner() {
     }
   }, [grades]);
 
-  // Dropdown options: unique base market keys (collapse regular + alternate into one).
+  // Refresh: trigger workflow, poll until complete, reload grades
+  async function handleRefresh() {
+    if (refreshState !== 'idle' && refreshState !== 'done' && refreshState !== 'error') return;
+    setRefreshState('dispatching');
+    setRefreshError(null);
+
+    try {
+      const res = await fetch('/api/refresh-lines', { method: 'POST' });
+      if (!res.ok) throw new Error(`Dispatch failed: HTTP ${res.status}`);
+      const { runId } = await res.json();
+
+      if (!runId) {
+        // Couldn't get run ID — wait a flat 90s then reload
+        setRefreshState('running');
+        setTimeout(() => {
+          setRefreshState('reloading');
+          loadGrades();
+          setDefenseCache({});
+          setTimeout(() => setRefreshState('done'), 2000);
+        }, 90000);
+        return;
+      }
+
+      setRefreshState('running');
+
+      // Poll every 10 seconds for up to 5 minutes
+      let attempts = 0;
+      const maxAttempts = 30;
+      pollRef.current = setInterval(async () => {
+        attempts++;
+        try {
+          const sr = await fetch(`/api/refresh-status?runId=${runId}`);
+          if (!sr.ok) return;
+          const { status, conclusion } = await sr.json();
+          if (status === 'completed') {
+            if (pollRef.current) clearInterval(pollRef.current);
+            if (conclusion === 'success') {
+              setRefreshState('reloading');
+              loadGrades();
+              setDefenseCache({});
+              setTimeout(() => setRefreshState('done'), 2000);
+            } else {
+              setRefreshState('error');
+              setRefreshError('Workflow completed but did not succeed.');
+            }
+          } else if (attempts >= maxAttempts) {
+            if (pollRef.current) clearInterval(pollRef.current);
+            setRefreshState('error');
+            setRefreshError('Timed out waiting for refresh to complete.');
+          }
+        } catch {
+          // transient poll error, keep trying
+        }
+      }, 10000);
+
+    } catch (e) {
+      setRefreshState('error');
+      setRefreshError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Cleanup poll on unmount
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
   const marketOptions = useMemo(() => {
     const seen = new Set<string>();
     const opts: string[] = [];
     for (const row of grades) {
       const base = baseMarket(row.marketKey);
-      if (!seen.has(base)) {
-        seen.add(base);
-        opts.push(base);
-      }
+      if (!seen.has(base)) { seen.add(base); opts.push(base); }
     }
     return opts.sort();
   }, [grades]);
 
   const filtered = useMemo(() => {
     let rows = grades;
-    // When a base market is selected, include both the standard and alternate keys.
     if (selectedMarket) {
       rows = rows.filter((r) =>
         r.marketKey === selectedMarket || r.marketKey === `${selectedMarket}_alternate`
@@ -265,13 +326,30 @@ export default function GradesPageInner() {
     return { rank, label: ordinal(rank) };
   }
 
-  // Build the player link: go to the player page, pass gameId (if available) for
-  // matchup context. No date needed since all rows on this page share gradeDate.
   function playerHref(row: GradeRow): string {
     const params = new URLSearchParams();
     if (backGameId) params.set('gameId', backGameId);
     const qs = params.toString();
     return `/nba/player/${row.playerId}${qs ? `?${qs}` : ''}`;
+  }
+
+  const isRefreshing = refreshState === 'dispatching' || refreshState === 'running' || refreshState === 'reloading';
+
+  function refreshLabel(): string {
+    if (refreshState === 'dispatching') return 'Starting...';
+    if (refreshState === 'running')     return 'Refreshing...';
+    if (refreshState === 'reloading')   return 'Loading...';
+    if (refreshState === 'done')        return 'Updated';
+    if (refreshState === 'error')       return 'Retry';
+    return 'Refresh Lines';
+  }
+
+  function refreshBtnClass(): string {
+    const base = 'text-xs px-3 py-1 rounded border transition-colors font-medium';
+    if (isRefreshing)                   return `${base} border-gray-700 text-gray-600 cursor-not-allowed`;
+    if (refreshState === 'done')        return `${base} border-green-800 text-green-600`;
+    if (refreshState === 'error')       return `${base} border-red-800 text-red-500 hover:border-red-600`;
+    return `${base} border-gray-600 text-gray-400 hover:border-gray-400 hover:text-gray-200`;
   }
 
   return (
@@ -309,12 +387,33 @@ export default function GradesPageInner() {
           </>
         )}
 
+        {/* Refresh button — always visible once data has loaded */}
+        {!loading && !error && (
+          <button
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className={refreshBtnClass()}
+          >
+            {isRefreshing && (
+              <span className="inline-block w-2 h-2 rounded-full bg-current animate-pulse mr-1.5 align-middle" />
+            )}
+            {refreshLabel()}
+          </button>
+        )}
+
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
             {filtered.length}{filtered.length !== grades.length ? ` / ${grades.length}` : ''} props
           </span>
         )}
       </div>
+
+      {/* Refresh error message */}
+      {refreshState === 'error' && refreshError && (
+        <div className="px-4 py-2 text-xs text-red-400 border-b border-gray-800">
+          {refreshError}
+        </div>
+      )}
 
       {!loading && !error && grades.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
@@ -404,7 +503,7 @@ export default function GradesPageInner() {
                       <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">
                         {marketAbbr(row.marketKey)}
                       </td>
-                      <td className="py-1.5 px-1 text-center text-gray-500 text-xs">
+                      <td className="py-1.5 px-1 text-center text-xs">
                         {alt ? <span className="text-yellow-600">*</span> : ''}
                       </td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.lineValue)}</td>
