@@ -15,6 +15,22 @@
       "allowedRoles": ["anonymous"]
     },
     {
+      "route": "/sw.js",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/manifest.json",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/icon-192.png",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/icon-512.png",
+      "allowedRoles": ["anonymous"]
+    },
+    {
       "route": "/api/*",
       "allowedRoles": ["authenticated"]
     },
@@ -28,5 +44,50 @@
       "redirect": "/.auth/login/github",
       "statusCode": 302
     }
-  }
+  },
+  "globalHeaders": {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin"
+  },
+  "mimeTypes": {
+    ".json": "application/json",
+    ".webmanifest": "application/manifest+json"
+  },
+  "routes": [
+    {
+      "route": "/sw.js",
+      "allowedRoles": ["anonymous"],
+      "headers": {
+        "Cache-Control": "no-cache, no-store, must-revalidate"
+      }
+    },
+    {
+      "route": "/manifest.json",
+      "allowedRoles": ["anonymous"],
+      "headers": {
+        "Cache-Control": "public, max-age=86400"
+      }
+    },
+    {
+      "route": "/icon-192.png",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/icon-512.png",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/api/ping",
+      "allowedRoles": ["anonymous"]
+    },
+    {
+      "route": "/api/*",
+      "allowedRoles": ["authenticated"]
+    },
+    {
+      "route": "/*",
+      "allowedRoles": ["authenticated"]
+    }
+  ]
 }

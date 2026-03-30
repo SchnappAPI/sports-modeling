@@ -2,11 +2,12 @@ name: NBA Live Box Score
 
 on:
   schedule:
-    # Every 5 minutes UTC 17:00-06:00 (noon-1am ET, covers all tip times).
-    # GHA cron minimum resolution is 5 minutes.
+    # Every 2 minutes UTC 17:00-06:00 (noon-1am ET, covers all tip times).
+    # GHA cron minimum resolution is 5 minutes — use */2 which GHA rounds up
+    # to every 5 min in practice, but declare intent clearly for future reference.
     # Two entries to span midnight UTC.
-    - cron: '*/5 17-23 * * *'
-    - cron: '*/5 0-6 * * *'
+    - cron: '*/2 17-23 * * *'
+    - cron: '*/2 0-6 * * *'
   workflow_dispatch:
     inputs:
       force:
