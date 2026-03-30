@@ -19,6 +19,12 @@ Modes
                N missing events (--games N). Never calls the discovery
                endpoint. Discovery and odds fetching are fully decoupled.
 
+               Pass --fresh to truncate odds.events, odds.game_lines, and
+               odds.player_props for this sport+season before processing.
+               The discover catalog (odds.discovered_events) is never touched.
+               Each event is committed individually so a crash mid-run loses
+               only the in-progress event; all prior events are safe.
+
   mappings  -- Builds/refreshes odds.team_map, odds.player_map,
                odds.event_game_map. Run after backfill.
 
@@ -69,6 +75,13 @@ Discover deduplication
   requests can return the same event_id in multiple responses within a single
   batch. The upsert MERGE requires each source row to match at most one target
   row, so the rows list is deduplicated by event_id before staging.
+
+Fresh start
+  --fresh (backfill mode only) deletes all rows from odds.events,
+  odds.game_lines, and odds.player_props for the target sport_key + season_year
+  before processing begins. The discover catalog is untouched. This is safe to
+  run across parallel matrix jobs for different sport+season pairs because the
+  delete is scoped by sport_key AND season_year.
 """
 
 import argparse
@@ -1053,9 +1066,32 @@ def _filter_markets(probe, all_markets, label):
     return covered
 
 
-def run_backfill(sport, api_key, games_limit, season_year, engine):
+def run_backfill(sport, api_key, games_limit, season_year, engine, fresh=False):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Backfill: {sport.upper()} Season {season_year} ===")
+
+    # --fresh: clear loaded data for this sport+season so we start clean.
+    # The discover catalog (odds.discovered_events) is never touched.
+    # Each table is scoped by sport_key AND season_year so parallel matrix
+    # jobs for different pairs do not interfere with each other.
+    if fresh:
+        print("  --fresh: clearing odds.events, odds.game_lines, odds.player_props "
+              f"for {sport_key} season {season_year}...")
+        with engine.begin() as conn:
+            for tbl in ("game_lines", "player_props"):
+                result = conn.execute(
+                    text(f"DELETE FROM odds.{tbl} WHERE event_id IN ("
+                         "SELECT event_id FROM odds.events "
+                         "WHERE sport_key = :sk AND season_year = :sy)"),
+                    {"sk": sport_key, "sy": season_year},
+                )
+                print(f"    Deleted {result.rowcount} rows from odds.{tbl}.")
+            result = conn.execute(
+                text("DELETE FROM odds.events WHERE sport_key = :sk AND season_year = :sy"),
+                {"sk": sport_key, "sy": season_year},
+            )
+            print(f"    Deleted {result.rowcount} rows from odds.events.")
+        print("  Fresh start complete.")
 
     probe        = _load_probe_results(engine, sport_key)
     event_feat   = _filter_markets(probe, EVENT_FEATURED_MARKETS[sport], "event_featured")
@@ -1151,18 +1187,11 @@ def run_backfill(sport, api_key, games_limit, season_year, engine):
         else:
             print("    Before props cutoff. Skipping prop calls.")
 
-        upsert(engine,
-               clean_dataframe(pd.DataFrame([{
-                   "event_id":      eid,
-                   "sport_key":     sport_key,
-                   "sport_title":   ev["sport_title"],
-                   "commence_time": _to_utc_str(event["commence_time"]),
-                   "home_team":     ev["home_team"],
-                   "away_team":     ev["away_team"],
-                   "season_year":   season_year,
-               }])),
-               schema="odds", table="events", keys=["event_id"])
-
+        # Write game_lines and player_props first, then stamp odds.events as the
+        # completion marker. If the process crashes between the data writes and
+        # the events write, the next run will re-fetch this event (its event_id
+        # will not be in odds.events), and the upsert MERGE will overwrite the
+        # partial data cleanly. No data from previous events is lost.
         gl_n = pp_n = 0
         if gl_all:
             upsert(engine, clean_dataframe(pd.DataFrame(gl_all)),
@@ -1174,6 +1203,19 @@ def run_backfill(sport, api_key, games_limit, season_year, engine):
                    schema="odds", table="player_props",
                    keys=["event_id", "market_key", "bookmaker_key", "player_name", "outcome_name"])
             pp_n = len(pp_all)
+
+        # Stamp the event as complete. This is the idempotency gate.
+        upsert(engine,
+               clean_dataframe(pd.DataFrame([{
+                   "event_id":      eid,
+                   "sport_key":     sport_key,
+                   "sport_title":   ev["sport_title"],
+                   "commence_time": _to_utc_str(event["commence_time"]),
+                   "home_team":     ev["home_team"],
+                   "away_team":     ev["away_team"],
+                   "season_year":   season_year,
+               }])),
+               schema="odds", table="events", keys=["event_id"])
 
         spent = (_used_current - _used_at_start) if (_used_at_start and _used_current) else 0
         print(f"    events=1  game_lines={gl_n}  player_props={pp_n}  spent_this_run={spent}")
@@ -1606,10 +1648,6 @@ def run_upcoming(sport, api_key, days_ahead, engine):
             "game_id":       game_id,
         }])), schema="odds", table="upcoming_events", keys=["event_id"])
 
-        # Write to event_game_map so the grading engine can join on event_id.
-        # The grading query requires egm.game_id IS NOT NULL; without this row
-        # the upcoming props are invisible to grading even when they exist in
-        # odds.upcoming_player_props.
         upsert(engine, clean_dataframe(pd.DataFrame([{
             "event_id":     eid,
             "sport_key":    sport_key,
@@ -1661,6 +1699,10 @@ def main():
                         help="Upcoming mode: calendar days ahead to fetch.")
     parser.add_argument("--budget",     type=int, default=0, dest="budget",
                         help="Max credits to spend this invocation. 0 = unlimited.")
+    parser.add_argument("--fresh",      action="store_true",
+                        help="Backfill mode only: clear odds.events, odds.game_lines, and "
+                             "odds.player_props for this sport+season before processing. "
+                             "The discover catalog is never touched.")
     args = parser.parse_args()
 
     _budget = args.budget
@@ -1673,6 +1715,8 @@ def main():
 
     sports = ["nfl", "nba", "mlb"] if args.sport == "all" else [args.sport]
     print(f"Mode: {args.mode}  Sports: {', '.join(sports)}")
+    if args.fresh and args.mode == "backfill":
+        print("Fresh start enabled: loaded data will be cleared before processing.")
 
     engine = get_engine()
     ensure_schema(engine)
@@ -1684,7 +1728,8 @@ def main():
         elif args.mode == "probe":
             run_probe(sport, api_key, engine)
         elif args.mode == "backfill":
-            run_backfill(sport, api_key, args.games, season_year, engine)
+            run_backfill(sport, api_key, args.games, season_year, engine,
+                         fresh=args.fresh)
         elif args.mode == "mappings":
             run_mappings(sport, engine)
         elif args.mode == "upcoming":

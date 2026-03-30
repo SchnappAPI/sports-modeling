@@ -5,7 +5,14 @@ name: Odds Backfill
 # before hitting the 6-hour GitHub Actions hard limit. Any pairs that did not
 # finish trigger an automatic follow-up dispatch of this same workflow covering
 # only the incomplete pairs. Re-dispatching is safe and idempotent -- already-
-# loaded event_ids are always skipped.
+# loaded event_ids are always skipped because odds.events acts as the
+# completion marker per event.
+#
+# --fresh: When fresh_start=true on the first dispatch, each matrix job deletes
+# odds.events, odds.game_lines, and odds.player_props for its sport+season
+# before processing. The discover catalog (odds.discovered_events) is never
+# touched. Re-dispatched jobs never receive --fresh, so only the initial run
+# clears data; subsequent runs resume from where they left off.
 #
 # Credit cost: ~40 credits per game (4 calls x 10 credits each).
 # Time cost:   ~7 seconds per game (4 calls + sleeps).
@@ -16,6 +23,10 @@ name: Odds Backfill
 on:
   workflow_dispatch:
     inputs:
+      fresh_start:
+        description: "Clear odds.events/game_lines/player_props for each sport+season before loading. discover catalog is untouched. Set true only on the initial run."
+        required: false
+        default: "false"
       games_per_batch:
         description: "Events per Python call. Controls checkpoint frequency, not total per job."
         required: false
@@ -75,7 +86,6 @@ jobs:
 
     name: backfill-${{ matrix.sport }}-${{ matrix.season }}
 
-    # Expose completion status so the re-dispatch job can see which pairs finished.
     outputs:
       done: ${{ steps.run.outputs.done }}
 
@@ -106,6 +116,7 @@ jobs:
         env:
           SPORT:              ${{ matrix.sport }}
           SEASON:             ${{ matrix.season }}
+          FRESH_START:        ${{ github.event.inputs.fresh_start    || 'false' }}
           GAMES_PER_BATCH:    ${{ github.event.inputs.games_per_batch    || '150' }}
           TIME_LIMIT_MINUTES: ${{ github.event.inputs.time_limit_minutes || '300' }}
           BUDGET_PER_JOB:     ${{ github.event.inputs.budget_per_job     || '0' }}
@@ -115,8 +126,9 @@ jobs:
           START_SECONDS=$SECONDS
           TIME_LIMIT_SECONDS=$(( TIME_LIMIT_MINUTES * 60 ))
           DONE="false"
+          FIRST_CALL=true
 
-          echo "Sport=$SPORT  Season=$SEASON  Limit=${TIME_LIMIT_MINUTES}min  Batch=${GAMES_PER_BATCH} games"
+          echo "Sport=$SPORT  Season=$SEASON  Limit=${TIME_LIMIT_MINUTES}min  Batch=${GAMES_PER_BATCH} games  Fresh=$FRESH_START"
 
           while true; do
             ELAPSED=$(( SECONDS - START_SECONDS ))
@@ -131,12 +143,22 @@ jobs:
             echo ""
             echo "--- elapsed=${ELAPSED}s remaining=${REMAINING}s ---"
 
+            # --fresh is only passed on the very first call within this job.
+            # Subsequent loop iterations resume normally so already-completed
+            # events within the same batch window are not re-fetched.
+            FRESH_FLAG=""
+            if [ "$FIRST_CALL" = "true" ] && [ "$FRESH_START" = "true" ]; then
+              FRESH_FLAG="--fresh"
+            fi
+            FIRST_CALL=false
+
             OUTPUT=$(python etl/odds_etl.py \
               --mode backfill \
               --sport "$SPORT" \
               --season "$SEASON" \
               --games "$GAMES_PER_BATCH" \
-              --budget "$BUDGET_PER_JOB" 2>&1) || {
+              --budget "$BUDGET_PER_JOB" \
+              $FRESH_FLAG 2>&1) || {
                 echo "Python exited non-zero. Stopping."
                 echo "$OUTPUT"
                 exit 1
@@ -153,9 +175,6 @@ jobs:
 
           echo "done=$DONE" >> $GITHUB_OUTPUT
 
-  # After all matrix jobs finish (or time out), check which pairs are incomplete
-  # and fire a new dispatch covering only those pairs. This continues until every
-  # pair reports done=true, at which point no re-dispatch is triggered.
   redispatch:
     needs: backfill
     runs-on: ubuntu-latest
@@ -163,37 +182,13 @@ jobs:
     steps:
       - name: Check for incomplete pairs and re-dispatch
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SPORTS_INPUT:   ${{ github.event.inputs.sports   || 'nba,mlb,nfl' }}
-          SEASONS_INPUT:  ${{ github.event.inputs.seasons  || '2023,2024,2025' }}
+          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
+          SPORTS_INPUT:    ${{ github.event.inputs.sports   || 'nba,mlb,nfl' }}
+          SEASONS_INPUT:   ${{ github.event.inputs.seasons  || '2023,2024,2025' }}
           GAMES_PER_BATCH: ${{ github.event.inputs.games_per_batch    || '150' }}
           TIME_LIMIT:      ${{ github.event.inputs.time_limit_minutes || '300' }}
           BUDGET:          ${{ github.event.inputs.budget_per_job     || '0' }}
         run: |
-          # The matrix job outputs are not directly iterable from a fan-in job,
-          # so we re-check completion by querying the DB via Python inline.
-          # If any pair still has unloaded events, dispatch this workflow again
-          # with only the remaining sports and seasons.
-          #
-          # Since we cannot run Python here without setup, we use a simpler
-          # approach: if any matrix job ended without done=true (i.e. it timed
-          # out rather than completing), re-dispatch the full input set.
-          # Already-loaded events are skipped by the Python script itself, so
-          # re-dispatching completed pairs wastes only a few seconds of setup.
-
-          NEEDS_JSON='${{ toJson(needs.backfill.result) }}'
-          echo "Matrix result: $NEEDS_JSON"
-
-          # Collect job results from the matrix outputs context.
-          # needs.backfill.result is the overall result (success/failure/cancelled).
-          # We re-dispatch unless the overall result was 'success' AND the job
-          # was not cancelled -- success here means all matrix jobs exited 0,
-          # but some may have exited 0 with done=false (time limit reached).
-          #
-          # Safest rule: re-dispatch unless we can confirm everything is done.
-          # The Python script itself is the source of truth; a wasted re-dispatch
-          # on a fully-complete set just prints "Nothing to do" and exits in seconds.
-
           RESULT="${{ needs.backfill.result }}"
           echo "Overall backfill result: $RESULT"
 
@@ -202,21 +197,16 @@ jobs:
             exit 0
           fi
 
-          # Check outputs: if ALL matrix jobs set done=true, skip re-dispatch.
-          # GitHub exposes matrix outputs as a JSON object keyed by job name.
-          # We parse it to see if any job did NOT complete.
           OUTPUTS='${{ toJson(needs.backfill.outputs) }}'
           echo "Job outputs: $OUTPUTS"
 
           ALL_DONE=$(echo "$OUTPUTS" | python3 -c "
-          import json, sys
-          data = json.load(sys.stdin)
-          # data is a dict of output values across all matrix jobs.
-          # If any value is not 'true', not all are done.
-          values = list(data.values()) if isinstance(data, dict) else []
-          all_done = all(v == 'true' for v in values) if values else False
-          print('true' if all_done else 'false')
-          ")
+import json, sys
+data = json.load(sys.stdin)
+values = list(data.values()) if isinstance(data, dict) else []
+all_done = all(v == 'true' for v in values) if values else False
+print('true' if all_done else 'false')
+")
 
           echo "All pairs done: $ALL_DONE"
 
@@ -226,6 +216,8 @@ jobs:
           fi
 
           echo "Some pairs incomplete. Triggering follow-up dispatch..."
+          # Re-dispatched runs never pass fresh_start=true.
+          # They resume from where they left off using odds.events as the gate.
           gh workflow run odds-backfill.yml \
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
@@ -233,6 +225,7 @@ jobs:
             --field seasons="$SEASONS_INPUT" \
             --field games_per_batch="$GAMES_PER_BATCH" \
             --field time_limit_minutes="$TIME_LIMIT" \
-            --field budget_per_job="$BUDGET"
+            --field budget_per_job="$BUDGET" \
+            --field fresh_start="false"
 
           echo "Follow-up dispatch triggered."
