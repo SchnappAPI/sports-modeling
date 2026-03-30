@@ -11,51 +11,6 @@
   },
   "routes": [
     {
-      "route": "/api/ping",
-      "allowedRoles": ["anonymous"]
-    },
-    {
-      "route": "/sw.js",
-      "allowedRoles": ["anonymous"]
-    },
-    {
-      "route": "/manifest.json",
-      "allowedRoles": ["anonymous"]
-    },
-    {
-      "route": "/icon-192.png",
-      "allowedRoles": ["anonymous"]
-    },
-    {
-      "route": "/icon-512.png",
-      "allowedRoles": ["anonymous"]
-    },
-    {
-      "route": "/api/*",
-      "allowedRoles": ["authenticated"]
-    },
-    {
-      "route": "/*",
-      "allowedRoles": ["authenticated"]
-    }
-  ],
-  "responseOverrides": {
-    "401": {
-      "redirect": "/.auth/login/github",
-      "statusCode": 302
-    }
-  },
-  "globalHeaders": {
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "strict-origin-when-cross-origin"
-  },
-  "mimeTypes": {
-    ".json": "application/json",
-    ".webmanifest": "application/manifest+json"
-  },
-  "routes": [
-    {
       "route": "/sw.js",
       "allowedRoles": ["anonymous"],
       "headers": {
@@ -89,5 +44,20 @@
       "route": "/*",
       "allowedRoles": ["authenticated"]
     }
-  ]
+  ],
+  "responseOverrides": {
+    "401": {
+      "redirect": "/.auth/login/github",
+      "statusCode": 302
+    }
+  },
+  "globalHeaders": {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin"
+  },
+  "mimeTypes": {
+    ".json": "application/json",
+    ".webmanifest": "application/manifest+json"
+  }
 }
