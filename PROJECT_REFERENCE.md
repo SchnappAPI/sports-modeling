@@ -8,7 +8,7 @@
 
 ## 1. What This Is
 
-Personal sports intelligence app for NBA, NFL, and MLB prop betting research. Loads each morning, shows today's games, lets you drill into any player's stats and historical averages in one tap, surfaces the highest-probability prop bets. No manual lookups.
+Personal sports intelligence app for NBA, NFL, and MLB prop betting research. Primary use case is mobile — small group of users install it as a PWA from Safari. Desktop also supported. Loads each morning, shows today's games, lets you drill into any player's stats and historical averages in one tap, surfaces the highest-probability prop bets. No manual lookups.
 
 Three layers:
 - **Data:** Azure SQL fed by nightly GitHub Actions ETL pipelines
@@ -21,7 +21,8 @@ Three layers:
 
 ### Azure SQL
 - Server: `sports-modeling-server.database.windows.net` / Database: `sports-modeling` / Login: `sqladmin`
-- Tier: General Purpose Serverless — auto-pauses; first connection of the day takes 20–60s
+- Tier: General Purpose Serverless (GP_S_Gen5_2) — auto-pauses; first connection of the day takes 20–60s
+- Free database offer is Applied — auto-pause delay cannot be changed while free offer is active
 - Firewall: `0.0.0.0–255.255.255.255` under Selected Networks (required for GitHub Actions)
 - Allow Azure Services: must remain ON
 - Connection: SQLAlchemy + pyodbc, ODBC Driver 18, `fast_executemany=True` (grading uses `False` to prevent NVARCHAR(MAX) truncation)
@@ -43,10 +44,24 @@ Three layers:
 - Deploy workflow: `.github/workflows/azure-static-web-apps-red-smoke-0bbe1fb10.yml`
 - Triggers on push to `main`; `app_location: /web`
 - Next.js 15.2.8, React 19
-- Auth: GitHub identity provider. All routes require `authenticated` role EXCEPT `/api/ping` which is `anonymous`. 401 redirects to GitHub login.
+- Auth: GitHub identity provider. All routes require `authenticated` role EXCEPT `/api/ping`, `/sw.js`, `/manifest.json`, `/icon.svg`, `/icon-192.png`, `/icon-512.png` which are `anonymous`. 401 redirects to GitHub login.
 - DB connection string in SWA application settings — env var: `AZURE_SQL_CONNECTION_STRING`
-- **GITHUB_PAT** (actions:write scope) must also be added to SWA app settings before the Refresh Lines button will work.
-- Status: **Steps 1–12 complete. Step 13 next.**
+- **GITHUB_PAT** (workflow scope) added to SWA app settings — required for Refresh Lines button. Already added.
+- Status: **Steps 1–13 complete. PWA configured. Mobile-first redesign pending.**
+
+### PWA
+- Manifest: `web/public/manifest.json` — name "Schnapp", starts at `/nba`, standalone display
+- Service worker: `web/public/sw.js` — caches app shell on install, network-first for HTML, cache-first for static assets, never caches API routes
+- Icon: `web/public/icon.svg` — dark background with white "S", scales to any size
+- PNG icons at `/icon-192.png` and `/icon-512.png` referenced in manifest but not yet generated. SVG covers all modern browsers. Generate PNGs via `web/scripts/generate-icons.mjs` if needed.
+- Install: open site in Safari on iPhone, tap Share, Add to Home Screen
+- sw.js served with `no-cache` header so updates deploy immediately
+
+### Route caching (next.config.mjs)
+- `/api/games`, `/api/roster`, `/api/player`: `s-maxage=60, stale-while-revalidate=120`
+- `/api/grades`, `/api/game-grades`: `s-maxage=90, stale-while-revalidate=180`
+- `/api/contextual`: `s-maxage=600, stale-while-revalidate=1200`
+- `/api/boxscore`, `/api/ping`: `no-cache, no-store`
 
 ### Local Dev
 - Node.js v24.12.0 installed. `npm run dev` blocked by ThreatLocker (next.cmd blocked).
@@ -84,7 +99,7 @@ grading/
 web/
   app/
     page.tsx                          # Redirects to /nba
-    layout.tsx / globals.css
+    layout.tsx / globals.css          # PWA meta tags, viewport, service worker registration
     nba/
       page.tsx                        # Suspense wrapper — LIVE
       NbaPageInner.tsx                # Game strip + GameTabs + At a Glance link — LIVE
@@ -112,15 +127,23 @@ web/
   components/
     GameStrip.tsx      # Scrollable game cards. Pulsing red dot for live games (gameStatus=2).
     GameTabs.tsx       # Live/Roster/Stats/Box Score tabs. Live tab only shown when gameStatus=2.
-    LiveBoxScore.tsx   # Polls /api/boxscore every 60s. Keys BoxScoreTable on tick to force remount.
+    LiveBoxScore.tsx   # Polls /api/boxscore every 30s. Keys BoxScoreTable on tick to force remount.
     MatchupDefense.tsx # Defense avg + rank table per stat for a position vs opponent. LIVE (step 12)
     RosterTable.tsx    # From nba.daily_lineups. Populated pre-game by lineup-poll.yml. Names link to player page.
     StatsTable.tsx     # From /api/team-averages. Player links pass opp= param for vs-split.
     BoxScoreTable.tsx  # Period filter (All/1Q/2Q/3Q/4Q/OT). Client-side aggregation. Player links.
+  public/
+    manifest.json     # PWA manifest — name Schnapp, start_url /nba, standalone
+    sw.js             # Service worker — app shell caching, network-first HTML, cache-first static
+    icon.svg          # PWA icon — dark bg + white S, scales to any size (sizes: "any" in manifest)
+    icon-192.png      # Not yet generated. Generate via web/scripts/generate-icons.mjs if needed.
+    icon-512.png      # Not yet generated. Generate via web/scripts/generate-icons.mjs if needed.
+  scripts/
+    generate-icons.mjs  # Generates PNG icons from SVG using sharp. Run once if PNGs are needed.
   lib/
     db.ts / queries.ts
-  staticwebapp.config.json   # /api/ping anonymous; all others authenticated
-  next.config.mjs            # serverExternalPackages: ['mssql']
+  staticwebapp.config.json   # Anonymous: /api/ping, /sw.js, /manifest.json, /icon.svg, /icon-*.png
+  next.config.mjs            # serverExternalPackages: ['mssql'] + route-level cache headers
   package.json               # next 15.2.8, react 19, mssql ^11, tailwindcss ^3
 ```
 
@@ -202,9 +225,9 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 
 ### Refresh Lines (step 12)
 - Workflow: `refresh-lines.yml` — manual dispatch only. No gate. Runs odds_etl upcoming + grading sequentially.
-- Triggered by POST to `/api/refresh-lines` using GITHUB_PAT with actions:write scope.
+- Triggered by POST to `/api/refresh-lines` using GITHUB_PAT with workflow scope.
 - `/api/refresh-status?runId=` polls the workflow run status by run ID.
-- **Prerequisite:** GITHUB_PAT must be added to SWA application settings in Azure Portal before this works.
+- GITHUB_PAT is already added to SWA app settings.
 
 ---
 
@@ -222,7 +245,7 @@ Falls back to hit_rate_60 if sample_size_20 < 5.
 **Writes to:** `common.daily_grades` — one row per (grade_date, event_id, player_id, market_key, bookmaker_key, line_value)
 
 **Grades UI features (live):**
-- `Imp%` column: raw implied probability from over_price, no vig removal. Formula: if price >= 0: 100/(price+100), else: abs(price)/(abs(price)+100). Displayed as percentage.
+- `Imp%` column: raw implied probability from over_price, no vig removal.
 - ODDS_MIN=-1000, ODDS_MAX=+3000 filter bounds
 - Market names abbreviated in display
 - Alternate lines collapsed into a dropdown per player/market
@@ -230,14 +253,7 @@ Falls back to hit_rate_60 if sample_size_20 < 5.
 - `Def` column: ordinal rank for matchup defense (fetched and cached per oppTeamId:posGroup pair)
 
 **Step 13 expansion plan (none implemented yet):**
-- `trend_grade`: direction and acceleration of hit rate over recent windows
-- `matchup_grade`: defense rank for the relevant stat and position (already computed for display; needs to be persisted)
-- `regression_grade`: distance from career average (mean reversion signal)
-- `streak_grade`: current streak above/below line
-- `adaptive_grade`: composite weighted by recency with exponential decay
-- `correlation_grade`: multi-stat correlation signal
-- `composite_grade`: final blended score across all components
-- `flags`: JSON array of signal tags (e.g., "hot-streak", "tough-matchup")
+- `trend_grade`, `matchup_grade`, `regression_grade`, `streak_grade`, `adaptive_grade`, `correlation_grade`, `composite_grade`, `flags`
 - All require migration script to ADD columns to `common.daily_grades` before grading can write them
 
 ---
@@ -250,59 +266,18 @@ Falls back to hit_rate_60 if sample_size_20 < 5.
 - `/nba/player/[playerId]?gameId=&tab=&opp=` — splits strip + matchup defense + full season game log
 - `/nba/grades?date=` — ranked prop grades for all games on date (market filter dropdown + Def column + Refresh Lines button)
 
-### Player Page (fixed this session)
-- `/api/player` now returns `playerName`, `position`, and `lastOppTeamId` at the top level of the response (derived from `nba.schedule`), not from log rows.
-- Player page header reads `playerName` from the top-level API response field, not from log data.
-- Matchup defense section now renders for all entry paths (not only when `gameId` is in the URL). `lastOppTeamId` drives the matchup lookup when no `gameId` is present.
-
 ### Contextual Defense (step 12)
 - `/api/contextual?oppTeamId=&position=` returns per-stat averages allowed and ranks for that position group this season.
 - Rank 1 = most allowed = best matchup for overs. Rank 30 = toughest.
 - Position grouping: G (covers G, G-F, F-G), F (covers F, F-C), C. Matched via LEFT(position, 1).
 - Season window: hardcoded 2024-10-01 onward in the query.
-- `MatchupDefense.tsx` renders avg + rank per stat. Highlights the relevant stat if `highlightMarket` prop is passed.
-- Player page fetches oppTeamId + position from `/api/player` top-level response. Renders MatchupDefense below splits strip when oppTeamId is present.
-- Grades table fetches all unique (oppTeamId, posGroup) pairs after grades load, caches results in component state, renders a `Def` column showing ordinal rank for the grade's market stat.
-- Defense cache key format: `{oppTeamId}:{posGroup}`. State values: 'loading' | 'error' | Record<stat, rank>.
 
 ### Live Data Flow
 1. `nba-live.yml` fires every 5 min UTC 17:00–06:00
 2. Gate: check `nba.schedule` for `game_status = 2`. Exit if none.
 3. `ScoreboardV3` → update `nba.schedule` home_score/away_score/game_status_text
 4. `BoxScoreTraditionalV3` per game → upsert `nba.player_box_score_stats`
-5. Front end: `GameStrip` shows pulsing red dot + live score text for in-progress games
-6. `GameTabs` auto-selects "Live" tab when `gameStatus === 2`
-7. `LiveBoxScore` component polls `/api/boxscore` every 60s by keying `BoxScoreTable` on a tick counter
-
-### API Response Shapes
-- `/api/games` → `{ sport, date, games: GameRow[] }`
-- `/api/roster` → `{ gameId, roster: RosterRow[] }`
-- `/api/team-averages` → `{ players: PlayerAvg[] }` — by team_id, no lineup dependency
-- `/api/player-averages` → `{ gameId, lastN, players: PlayerAvg[] }` — lineup-anchored
-- `/api/boxscore` → `{ gameId, rows: BoxRow[] }`
-- `/api/player` → `{ playerId, lastN, sport, playerName, position, lastOppTeamId, log: GameLogRow[] }` — full season, includes dnp:boolean
-- `/api/grades` → `{ date, gameId, grades: GradeRow[] }` — includes overPrice, oppTeamId, position
-- `/api/game-grades` → `{ gameId, grades[] }` — includes oppTeamId, position for matchup lookups
-- `/api/contextual` → `{ oppTeamId, oppTeamAbbr, position, gamesDefended, pts:{avg,rank}, reb, ast, stl, blk, fg3m, tov }`
-- `/api/refresh-lines` → POST → `{ runId }` (triggers refresh-lines.yml)
-- `/api/refresh-status` → GET `?runId=` → `{ status }` (polls run completion)
-
-### Game Interface
-```typescript
-interface Game {
-  gameId: string; gameDate: string; gameStatus: number | null;
-  gameStatusText: string | null; homeTeamId: number; awayTeamId: number;
-  homeTeamAbbr: string; awayTeamAbbr: string;
-  homeTeamName: string; awayTeamName: string;
-  spread: number | null; total: number | null;
-}
-```
-
-### GameTabs Props
-```typescript
-{ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr, selectedDate, gameStatus }
-```
-`gameStatus` required to conditionally show Live tab.
+5. Front end: `LiveBoxScore` polls `/api/boxscore` every 30s
 
 ### Next.js 15 Patterns
 - `useSearchParams()` requires `<Suspense>` wrapper. Pattern: thin `page.tsx` → Suspense → `*Inner.tsx`
@@ -317,8 +292,8 @@ interface Game {
 - Data: ACTIVE. Box scores current through 2026-03-28. Live updates via nba-live.yml during games.
 - Odds: event_game_map and daily_grades through 2026-03-23; nightly chain catching up.
 - Grading: FUNCTIONAL (hit rate only). Step 13 expands components.
-- Web: ALL VIEWS LIVE including Live tab (step 11) and matchup defense (step 12).
-- Lineup polling: ACTIVE. Pre-game refresh: ACTIVE. Refresh Lines button: ACTIVE (requires GITHUB_PAT in SWA settings).
+- Web: ALL VIEWS LIVE including Live tab, matchup defense, grades, Refresh Lines button.
+- PWA: ACTIVE. Service worker deployed. Install via Safari Share → Add to Home Screen.
 
 ### MLB / NFL
 - ETL partially built. Not wired to web or grading. After NBA.
@@ -327,10 +302,11 @@ interface Game {
 
 ## 9. Build Sequence
 
-1–12. ~~DONE~~ — NBA data pipeline, odds ETL, SWA setup, API routes, all NBA UI views, keep-alive, lineup poll, pre-game refresh, live data layer, contextual matchup defense, Refresh Lines button, grades UI improvements.
-13. **Step 13: Grading model expansion** — migration script first, then trend + matchup components, then remaining components.
-14. **Step 14: MLB ETL and web views**
-15. **Step 15: NFL ETL automation and web views**
+1–12. DONE — NBA data pipeline, odds ETL, SWA setup, API routes, all NBA UI views, keep-alive, lineup poll, pre-game refresh, live data layer, contextual matchup defense, Refresh Lines button, grades UI improvements.
+13. **Step 13: Grading model expansion** — migration script first, then trend + matchup + remaining components.
+14. **Step 14: Mobile-first UI redesign** — bottom nav, card-based grades list, swipeable game view. Current UI is desktop-first; primary audience is mobile.
+15. **Step 15: MLB ETL and web views**
+16. **Step 16: NFL ETL automation and web views**
 
 ---
 
@@ -340,13 +316,13 @@ interface Game {
 |-------|--------|
 | next.cmd blocked by ThreatLocker | Testing via push to main + live SWA. ~90s/cycle. |
 | NFL workflow file missing | `nfl_etl.py` exists, `nfl-etl.yml` does not. |
-| PFF DDL not finalized | Pending CSV column confirmation. |
 | Grading: one component only | Hit rate only. Migration + 6 more components planned (Step 13). |
 | `flags` + component columns not in `common.daily_grades` | Migration required before any flag-producing component. |
 | odds/grading backfill gap | event_game_map and daily_grades only through 2026-03-23. Nightly chain running. |
-| GITHUB_PAT not yet in SWA settings | Refresh Lines button will return 500 until added to Azure Portal SWA app settings. |
 | Matchup defense season window hardcoded | 2024-10-01 in getMatchupDefense query. Needs update for 2025-26 season. |
-| nba_live.py untested against actual live game | First test opportunity when next NBA game is in progress. |
+| PNG icons not generated | SVG icon works on all modern browsers. PNGs optional; generate via generate-icons.mjs. |
+| UI is desktop-first | Mobile-first redesign planned as Step 14. PWA layer is in place; UI needs redesign. |
+| Auto-pause delay locked | Free database offer prevents changing auto-pause delay. Keep-alive workflow mitigates this. |
 
 ---
 
@@ -360,43 +336,28 @@ interface Game {
 | mssql driver over ORM | Direct parameterized queries, full control, all SQL in one file. |
 | Web app over Power BI mobile | Power BI mobile is a report viewer. Required interaction model cannot be built there. |
 | GitHub built-in auth | Zero code, zero user management. |
+| PWA over native app | No App Store approval, no distribution friction, zero incremental cost. SVG icon scales to any size without PNG generation. |
+| SVG icon over PNG for PWA | `sizes: "any"` in manifest covers all modern browsers. PNG generation requires sharp dependency; deferred until actually needed. |
+| Service worker network-first for HTML | Users always get fresh HTML when online; cached version available offline. |
+| Service worker never caches API routes | Live data must never be stale. DB is always source of truth. |
+| Route cache headers via next.config.mjs | SWA CDN edge caches responses between refreshes. Reduces DB hits for stable data. |
 | Persistent game strip as React state | No browser history accumulation, no full page reload on game switch. |
 | Tab memory via URL query parameter | Preserves tab across game switches. Linkable, survives refresh. |
 | Stats tab uses nba.players not nba.daily_lineups | Lineup table empty for today until lineup-poll runs; players table always has active roster. |
 | Full boxscore fetched once, filtered client-side | Period filter must feel instant with no round trips. |
-| Player game log anchored to team's game schedule | Full season view with DNP rows requires starting from team games, not player box scores. |
-| Splits computed client-side from game log | No extra API call needed; data already loaded. opp= param passed from StatsTable link. |
-| vs-opponent split this season only | No multi-season historical box score data available. |
 | /api/ping made public (anonymous) | Required for keep-alive workflow to reach DB without auth headers. |
 | useSearchParams requires Suspense in Next.js 15 | Build fails without it. |
-| Game interface includes homeTeamId/awayTeamId/homeTeamAbbr/awayTeamAbbr | Required for team-averages call and opp= link construction. |
 | Grading components as nullable columns | No migration cascades, NULL excluded from composite. |
 | Confidence flags as JSON array in NVARCHAR column | Multiple flags per row, variable set over time. |
 | `fast_executemany=False` in grading engine | True causes NVARCHAR(MAX) truncation. |
 | `mssql` as `serverExternalPackages` | Prevents Next.js bundling mssql native bindings. |
-| Next.js dynamic route params as `Promise<{...}>` | Required in Next.js 15. |
 | `minutes` not `min` | `min` is reserved in SQL Server. |
 | No 'FullGame' period — always SUM quarters | ETL stores quarters only. |
-| nba.daily_lineups has no player_id/team_id | Join to nba.players on player_name (LEFT JOIN). |
 | DELETE not TRUNCATE | FK constraints block TRUNCATE even on empty child tables. |
 | FanDuel as sole grading bookmaker | Most complete prop line coverage. |
 | Teams dict hardcoded in NBA ETL | Eliminated HTTP dependency after persistent proxy failures. |
-| PT stats via direct HTTP with explicit proxy bypass | nba_api wrapper missing required headers; env var proxy must be explicitly bypassed. |
-| lineup_poll.py standalone, not imported from nba_etl.py | nba_etl.py has top-level argparse/main; importing it triggers argument parsing. Safer to duplicate small helpers. |
-| nba_live.py imports from nba_etl.py | nba_etl.py guards main() under __name__ == "__main__" so imports are safe. Avoids duplicating all helpers. |
-| Live box score via DB poll not direct browser API call | Browser never hits stats.nba.com. DB is always source of truth. Clean separation. |
-| LiveBoxScore keys BoxScoreTable on tick | Forces full remount + re-fetch each interval without modifying BoxScoreTable. No new props needed. |
-| 60-second front-end poll interval | Fast enough for live scores; slow enough to not hammer the DB. nba_live.py writes every 5 min anyway. |
-| ScoreboardV3 called once per nba_live.py run | One call updates all games' scores/status; cheaper than per-game score fetches. |
-| Lineup poll deletes before upsert per game_id | Ensures scratches are reflected on every refresh. |
-| Pre-game refresh gate uses 3-hour window | Avoids burning Odds API quota on days with no upcoming games. |
-| EDT (UTC-4) assumed for game time parsing | NBA season runs Oct-Jun, mostly EDT. 30-minute gate error is acceptable. |
-| Two cron entries per workflow that spans midnight | GHA cron cannot span midnight in a single expression. |
-| At a Glance link always navigates to all-games view | Per-game scoping was confusing; market filter dropdown handles narrowing. |
-| odds_etl upcoming mode writes to event_game_map | Grading engine JOINs event_game_map on event_id with game_id IS NOT NULL. Without this, upcoming props are invisible to grading. |
-| Matchup defense oppTeamId + position sourced from /api/player top-level | Avoids extra fetch; player page reads from one authoritative source regardless of entry path. |
-| Defense cache keyed by oppTeamId:posGroup in grades component | Multiple players share the same matchup; one fetch per team-position pair instead of one per row. |
-| Position broadened to G/F/C groups | Sample sizes per exact position (PG, SG, etc.) are too thin for reliable averages across a season. |
+| lineup_poll.py standalone, not imported from nba_etl.py | nba_etl.py has top-level argparse/main; importing it triggers argument parsing. |
+| Live box score via DB poll not direct browser API call | Browser never hits stats.nba.com. DB is always source of truth. |
+| 30-second front-end poll interval | Fast enough for live scores; slow enough to not hammer the DB. |
 | Refresh Lines triggers via GITHUB_PAT not webhook | SWA API routes cannot use secrets injected at build time; PAT stored in app settings as runtime env var. |
-| position column added via ALTER TABLE migration in DDL_STATEMENTS | Idempotent migration block in nba_etl.py runs on every ETL invocation; safe to re-run. |
 | Implied probability (Imp%) stored without vig removal | Vig removal requires knowing the full market structure; raw implied prob is sufficient for display. |
