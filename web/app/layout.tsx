@@ -29,7 +29,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        <link rel="apple-touch-icon" href="/icon-192.png" />
+        {/* SVG icon works as apple-touch-icon on iOS 16.4+ and all modern browsers.
+            PNG icons at /icon-192.png and /icon-512.png can be generated using
+            web/scripts/generate-icons.mjs once sharp is installed. */}
+        <link rel="apple-touch-icon" href="/icon.svg" />
+        <link rel="icon" type="image/svg+xml" href="/icon.svg" />
         <meta name="mobile-web-app-capable" content="yes" />
         <script
           dangerouslySetInnerHTML={{

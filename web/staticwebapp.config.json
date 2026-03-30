@@ -25,6 +25,10 @@
       }
     },
     {
+      "route": "/icon.svg",
+      "allowedRoles": ["anonymous"]
+    },
+    {
       "route": "/icon-192.png",
       "allowedRoles": ["anonymous"]
     },
