@@ -1,7 +1,13 @@
 name: NBA Grading
 
-# Manual dispatch only -- nightly schedule moved to odds-grading-pipeline.yml.
-# Use this workflow for one-off grading runs and historical backfill.
+# Manual dispatch only -- nightly schedule is in odds-grading-pipeline.yml.
+# Use this workflow for one-off upcoming runs and historical backfill.
+#
+# Backfill mode uses a time-aware loop: each run processes dates in batches
+# until the time limit is reached, then re-dispatches automatically. Already-
+# graded dates are skipped by the NOT EXISTS guard in grade_props.py, so
+# re-dispatching is always safe and idempotent. Completion is detected by
+# the script printing "Backfill: nothing to do." to stdout.
 
 on:
   workflow_dispatch:
@@ -15,9 +21,13 @@ on:
         required: false
         default: ''
       batch:
-        description: 'Backfill mode only: max dates per run. Default 10, use 50+ for bulk backfill.'
+        description: 'Backfill mode only: max dates per Python call. Default 10, use 50+ for bulk runs.'
         required: false
-        default: ''
+        default: '10'
+      time_limit_minutes:
+        description: 'Backfill mode only: minutes of work before exiting cleanly and re-dispatching. Max 330.'
+        required: false
+        default: '300'
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -28,37 +38,129 @@ env:
 jobs:
   grade:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      done: ${{ steps.run.outputs.done }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install Microsoft ODBC Driver 18
         run: |
+          sudo apt-get update -q
+          sudo apt-get install -y curl gnupg apt-transport-https
           curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
-            | sudo gpg --batch --yes --dearmor \
-            -o /usr/share/keyrings/microsoft-prod.gpg
+            | gpg --dearmor --batch --yes --no-tty \
+            | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
           curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
             | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update
+          sudo apt-get update -q
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
 
       - name: Install Python dependencies
         run: pip install -r etl/requirements.txt
 
       - name: Run grading
+        id: run
+        env:
+          MODE:               ${{ github.event.inputs.mode               || 'upcoming' }}
+          DATE_INPUT:         ${{ github.event.inputs.date               || '' }}
+          BATCH:              ${{ github.event.inputs.batch              || '10' }}
+          TIME_LIMIT_MINUTES: ${{ github.event.inputs.time_limit_minutes || '300' }}
         run: |
-          MODE="${{ github.event.inputs.mode || 'upcoming' }}"
-          ARGS="--mode $MODE"
+          set -euo pipefail
 
-          if [ "$MODE" = "backfill" ]; then
-            if [ -n "${{ github.event.inputs.date }}" ]; then
-              ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          if [ "$MODE" != "backfill" ]; then
+            # Upcoming mode: single call, no loop needed.
+            ARGS="--mode upcoming"
+            if [ -n "$DATE_INPUT" ]; then
+              ARGS="$ARGS --date $DATE_INPUT"
             fi
-            if [ -n "${{ github.event.inputs.batch }}" ]; then
-              ARGS="$ARGS --batch ${{ github.event.inputs.batch }}"
-            fi
+            python grading/grade_props.py $ARGS
+            echo "done=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
-          python grading/grade_props.py $ARGS
+          # Backfill mode: time-aware loop.
+          START_SECONDS=$SECONDS
+          TIME_LIMIT_SECONDS=$(( TIME_LIMIT_MINUTES * 60 ))
+          DONE="false"
+
+          echo "Backfill mode. Batch=$BATCH  Limit=${TIME_LIMIT_MINUTES}min"
+
+          while true; do
+            ELAPSED=$(( SECONDS - START_SECONDS ))
+            REMAINING=$(( TIME_LIMIT_SECONDS - ELAPSED ))
+
+            if [ $REMAINING -le 60 ]; then
+              echo ""
+              echo "Approaching time limit (${TIME_LIMIT_MINUTES}min). Exiting cleanly."
+              break
+            fi
+
+            echo ""
+            echo "--- elapsed=${ELAPSED}s remaining=${REMAINING}s ---"
+
+            ARGS="--mode backfill --batch $BATCH"
+            if [ -n "$DATE_INPUT" ]; then
+              ARGS="$ARGS --date $DATE_INPUT"
+            fi
+
+            OUTPUT=$(python grading/grade_props.py $ARGS 2>&1) || {
+              echo "Python exited non-zero. Stopping."
+              echo "$OUTPUT"
+              exit 1
+            }
+
+            echo "$OUTPUT"
+
+            if echo "$OUTPUT" | grep -q "Backfill: nothing to do."; then
+              echo "Backfill complete."
+              DONE="true"
+              break
+            fi
+          done
+
+          echo "done=$DONE" >> $GITHUB_OUTPUT
+
+  redispatch:
+    needs: grade
+    runs-on: ubuntu-latest
+    if: always() && github.event.inputs.mode == 'backfill'
+    steps:
+      - name: Re-dispatch if backfill is incomplete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DONE:               ${{ needs.grade.outputs.done }}
+          BATCH:              ${{ github.event.inputs.batch              || '10' }}
+          TIME_LIMIT_MINUTES: ${{ github.event.inputs.time_limit_minutes || '300' }}
+          DATE_INPUT:         ${{ github.event.inputs.date              || '' }}
+        run: |
+          RESULT="${{ needs.grade.result }}"
+          echo "Grade job result: $RESULT"
+          echo "Done output: $DONE"
+
+          if [ "$RESULT" = "cancelled" ]; then
+            echo "Workflow was cancelled manually. Not re-dispatching."
+            exit 0
+          fi
+
+          if [ "$DONE" = "true" ]; then
+            echo "Backfill complete. No re-dispatch needed."
+            exit 0
+          fi
+
+          echo "Backfill incomplete. Triggering follow-up dispatch..."
+          gh workflow run grading.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            --field mode="backfill" \
+            --field date="$DATE_INPUT" \
+            --field batch="$BATCH" \
+            --field time_limit_minutes="$TIME_LIMIT_MINUTES"
+
+          echo "Follow-up dispatch triggered."
