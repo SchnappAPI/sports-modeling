@@ -62,7 +62,7 @@ jobs:
             exit 0
           fi
 
-          RESULT=$(python - <<'PYEOF'
+          cat > /tmp/gate_check.py << 'PYEOF'
 import os, sys, time
 from datetime import date, datetime, timezone, timedelta
 from sqlalchemy import create_engine, text
@@ -132,7 +132,8 @@ for row in rows:
 
 print("false")
 PYEOF
-          )
+
+          RESULT=$(python /tmp/gate_check.py)
           echo "Gate result: $RESULT"
           echo "run=$RESULT" >> $GITHUB_OUTPUT
 
@@ -140,6 +141,6 @@ PYEOF
         if: steps.gate.outputs.run == 'true'
         run: python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
 
-      - name: Run grading (intraday — moved standard lines only)
+      - name: Run grading (intraday -- moved standard lines only)
         if: steps.gate.outputs.run == 'true'
         run: python grading/grade_props.py --mode intraday
