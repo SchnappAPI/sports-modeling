@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import PasscodeGate from '@/components/PasscodeGate';
 
 export const metadata: Metadata = {
   title: 'Schnapp',
@@ -29,9 +30,6 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        {/* SVG icon works as apple-touch-icon on iOS 16.4+ and all modern browsers.
-            PNG icons at /icon-192.png and /icon-512.png can be generated using
-            web/scripts/generate-icons.mjs once sharp is installed. */}
         <link rel="apple-touch-icon" href="/icon.svg" />
         <link rel="icon" type="image/svg+xml" href="/icon.svg" />
         <meta name="mobile-web-app-capable" content="yes" />
@@ -51,7 +49,9 @@ export default function RootLayout({
         className="bg-gray-950 text-gray-100 min-h-screen"
         style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
-        {children}
+        <PasscodeGate>
+          {children}
+        </PasscodeGate>
       </body>
     </html>
   );
