@@ -29,7 +29,6 @@ interface GameLogRow {
   fga: number | null;
   ftm: number | null;
   fta: number | null;
-  // PT stats
   potentialAst: number | null;
   rebChances: number | null;
 }
@@ -81,7 +80,6 @@ interface GameSummary {
   fga: number;
   ftm: number;
   fta: number;
-  // PT stats at game level (same across all quarter rows for a game)
   potentialAst: number | null;
   rebChances: number | null;
 }
@@ -180,7 +178,6 @@ function buildGameSummaries(
         isHome:       r.isHome,
         dnp:          r.dnp,
         started:      r.started,
-        // PT stats are game-level; take from the first row seen for this game
         potentialAst: r.potentialAst ?? null,
         rebChances:   r.rebChances   ?? null,
       });
@@ -581,18 +578,18 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         <table className="text-xs w-full">
           <thead>
             <tr className="text-gray-500">
-              <th className="text-left px-4 py-2 font-medium">Split</th>
-              <th className="text-right px-2 py-2 font-medium">GP</th>
-              <th className="text-right px-2 py-2 font-medium">MIN</th>
-              <th className="text-right px-2 py-2 font-medium">PTS</th>
-              <th className="text-right px-2 py-2 font-medium">REB</th>
-              <th className="text-right px-2 py-2 font-medium">AST</th>
-              <th className="text-right px-2 py-2 font-medium">STL</th>
-              <th className="text-right px-2 py-2 font-medium">BLK</th>
-              <th className="text-right px-2 py-2 font-medium">TOV</th>
-              <th className="text-right px-2 py-2 font-medium">FG%</th>
-              <th className="text-right px-2 py-2 font-medium">3P%</th>
-              <th className="text-right px-2 py-2 font-medium">FT%</th>
+              <th className="text-left px-4 py-2 font-medium sticky left-0 bg-gray-950 z-10">Split</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">GP</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">MIN</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">PTS</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">REB</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">AST</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">STL</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">BLK</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">TOV</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">FG%</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">3P%</th>
+              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">FT%</th>
             </tr>
           </thead>
           <tbody>
@@ -600,18 +597,18 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const s = splits[key];
               return (
                 <tr key={key} className="border-t border-gray-800">
-                  <td className="px-4 py-2 text-gray-400 font-medium">{label}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{s.gp}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{fmtMin(s.min, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.pts, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.reb, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.ast, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.stl, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.blk, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{avg(s.tov, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{fmtShoot(s.fgm, s.fga, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{fmtShoot(s.fg3m, s.fg3m > 0 ? s.fg3m / s.gp * s.gp : s.fga, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300">{fmtShoot(s.ftm, s.fta, s.gp)}</td>
+                  <td className="px-4 py-2 text-gray-400 font-medium sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{label}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{s.gp}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.stl, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.blk, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.tov, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fgm, s.fga, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fg3m, s.fg3m > 0 ? s.fg3m / s.gp * s.gp : s.fga, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.ftm, s.fta, s.gp)}</td>
                 </tr>
               );
             })}
@@ -661,24 +658,24 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         )}
       </div>
 
-      {/* Game log */}
+      {/* Game log — sticky header + sticky player name column */}
       <div className="flex-1 overflow-x-auto">
         <table className="w-full text-sm">
-          <thead>
+          <thead className="sticky top-0 z-20 bg-gray-950">
             <tr className="text-xs text-gray-500 border-b border-gray-800">
-              <th className="text-left px-4 py-1.5 font-medium">Date</th>
-              <th className="text-left px-2 py-1.5 font-medium">Opp</th>
-              <th className="text-right px-2 py-1.5 font-medium">Str</th>
-              <th className="text-right px-2 py-1.5 font-medium">MIN</th>
-              <th className="text-right px-2 py-1.5 font-medium">PTS</th>
-              <th className="text-right px-2 py-1.5 font-medium" title="REB / REB Chances">REB</th>
-              <th className="text-right px-2 py-1.5 font-medium" title="AST / Potential AST">AST</th>
-              <th className="text-right px-2 py-1.5 font-medium">STL</th>
-              <th className="text-right px-2 py-1.5 font-medium">BLK</th>
-              <th className="text-right px-2 py-1.5 font-medium">TOV</th>
-              <th className="text-right px-2 py-1.5 font-medium">3PM</th>
-              <th className="text-right px-2 py-1.5 font-medium">FG</th>
-              <th className="text-right px-4 py-1.5 font-medium">FT</th>
+              <th className="text-left px-4 py-1.5 font-medium sticky left-0 bg-gray-950 z-30 whitespace-nowrap">Date</th>
+              <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Opp</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="S=Starter B=Bench">Str</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">MIN</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PTS</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">REB</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">AST</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">STL</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">BLK</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">TOV</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PM</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FG</th>
+              <th className="text-right px-4 py-1.5 font-medium whitespace-nowrap">FT</th>
             </tr>
           </thead>
           <tbody>
@@ -686,8 +683,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               if (g.dnp) {
                 return (
                   <tr key={g.gameId} className="border-b border-gray-800 opacity-40">
-                    <td className="px-4 py-1.5 text-gray-400">{g.gameDate.slice(5)}</td>
-                    <td className="px-2 py-1.5 text-gray-400">
+                    <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{g.gameDate.slice(5)}</td>
+                    <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
                       {g.isHome ? '' : '@'}{g.opponentAbbr}
                     </td>
                     <td colSpan={11} className="px-2 py-1.5 text-xs text-gray-600">DNP</td>
@@ -707,7 +704,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               };
               const fmtS = (made: number, att: number) =>
                 att === 0 ? '-' : `${made}/${att}`;
-              // PT stats: actual/potential format
               const fmtPT = (actual: number, potential: number | null): string => {
                 if (potential == null) return String(actual);
                 return `${actual}/${Math.round(potential)}`;
@@ -719,25 +715,25 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 : null;
               return (
                 <tr key={g.gameId} className="border-b border-gray-800">
-                  <td className="px-4 py-1.5 text-gray-400">{g.gameDate.slice(5)}</td>
-                  <td className="px-2 py-1.5 text-gray-400">
+                  <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{g.gameDate.slice(5)}</td>
+                  <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
                     {g.isHome ? '' : '@'}{g.opponentAbbr}
                   </td>
-                  <td className="px-2 py-1.5 text-right text-xs">{starterBadge}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300">{fmtM(g.min)}</td>
-                  <td className={`px-2 py-1.5 text-right ${ptsLine}`}>{g.pts}</td>
-                  <td className={`px-2 py-1.5 text-right ${rebLine} tabular-nums`}>
+                  <td className="px-2 py-1.5 text-right text-xs whitespace-nowrap">{starterBadge}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtM(g.min)}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${ptsLine}`}>{g.pts}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${rebLine} tabular-nums`}>
                     {fmtPT(g.reb, selectedPeriods.size === 0 ? g.rebChances : null)}
                   </td>
-                  <td className={`px-2 py-1.5 text-right ${astLine} tabular-nums`}>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${astLine} tabular-nums`}>
                     {fmtPT(g.ast, selectedPeriods.size === 0 ? g.potentialAst : null)}
                   </td>
-                  <td className={`px-2 py-1.5 text-right ${stlLine}`}>{g.stl}</td>
-                  <td className={`px-2 py-1.5 text-right ${blkLine}`}>{g.blk}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300">{g.tov}</td>
-                  <td className={`px-2 py-1.5 text-right ${fg3Line}`}>{g.fg3m}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300">{fmtS(g.fgm, g.fga)}</td>
-                  <td className="px-4 py-1.5 text-right text-gray-300">{fmtS(g.ftm, g.fta)}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${stlLine}`}>{g.stl}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${blkLine}`}>{g.blk}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line}`}>{g.fg3m}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtS(g.fgm, g.fga)}</td>
+                  <td className="px-4 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtS(g.ftm, g.fta)}</td>
                 </tr>
               );
             })}

@@ -400,6 +400,7 @@ export interface GradeRow {
   sampleSize20: number | null;
   weightedHitRate: number | null;
   grade: number | null;
+  // Step 13 columns — NULL until migration runs
   compositeGrade: number | null;
   trendGrade: number | null;
   momentumGrade: number | null;
@@ -408,7 +409,7 @@ export interface GradeRow {
   hitRateOpp: number | null;
   sampleSizeOpp: number | null;
   oppTeamId: number | null;
-  oppTeamAbbr: string | null;  // opponent tricode for display
+  oppTeamAbbr: string | null;
   position: string | null;
   gameId: string | null;
   homeTeamAbbr: string | null;
@@ -420,9 +421,28 @@ export async function getGrades(
   gameId: string | null
 ): Promise<GradeRow[]> {
   const pool = await getPool();
+
+  // Probe which optional Step 13 columns exist so we degrade gracefully
+  // if the migration hasn't run yet.
+  const colCheck = await pool.request().query<{ column_name: string }>(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'common'
+       AND table_name   = 'daily_grades'
+       AND column_name  IN (
+           'composite_grade','trend_grade','momentum_grade',
+           'matchup_grade','regression_grade','hit_rate_opp','sample_size_opp'
+       )`
+  );
+  const existingCols = new Set(colCheck.recordset.map((r) => r.column_name));
+
+  const sel = (col: string, alias: string) =>
+    existingCols.has(col) ? `dg.${col} AS ${alias}` : `NULL AS ${alias}`;
+
   const req = pool.request().input('gradeDate', mssql.VarChar, gradeDate);
   const gameFilter = gameId != null ? `AND egm.game_id = @gameId` : '';
   if (gameId != null) req.input('gameId', mssql.VarChar, gameId);
+
   const result = await req.query<GradeRow>(
     `WITH prop_prices AS (
        SELECT event_id, market_key, player_id, MIN(outcome_price) AS over_price
@@ -459,18 +479,17 @@ export async function getGrades(
        dg.sample_size_20    AS sampleSize20,
        dg.weighted_hit_rate AS weightedHitRate,
        dg.grade             AS grade,
-       dg.composite_grade   AS compositeGrade,
-       dg.trend_grade       AS trendGrade,
-       dg.momentum_grade    AS momentumGrade,
-       dg.matchup_grade     AS matchupGrade,
-       dg.regression_grade  AS regressionGrade,
-       dg.hit_rate_opp      AS hitRateOpp,
-       dg.sample_size_opp   AS sampleSizeOpp,
+       ${sel('composite_grade',  'compositeGrade')},
+       ${sel('trend_grade',      'trendGrade')},
+       ${sel('momentum_grade',   'momentumGrade')},
+       ${sel('matchup_grade',    'matchupGrade')},
+       ${sel('regression_grade', 'regressionGrade')},
+       ${sel('hit_rate_opp',     'hitRateOpp')},
+       ${sel('sample_size_opp',  'sampleSizeOpp')},
        CASE
          WHEN p.team_id = s.home_team_id THEN s.away_team_id
          ELSE s.home_team_id
        END                  AS oppTeamId,
-       -- Opponent tricode: the team the player is NOT on
        CASE
          WHEN p.team_id = s.home_team_id THEN at.team_tricode
          ELSE ht.team_tricode
@@ -550,7 +569,7 @@ export async function getPlayerProps(playerId: number): Promise<PlayerPropRow[]>
          dg.sample_size_60    AS sampleSize60,
          dg.sample_size_20    AS sampleSize20,
          dg.grade             AS grade,
-         dg.composite_grade   AS compositeGrade
+         NULL                 AS compositeGrade
        FROM common.daily_grades dg
        LEFT JOIN best_price bp
          ON bp.event_id = dg.event_id AND bp.market_key = dg.market_key AND bp.player_id = dg.player_id

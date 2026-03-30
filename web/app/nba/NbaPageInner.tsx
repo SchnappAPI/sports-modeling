@@ -6,6 +6,28 @@ import Link from 'next/link';
 import GameStrip, { type Game } from '@/components/GameStrip';
 import GameTabs from '@/components/GameTabs';
 
+// Convert an ET time string like "7:30 pm ET" to CT by subtracting 1 hour.
+// Returns the original string unchanged if it cannot be parsed.
+function convertEtToCt(text: string | null): string | null {
+  if (!text) return text;
+  const m = text.match(/^(\d{1,2}):(\d{2})\s*(am|pm)\s*ET$/i);
+  if (!m) return text;
+  let h = parseInt(m[1], 10);
+  const min = m[2];
+  const ampm = m[3].toLowerCase();
+  // Convert to 24-hour
+  if (ampm === 'pm' && h !== 12) h += 12;
+  if (ampm === 'am' && h === 12) h = 0;
+  // Subtract 1 hour for CT
+  h -= 1;
+  if (h < 0) h += 24;
+  // Back to 12-hour
+  let displayAmPm = h >= 12 ? 'pm' : 'am';
+  let displayH = h % 12;
+  if (displayH === 0) displayH = 12;
+  return `${displayH}:${min} ${displayAmPm} CT`;
+}
+
 function parseStartMinutes(text: string | null): number | null {
   if (!text) return null;
   const m = text.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
@@ -70,7 +92,15 @@ export default function NbaPageInner() {
         return res.json();
       })
       .then((data: { games: Game[] }) => {
-        const sorted = sortGames(data.games ?? []);
+        // Convert ET to CT for upcoming game times before storing
+        const converted = (data.games ?? []).map((g) => ({
+          ...g,
+          gameStatusText:
+            (g.gameStatus == null || g.gameStatus === 1)
+              ? convertEtToCt(g.gameStatusText)
+              : g.gameStatusText,
+        }));
+        const sorted = sortGames(converted);
         setGames(sorted);
         const currentGameId = searchParams.get('gameId');
         const stillValid = sorted.some((g) => g.gameId === currentGameId);

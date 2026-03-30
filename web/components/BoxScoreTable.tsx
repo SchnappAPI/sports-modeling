@@ -24,14 +24,11 @@ interface BoxRow {
   fta: number | null;
 }
 
-// Represents a player's position in the game roster (always present once they
-// appeared in the game), separate from their filtered-period stat totals.
 interface PlayerSlot {
   playerId: number;
   playerName: string;
   teamId: number;
   starterStatus: string | null;
-  // Whether the player had any box score rows at all (appeared in the game).
   appearedInGame: boolean;
 }
 
@@ -142,7 +139,6 @@ function TeamBox({
   selectedDate,
 }: {
   slots: PlayerSlot[];
-  // playerId -> totals for the currently selected period(s)
   filteredTotals: Map<number, PlayerTotals>;
   hasLineup: boolean;
   propMap: PropMap;
@@ -154,8 +150,6 @@ function TeamBox({
 
   const renderRow = (slot: PlayerSlot) => {
     const t = filteredTotals.get(slot.playerId) ?? { ...ZERO_TOTALS };
-    // A player who appeared in the game but had zero activity in the
-    // selected period is shown dimmed with zeroes/dashes rather than hidden.
     const inactive = slot.appearedInGame && t.min === 0;
     const line = (sk: keyof PlayerTotals) =>
       showColors && !inactive ? getLine(propMap, slot.playerId, sk) : null;
@@ -168,24 +162,25 @@ function TeamBox({
         key={slot.playerId}
         className={['border-b border-gray-800', inactive ? 'opacity-40' : ''].join(' ')}
       >
-        <td className="py-1.5 pr-3">
+        {/* Sticky player name cell */}
+        <td className="py-1.5 pr-3 sticky left-0 bg-gray-950 z-10 whitespace-nowrap min-w-[120px] max-w-[160px]">
           <Link
             href={playerHref}
-            className="text-gray-100 hover:text-blue-400 transition-colors"
+            className="text-gray-100 hover:text-blue-400 transition-colors text-xs"
           >
             {slot.playerName}
           </Link>
         </td>
-        <td className="py-1.5 px-2 text-right text-gray-300">{fmtMin(t.min)}</td>
-        <td className={`py-1.5 px-2 text-right ${statCls(t.pts,  line('pts'))}`}>{t.pts}</td>
-        <td className={`py-1.5 px-2 text-right ${statCls(t.reb,  line('reb'))}`}>{t.reb}</td>
-        <td className={`py-1.5 px-2 text-right ${statCls(t.ast,  line('ast'))}`}>{t.ast}</td>
-        <td className={`py-1.5 px-2 text-right ${statCls(t.stl,  line('stl'))}`}>{t.stl}</td>
-        <td className={`py-1.5 px-2 text-right ${statCls(t.blk,  line('blk'))}`}>{t.blk}</td>
-        <td className={`py-1.5 px-2 text-right ${statCls(t.tov,  line('tov'))}`}>{t.tov}</td>
-        <td className="py-1.5 px-2 text-right text-gray-300">{fmtShoot(t.fgm, t.fga)}</td>
-        <td className={`py-1.5 px-2 text-right ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fga)}</td>
-        <td className="py-1.5 pl-2 text-right text-gray-300">{fmtShoot(t.ftm, t.fta)}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(t.min)}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.pts,  line('pts'))}`}>{t.pts}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.reb,  line('reb'))}`}>{t.reb}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.ast,  line('ast'))}`}>{t.ast}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.stl,  line('stl'))}`}>{t.stl}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.blk,  line('blk'))}`}>{t.blk}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.tov,  line('tov'))}`}>{t.tov}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(t.fgm, t.fga)}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fga)}</td>
+        <td className="py-1.5 pl-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(t.ftm, t.fta)}</td>
       </tr>
     );
   };
@@ -194,7 +189,7 @@ function TeamBox({
     <tr>
       <td
         colSpan={11}
-        className="pt-3 pb-1 text-xs text-gray-600 font-semibold uppercase tracking-wider"
+        className="pt-3 pb-1 text-xs text-gray-600 font-semibold uppercase tracking-wider sticky left-0 bg-gray-950"
       >
         {label}
       </td>
@@ -212,17 +207,18 @@ function TeamBox({
       <table className="w-full text-sm">
         <thead>
           <tr className="text-xs text-gray-500 border-b border-gray-800">
-            <th className="text-left py-1.5 pr-3 font-medium">Player</th>
-            <th className="text-right py-1.5 px-2 font-medium">MIN</th>
-            <th className="text-right py-1.5 px-2 font-medium">PTS</th>
-            <th className="text-right py-1.5 px-2 font-medium">REB</th>
-            <th className="text-right py-1.5 px-2 font-medium">AST</th>
-            <th className="text-right py-1.5 px-2 font-medium">STL</th>
-            <th className="text-right py-1.5 px-2 font-medium">BLK</th>
-            <th className="text-right py-1.5 px-2 font-medium">TOV</th>
-            <th className="text-right py-1.5 px-2 font-medium">FG</th>
-            <th className="text-right py-1.5 px-2 font-medium">3P</th>
-            <th className="text-right py-1.5 pl-2 font-medium">FT</th>
+            {/* Sticky header for player name */}
+            <th className="text-left py-1.5 pr-3 font-medium sticky left-0 bg-gray-950 z-20 whitespace-nowrap">Player</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">MIN</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">PTS</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">REB</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">AST</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">STL</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">BLK</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">TOV</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FG</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3P</th>
+            <th className="text-right py-1.5 pl-2 font-medium whitespace-nowrap">FT</th>
           </tr>
         </thead>
         <tbody>
@@ -235,10 +231,10 @@ function TeamBox({
               {dnp.length > 0 && sectionHeader('Did Not Play')}
               {dnp.map((s) => (
                 <tr key={s.playerId} className="border-b border-gray-800 opacity-40">
-                  <td className="py-1.5 pr-3">
+                  <td className="py-1.5 pr-3 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">
                     <Link
                       href={`/nba/player/${s.playerId}?gameId=${gameId}&tab=boxscore&date=${selectedDate}`}
-                      className="text-gray-300 hover:text-blue-400 transition-colors"
+                      className="text-gray-300 hover:text-blue-400 transition-colors text-xs"
                     >
                       {s.playerName}
                     </Link>
@@ -248,7 +244,6 @@ function TeamBox({
               ))}
             </>
           ) : (
-            // No lineup data — all slots appeared in the game; sort by full-game minutes desc.
             [...slots]
               .sort((a, b) => {
                 const ma = filteredTotals.get(a.playerId)?.min ?? 0;
@@ -260,7 +255,6 @@ function TeamBox({
         </tbody>
       </table>
     </div>
-
   );
 }
 
@@ -309,7 +303,9 @@ export default function BoxScoreTable({
     const map: PropMap = new Map();
     for (const g of grades) {
       if (!map.has(g.playerId)) map.set(g.playerId, new Map());
-      if (!map.get(g.playerId)!.has(g.marketKey)) {
+      // Keep the lowest line per market (standard line preferred over alternate)
+      const existing = map.get(g.playerId)!.get(g.marketKey);
+      if (existing == null || g.lineValue < existing) {
         map.get(g.playerId)!.set(g.marketKey, g.lineValue);
       }
     }
@@ -323,9 +319,6 @@ export default function BoxScoreTable({
     [rows]
   );
 
-  // Build the canonical player slot list from ALL rows (full game).
-  // This is the roster of everyone who appeared, with their starter status.
-  // This never changes when the period filter changes.
   const allSlots = useMemo<PlayerSlot[]>(() => {
     const byPlayer = new Map<number, BoxRow>();
     for (const r of rows) {
@@ -336,11 +329,10 @@ export default function BoxScoreTable({
       playerName:     r.playerName,
       teamId:         r.teamId,
       starterStatus:  r.starterStatus,
-      appearedInGame: true,   // every slot here had at least one box score row
+      appearedInGame: true,
     }));
   }, [rows]);
 
-  // Build per-player totals from only the selected periods.
   const filteredTotalsMap = useMemo<Map<number, PlayerTotals>>(() => {
     const filtered = selectedPeriods.size === 0
       ? rows
@@ -357,7 +349,6 @@ export default function BoxScoreTable({
     return result;
   }, [rows, selectedPeriods]);
 
-  // Group slots by team.
   const teamIds = useMemo(
     () => Array.from(new Set(allSlots.map((s) => s.teamId))),
     [allSlots]
