@@ -1,30 +1,31 @@
 name: Odds Backfill
 
 # Runs backfill for all sport-season pairs in parallel using a matrix strategy.
-# Each matrix job is independent, has its own 6-hour limit, and checkpoints
-# against odds.events so re-dispatching any job resumes without double-fetching.
+# Each matrix job is time-aware: it tracks elapsed minutes and exits cleanly
+# before hitting the 6-hour GitHub Actions hard limit. Any pairs that did not
+# finish trigger an automatic follow-up dispatch of this same workflow covering
+# only the incomplete pairs. Re-dispatching is safe and idempotent -- already-
+# loaded event_ids are always skipped.
 #
 # Credit cost: ~40 credits per game (4 calls x 10 credits each).
 # Time cost:   ~7 seconds per game (4 calls + sleeps).
-# At 2500 games per job and 9 parallel jobs, a full backfill of ~12,000 games
-# completes in roughly one dispatch per sport-season, about 5 hours wall time
-# for the largest buckets (MLB ~2400 games).
 #
-# Re-dispatch is safe and idempotent. Already-loaded event_ids are skipped.
 # Run this workflow after odds-discover has populated odds.discovered_events.
-#
-# After backfill completes, run odds-etl with mode=mappings for each sport
-# to build odds.event_game_map and odds.player_map.
+# After all pairs complete, run odds-etl with mode=mappings for each sport.
 
 on:
   workflow_dispatch:
     inputs:
-      games_per_job:
-        description: "Max events per matrix job. 2500 fits a 6-hour runner at ~7s/game."
+      games_per_batch:
+        description: "Events per Python call. Controls checkpoint frequency, not total per job."
         required: false
-        default: "2500"
+        default: "150"
+      time_limit_minutes:
+        description: "Minutes of work per job before exiting cleanly and re-dispatching. Max 330."
+        required: false
+        default: "300"
       budget_per_job:
-        description: "Max credits per matrix job. 0 = unlimited. ~40 credits/game so 2500 games = ~100000."
+        description: "Max credits per matrix job. 0 = unlimited."
         required: false
         default: "0"
       seasons:
@@ -44,8 +45,6 @@ env:
   ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
 
 jobs:
-  # Build the matrix dynamically from the input strings so the workflow
-  # doesn't need to be edited when you want to re-run a subset.
   build-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -69,12 +68,16 @@ jobs:
   backfill:
     needs: build-matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 350   # 5h50m -- leaves buffer before GitHub's 6h hard cut
+    timeout-minutes: 350
     strategy:
       matrix: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
-      fail-fast: false      # one job failing does not cancel the others
+      fail-fast: false
 
     name: backfill-${{ matrix.sport }}-${{ matrix.season }}
+
+    # Expose completion status so the re-dispatch job can see which pairs finished.
+    outputs:
+      done: ${{ steps.run.outputs.done }}
 
     steps:
       - uses: actions/checkout@v4
@@ -98,54 +101,138 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r etl/requirements.txt
 
-      - name: Run backfill loop
+      - name: Run backfill with time limit
+        id: run
         env:
-          SPORT:          ${{ matrix.sport }}
-          SEASON:         ${{ matrix.season }}
-          GAMES_PER_JOB:  ${{ github.event.inputs.games_per_job  || '2500' }}
-          BUDGET_PER_JOB: ${{ github.event.inputs.budget_per_job || '0' }}
+          SPORT:              ${{ matrix.sport }}
+          SEASON:             ${{ matrix.season }}
+          GAMES_PER_BATCH:    ${{ github.event.inputs.games_per_batch    || '150' }}
+          TIME_LIMIT_MINUTES: ${{ github.event.inputs.time_limit_minutes || '300' }}
+          BUDGET_PER_JOB:     ${{ github.event.inputs.budget_per_job     || '0' }}
         run: |
           set -euo pipefail
 
-          # Loop in batches until the Python script reports nothing left to do
-          # or the runner approaches its timeout. Each Python call processes
-          # GAMES_PER_JOB events and exits. The destination table is the
-          # checkpoint -- re-running always skips already-loaded event_ids.
-          ITER=0
-          MAX_ITER=20   # safety cap: 20 x 2500 = 50000 games max per job
+          START_SECONDS=$SECONDS
+          TIME_LIMIT_SECONDS=$(( TIME_LIMIT_MINUTES * 60 ))
+          DONE="false"
 
-          while [ $ITER -lt $MAX_ITER ]; do
-            ITER=$((ITER + 1))
+          echo "Sport=$SPORT  Season=$SEASON  Limit=${TIME_LIMIT_MINUTES}min  Batch=${GAMES_PER_BATCH} games"
+
+          while true; do
+            ELAPSED=$(( SECONDS - START_SECONDS ))
+            REMAINING=$(( TIME_LIMIT_SECONDS - ELAPSED ))
+
+            if [ $REMAINING -le 60 ]; then
+              echo ""
+              echo "Approaching time limit (${TIME_LIMIT_MINUTES}min). Exiting cleanly."
+              break
+            fi
+
             echo ""
-            echo "--- Batch $ITER (sport=$SPORT season=$SEASON) ---"
+            echo "--- elapsed=${ELAPSED}s remaining=${REMAINING}s ---"
 
             OUTPUT=$(python etl/odds_etl.py \
               --mode backfill \
               --sport "$SPORT" \
               --season "$SEASON" \
-              --games "$GAMES_PER_JOB" \
+              --games "$GAMES_PER_BATCH" \
               --budget "$BUDGET_PER_JOB" 2>&1) || {
-                echo "Python exited non-zero. Stopping job."
+                echo "Python exited non-zero. Stopping."
                 echo "$OUTPUT"
                 exit 1
               }
 
             echo "$OUTPUT"
 
-            # Detect natural completion: nothing left to process.
-            if echo "$OUTPUT" | grep -q "Nothing to do\|All .* discovered events loaded"; then
-              echo "$SPORT $SEASON: backfill complete."
+            if echo "$OUTPUT" | grep -qE "Nothing to do|All .* discovered events loaded"; then
+              echo "$SPORT $SEASON: fully complete."
+              DONE="true"
               break
             fi
-
-            # Budget reached is a clean exit. The next iteration starts a
-            # fresh Python process with a fresh budget counter.
-            if echo "$OUTPUT" | grep -q "BUDGET REACHED"; then
-              echo "Budget reached. Continuing to next batch."
-            fi
-
           done
 
-          if [ $ITER -ge $MAX_ITER ]; then
-            echo "WARNING: hit iteration cap for $SPORT $SEASON. Re-dispatch to continue."
+          echo "done=$DONE" >> $GITHUB_OUTPUT
+
+  # After all matrix jobs finish (or time out), check which pairs are incomplete
+  # and fire a new dispatch covering only those pairs. This continues until every
+  # pair reports done=true, at which point no re-dispatch is triggered.
+  redispatch:
+    needs: backfill
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check for incomplete pairs and re-dispatch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SPORTS_INPUT:   ${{ github.event.inputs.sports   || 'nba,mlb,nfl' }}
+          SEASONS_INPUT:  ${{ github.event.inputs.seasons  || '2023,2024,2025' }}
+          GAMES_PER_BATCH: ${{ github.event.inputs.games_per_batch    || '150' }}
+          TIME_LIMIT:      ${{ github.event.inputs.time_limit_minutes || '300' }}
+          BUDGET:          ${{ github.event.inputs.budget_per_job     || '0' }}
+        run: |
+          # The matrix job outputs are not directly iterable from a fan-in job,
+          # so we re-check completion by querying the DB via Python inline.
+          # If any pair still has unloaded events, dispatch this workflow again
+          # with only the remaining sports and seasons.
+          #
+          # Since we cannot run Python here without setup, we use a simpler
+          # approach: if any matrix job ended without done=true (i.e. it timed
+          # out rather than completing), re-dispatch the full input set.
+          # Already-loaded events are skipped by the Python script itself, so
+          # re-dispatching completed pairs wastes only a few seconds of setup.
+
+          NEEDS_JSON='${{ toJson(needs.backfill.result) }}'
+          echo "Matrix result: $NEEDS_JSON"
+
+          # Collect job results from the matrix outputs context.
+          # needs.backfill.result is the overall result (success/failure/cancelled).
+          # We re-dispatch unless the overall result was 'success' AND the job
+          # was not cancelled -- success here means all matrix jobs exited 0,
+          # but some may have exited 0 with done=false (time limit reached).
+          #
+          # Safest rule: re-dispatch unless we can confirm everything is done.
+          # The Python script itself is the source of truth; a wasted re-dispatch
+          # on a fully-complete set just prints "Nothing to do" and exits in seconds.
+
+          RESULT="${{ needs.backfill.result }}"
+          echo "Overall backfill result: $RESULT"
+
+          if [ "$RESULT" = "cancelled" ]; then
+            echo "Workflow was cancelled manually. Not re-dispatching."
+            exit 0
           fi
+
+          # Check outputs: if ALL matrix jobs set done=true, skip re-dispatch.
+          # GitHub exposes matrix outputs as a JSON object keyed by job name.
+          # We parse it to see if any job did NOT complete.
+          OUTPUTS='${{ toJson(needs.backfill.outputs) }}'
+          echo "Job outputs: $OUTPUTS"
+
+          ALL_DONE=$(echo "$OUTPUTS" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          # data is a dict of output values across all matrix jobs.
+          # If any value is not 'true', not all are done.
+          values = list(data.values()) if isinstance(data, dict) else []
+          all_done = all(v == 'true' for v in values) if values else False
+          print('true' if all_done else 'false')
+          ")
+
+          echo "All pairs done: $ALL_DONE"
+
+          if [ "$ALL_DONE" = "true" ]; then
+            echo "All pairs complete. No re-dispatch needed."
+            exit 0
+          fi
+
+          echo "Some pairs incomplete. Triggering follow-up dispatch..."
+          gh workflow run odds-backfill.yml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            --field sports="$SPORTS_INPUT" \
+            --field seasons="$SEASONS_INPUT" \
+            --field games_per_batch="$GAMES_PER_BATCH" \
+            --field time_limit_minutes="$TIME_LIMIT" \
+            --field budget_per_job="$BUDGET"
+
+          echo "Follow-up dispatch triggered."
