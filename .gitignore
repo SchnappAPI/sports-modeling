@@ -1,0 +1,28 @@
+# Dependencies
+web/node_modules/
+
+# Next.js build output
+web/.next/
+web/out/
+
+# Package lock (generated, not committed)
+web/package-lock.json
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/settings.json
