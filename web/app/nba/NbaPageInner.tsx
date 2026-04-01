@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import GameStrip, { type Game } from '@/components/GameStrip';
 import GameTabs from '@/components/GameTabs';
+import { randomLoadingWord } from '@/lib/loadingWord';
 
 // Convert an ET time string like "7:30 pm ET" to CT by subtracting 1 hour.
 // Returns the original string unchanged if it cannot be parsed.
@@ -57,8 +58,9 @@ function sortGames(games: Game[]): Game[] {
   });
 }
 
-function todayLocal(): string {
+function yesterdayLocal(): string {
   const d = new Date();
+  d.setDate(d.getDate() - 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
@@ -72,10 +74,16 @@ export default function NbaPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
+  const maxDate = yesterdayLocal();
+
+  // Clamp any URL-supplied date to yesterday at most
   const urlDate = searchParams.get('date');
-  const [selectedDate, setSelectedDate] = useState<string>(urlDate ?? todayLocal());
+  const clampedDate = urlDate && urlDate < maxDate ? urlDate : maxDate;
+
+  const [selectedDate, setSelectedDate] = useState<string>(clampedDate);
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingWord] = useState(() => randomLoadingWord());
   const [error, setError] = useState<string | null>(null);
 
   const activeGameId = searchParams.get('gameId');
@@ -122,8 +130,10 @@ export default function NbaPageInner() {
   }
 
   function applyDate(newDate: string) {
-    setSelectedDate(newDate);
-    router.replace(`/nba?date=${newDate}`);
+    // Never allow navigating past yesterday
+    const clamped = newDate > maxDate ? maxDate : newDate;
+    setSelectedDate(clamped);
+    router.replace(`/nba?date=${clamped}`);
   }
 
   function handleDateChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -148,13 +158,17 @@ export default function NbaPageInner() {
           <input
             type="date"
             value={selectedDate}
+            max={maxDate}
             onChange={handleDateChange}
             className="text-sm bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300
                        focus:outline-none focus:border-gray-500 cursor-pointer"
           />
           <button
             onClick={() => applyDate(shiftDate(selectedDate, 1))}
-            className="px-2 py-1 text-gray-400 hover:text-gray-200 text-base leading-none"
+            disabled={selectedDate >= maxDate}
+            className="px-2 py-1 text-base leading-none transition-colors
+                       disabled:text-gray-700 disabled:cursor-not-allowed
+                       enabled:text-gray-400 enabled:hover:text-gray-200"
             aria-label="Next day"
           >
             &#8250;
@@ -169,7 +183,7 @@ export default function NbaPageInner() {
         </Link>
       </div>
 
-      {loading && <div className="px-4 py-3 text-sm text-gray-500">Loading games...</div>}
+      {loading && <div className="px-4 py-3 text-sm text-gray-500">{loadingWord}...</div>}
       {error && <div className="px-4 py-3 text-sm text-red-400">Error: {error}</div>}
       {!loading && !error && (
         <GameStrip
