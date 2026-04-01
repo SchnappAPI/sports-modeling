@@ -65,13 +65,10 @@ jobs:
         run: |
           python3 - <<'EOF'
           import json, os, itertools
-
           sports  = [s.strip() for s in "${{ github.event.inputs.sports  || 'nba,mlb,nfl' }}".split(",") if s.strip()]
           seasons = [s.strip() for s in "${{ github.event.inputs.seasons || '2023,2024,2025' }}".split(",") if s.strip()]
-
           pairs = [{"sport": sp, "season": se} for sp, se in itertools.product(sports, seasons)]
           matrix = {"include": pairs}
-
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"matrix={json.dumps(matrix)}\n")
           EOF
@@ -143,9 +140,6 @@ jobs:
             echo ""
             echo "--- elapsed=${ELAPSED}s remaining=${REMAINING}s ---"
 
-            # --fresh is only passed on the very first call within this job.
-            # Subsequent loop iterations resume normally so already-completed
-            # events within the same batch window are not re-fetched.
             FRESH_FLAG=""
             if [ "$FIRST_CALL" = "true" ] && [ "$FRESH_START" = "true" ]; then
               FRESH_FLAG="--fresh"
@@ -180,11 +174,13 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
+      - uses: actions/checkout@v4
+
       - name: Check for incomplete pairs and re-dispatch
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
-          SPORTS_INPUT:    ${{ github.event.inputs.sports   || 'nba,mlb,nfl' }}
-          SEASONS_INPUT:   ${{ github.event.inputs.seasons  || '2023,2024,2025' }}
+          GH_TOKEN:        ${{ secrets.GITHUB_PAT }}
+          SPORTS_INPUT:    ${{ github.event.inputs.sports              || 'nba,mlb,nfl' }}
+          SEASONS_INPUT:   ${{ github.event.inputs.seasons             || '2023,2024,2025' }}
           GAMES_PER_BATCH: ${{ github.event.inputs.games_per_batch    || '150' }}
           TIME_LIMIT:      ${{ github.event.inputs.time_limit_minutes || '300' }}
           BUDGET:          ${{ github.event.inputs.budget_per_job     || '0' }}
@@ -200,14 +196,7 @@ jobs:
           OUTPUTS='${{ toJson(needs.backfill.outputs) }}'
           echo "Job outputs: $OUTPUTS"
 
-          ALL_DONE=$(echo "$OUTPUTS" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-values = list(data.values()) if isinstance(data, dict) else []
-all_done = all(v == 'true' for v in values) if values else False
-print('true' if all_done else 'false')
-")
-
+          ALL_DONE=$(echo "$OUTPUTS" | python3 .github/scripts/check_backfill_done.py)
           echo "All pairs done: $ALL_DONE"
 
           if [ "$ALL_DONE" = "true" ]; then
@@ -216,8 +205,6 @@ print('true' if all_done else 'false')
           fi
 
           echo "Some pairs incomplete. Triggering follow-up dispatch..."
-          # Re-dispatched runs never pass fresh_start=true.
-          # They resume from where they left off using odds.events as the gate.
           gh workflow run odds-backfill.yml \
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \
