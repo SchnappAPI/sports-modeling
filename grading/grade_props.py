@@ -26,6 +26,10 @@ Modes
              plus alternate lines from the static grid filtered to lines
              FanDuel has actually priced. Full component computation.
 
+             Standard bracket lines that overlap with an alternate-market line
+             for the same player and stat are dropped — the alternate row with
+             its real FanDuel price takes precedence.
+
   intraday   Standard lines only. Checks for line movement since last grade.
              Only re-grades players/markets where the posted line changed.
              Skips alternate markets entirely. Triggered by pregame-refresh.
@@ -604,6 +608,43 @@ def build_alt_props(posted_df, active_players_df, event_map):
     ) if rows else pd.DataFrame()
 
 
+def drop_bracket_lines_covered_by_alts(std_df, alt_df):
+    """
+    Remove standard-market bracket lines that are already covered by an
+    alternate-market line for the same player and underlying stat.
+
+    When both a standard bracket line and an alternate line exist for the same
+    player at the same line value, the alternate row is preferred because it
+    carries the real FanDuel price. The standard row would show NULL or the
+    center-line price (both misleading) and would appear as a visual duplicate
+    on the At a Glance page since both market keys abbreviate to the same label.
+    """
+    if std_df.empty or alt_df.empty:
+        return std_df
+
+    # Build a set of (player_id, stat_col, line_value) tuples present in alts.
+    alt_df = alt_df.copy()
+    alt_df["stat_col"] = alt_df["market_key"].map(MARKET_STAT_COL)
+    alt_covered = set(
+        zip(
+            alt_df["player_id"].astype(int),
+            alt_df["stat_col"],
+            alt_df["line_value"].astype(float),
+        )
+    )
+
+    std_df = std_df.copy()
+    std_df["stat_col"] = std_df["market_key"].map(MARKET_STAT_COL)
+    mask = std_df.apply(
+        lambda r: (int(r["player_id"]), r["stat_col"], float(r["line_value"])) in alt_covered,
+        axis=1,
+    )
+    dropped = mask.sum()
+    if dropped:
+        log.info(f"  Dropped {dropped} standard bracket lines superseded by alternate lines.")
+    return std_df[~mask].drop(columns=["stat_col"])
+
+
 def fetch_active_players_today(engine, grade_date_str):
     sql = text("""
         SELECT p.player_id, p.player_name, p.team_id
@@ -1094,6 +1135,11 @@ def run_upcoming(engine):
     active    = fetch_active_players_today(engine, today)
     event_map = fetch_event_map_today(engine, today)
     alt_props = build_alt_props(posted, active, event_map)
+
+    # Drop standard bracket lines that overlap with an alternate-market line
+    # for the same player and stat. The alternate row carries the real FanDuel
+    # price; the bracket-generated duplicate at the same line value does not.
+    std_props = drop_bracket_lines_covered_by_alts(std_props, alt_props)
 
     all_props = pd.concat(
         [p for p in [std_props, alt_props] if not p.empty], ignore_index=True
