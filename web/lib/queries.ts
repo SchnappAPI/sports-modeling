@@ -384,6 +384,7 @@ export interface GradeRow {
   playerId: number;
   playerName: string;
   marketKey: string;
+  outcomeName: string;
   lineValue: number;
   overPrice: number | null;
   hitRate60: number | null;
@@ -424,6 +425,7 @@ export async function getGrades(
        dg.player_id         AS playerId,
        dg.player_name       AS playerName,
        dg.market_key        AS marketKey,
+       COALESCE(dg.outcome_name, 'Over') AS outcomeName,
        dg.line_value        AS lineValue,
        dg.over_price        AS overPrice,
        dg.hit_rate_60       AS hitRate60,

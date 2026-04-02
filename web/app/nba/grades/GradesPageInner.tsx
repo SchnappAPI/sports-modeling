@@ -10,6 +10,7 @@ interface GradeRow {
   playerId: number;
   playerName: string;
   marketKey: string;
+  outcomeName: string;
   lineValue: number;
   overPrice: number | null;
   hitRate60: number | null;
@@ -194,6 +195,7 @@ export default function GradesPageInner() {
   const [defenseCache, setDefenseCache]     = useState<DefenseCache>({});
   const [sortKey, setSortKey]               = useState<SortKey>('compositeGrade');
   const [sortDir, setSortDir]               = useState<SortDir>('desc');
+  const [outcomeFilter, setOutcomeFilter]   = useState<'Over' | 'Under'>('Over');
 
   const [refreshState, setRefreshState] = useState<RefreshState>('idle');
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -325,8 +327,16 @@ export default function GradesPageInner() {
     return opts.sort();
   }, [grades]);
 
+  // Count overs and unders available for display in toggle
+  const overCount = useMemo(() => grades.filter((r) => (r.outcomeName ?? 'Over') === 'Over' && r.overPrice != null).length, [grades]);
+  const underCount = useMemo(() => grades.filter((r) => r.outcomeName === 'Under' && r.overPrice != null).length, [grades]);
+
   const filtered = useMemo(() => {
     let rows = grades.filter((r) => r.overPrice != null);
+
+    // Direction filter — default Over, togglable to Under
+    rows = rows.filter((r) => (r.outcomeName ?? 'Over') === outcomeFilter);
+
     if (selectedGameId) rows = rows.filter((r) => r.gameId === selectedGameId);
     if (selectedMarket) {
       rows = rows.filter((r) =>
@@ -342,21 +352,22 @@ export default function GradesPageInner() {
     }
 
     // Suppress alternate rows when a standard row exists for the same
-    // player, base market, and line value. Alternates at a different line
-    // value than the standard line are distinct and remain visible.
-    const standardKeys = new Set<string>();
-    for (const r of rows) {
-      if (!isAlternate(r.marketKey)) {
-        standardKeys.add(`${r.playerId}:${r.marketKey}:${r.lineValue}`);
+    // player, base market, and line value. Only relevant for Over direction.
+    if (outcomeFilter === 'Over') {
+      const standardKeys = new Set<string>();
+      for (const r of rows) {
+        if (!isAlternate(r.marketKey)) {
+          standardKeys.add(`${r.playerId}:${r.marketKey}:${r.lineValue}`);
+        }
       }
+      rows = rows.filter((r) => {
+        if (!isAlternate(r.marketKey)) return true;
+        return !standardKeys.has(`${r.playerId}:${baseMarket(r.marketKey)}:${r.lineValue}`);
+      });
     }
-    rows = rows.filter((r) => {
-      if (!isAlternate(r.marketKey)) return true;
-      return !standardKeys.has(`${r.playerId}:${baseMarket(r.marketKey)}:${r.lineValue}`);
-    });
 
     return rows;
-  }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds]);
+  }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds, outcomeFilter]);
 
   function getDefRank(row: GradeRow): number | null {
     const pg = posGroup(row.position);
@@ -480,6 +491,9 @@ export default function GradesPageInner() {
     return 'vs Opp';
   }, [sorted]);
 
+  // Label for the price column — "Odds" for overs, "U Odds" for unders
+  const priceColLabel = outcomeFilter === 'Under' ? 'U Odds' : 'Odds';
+
   return (
     <div className="flex flex-col min-h-screen">
       {/* Header */}
@@ -491,6 +505,32 @@ export default function GradesPageInner() {
           At a Glance
         </span>
         <span className="text-xs text-gray-600">{gradeDate}</span>
+
+        {/* Over / Under toggle */}
+        {!loading && !error && grades.length > 0 && (
+          <div className="flex rounded border border-gray-700 overflow-hidden text-xs font-medium">
+            <button
+              onClick={() => setOutcomeFilter('Over')}
+              className={`px-3 py-1 transition-colors ${
+                outcomeFilter === 'Over'
+                  ? 'bg-gray-700 text-gray-100'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Over{overCount > 0 ? ` (${overCount})` : ''}
+            </button>
+            <button
+              onClick={() => setOutcomeFilter('Under')}
+              className={`px-3 py-1 transition-colors border-l border-gray-700 ${
+                outcomeFilter === 'Under'
+                  ? 'bg-gray-700 text-gray-100'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Under{underCount > 0 ? ` (${underCount})` : ''}
+            </button>
+          </div>
+        )}
 
         {!loading && !error && grades.length > 0 && (
           <>
@@ -541,8 +581,8 @@ export default function GradesPageInner() {
 
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
-            {sorted.length}{sorted.length !== grades.filter(r => r.overPrice != null).length
-              ? ` / ${grades.filter(r => r.overPrice != null).length}` : ''} props
+            {sorted.length}{sorted.length !== grades.filter(r => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter).length
+              ? ` / ${grades.filter(r => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter).length}` : ''} props
           </span>
         )}
       </div>
@@ -597,7 +637,7 @@ export default function GradesPageInner() {
                   <SortTh col="marketKey" label="Mkt" />
                   <th className="text-center py-1.5 px-1 font-medium text-xs text-gray-500" title="Alternate line">Alt</th>
                   <SortTh col="lineValue" label="Line" right />
-                  <SortTh col="overPrice" label="Odds" right />
+                  <SortTh col="overPrice" label={priceColLabel} right />
                   <th className="text-right py-1.5 px-2 font-medium text-gray-500 text-xs" title="Implied probability from odds">Imp%</th>
                   <SortTh col="compositeGrade" label="Comp" title="Composite grade — equal-weighted average of all signal components" right />
                   <SortTh col="grade" label="HR%" title="Hit rate grade (weighted 20/60 day)" right />
