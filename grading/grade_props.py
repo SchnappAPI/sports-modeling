@@ -276,6 +276,7 @@ def ensure_tables(engine):
                 market_key        VARCHAR(100)  NOT NULL,
                 bookmaker_key     VARCHAR(50)   NOT NULL,
                 line_value        DECIMAL(6,1)  NOT NULL,
+                over_price        INT           NULL,
                 hit_rate_60       FLOAT         NULL,
                 hit_rate_20       FLOAT         NULL,
                 sample_size_60    INT           NULL,
@@ -298,8 +299,9 @@ def ensure_tables(engine):
                 )
             )
         """))
-        # Idempotent migrations for all component + opp columns.
+        # Idempotent migrations for all columns.
         for col, dtype in [
+            ("over_price",       "INT"),
             ("trend_grade",      "FLOAT"),
             ("momentum_grade",   "FLOAT"),
             ("pattern_grade",    "FLOAT"),
@@ -553,7 +555,9 @@ def build_standard_props(posted_df):
                 "bookmaker_key": r["bookmaker_key"],
                 "line_value":    lv,
                 "game_id":       r["game_id"],
-                "over_price":    r["over_price"] if step == 0 else None,
+                # Only store the real price on the posted center line.
+                # Bracket lines above/below have no real FanDuel price.
+                "over_price":    int(r["over_price"]) if step == 0 and pd.notna(r.get("over_price")) else None,
             })
     return pd.DataFrame(rows).drop_duplicates(
         subset=["player_id", "market_key", "line_value"]
@@ -571,7 +575,9 @@ def build_alt_props(posted_df, active_players_df, event_map):
             alt_posted["line_value"].astype(float))
     )
     price_lookup = {
-        (int(r["player_id"]), r["market_key"], float(r["line_value"])): r["over_price"]
+        (int(r["player_id"]), r["market_key"], float(r["line_value"])): (
+            int(r["over_price"]) if pd.notna(r.get("over_price")) else None
+        )
         for _, r in alt_posted.iterrows()
     }
 
@@ -612,17 +618,10 @@ def drop_bracket_lines_covered_by_alts(std_df, alt_df):
     """
     Remove standard-market bracket lines that are already covered by an
     alternate-market line for the same player and underlying stat.
-
-    When both a standard bracket line and an alternate line exist for the same
-    player at the same line value, the alternate row is preferred because it
-    carries the real FanDuel price. The standard row would show NULL or the
-    center-line price (both misleading) and would appear as a visual duplicate
-    on the At a Glance page since both market keys abbreviate to the same label.
     """
     if std_df.empty or alt_df.empty:
         return std_df
 
-    # Build a set of (player_id, stat_col, line_value) tuples present in alts.
     alt_df = alt_df.copy()
     alt_df["stat_col"] = alt_df["market_key"].map(MARKET_STAT_COL)
     alt_covered = set(
@@ -680,13 +679,6 @@ def fetch_event_map_today(engine, grade_date_str):
 # Hit rate computation
 # ---------------------------------------------------------------------------
 def compute_all_hit_rates(props_df, history_df, opp_info):
-    """
-    Compute hit_rate_60, hit_rate_20, weighted_hit_rate, grade (existing),
-    and hit_rate_opp, sample_size_opp (new: vs today's opponent only).
-
-    history_df must contain an opp_team_id column (added in fetch_history).
-    opp_info is the dict {player_id: {opp_team_id, position}} from fetch_opp_info.
-    """
     result = props_df.copy()
     all_grade_cols = (
         "hit_rate_60", "sample_size_60", "hit_rate_20", "sample_size_20",
@@ -705,7 +697,6 @@ def compute_all_hit_rates(props_df, history_df, opp_info):
     merged = history.merge(lines, on=["player_id", "market_key"], how="inner")
     merged["hit"] = (merged["stat_value"] > merged["line_value"]).astype(int)
 
-    # --- 60-day and 20-day hit rates (unchanged) ---
     g60 = (merged.groupby(["player_id", "market_key", "line_value"])
            .agg(sample_size_60=("hit", "count"), hits_60=("hit", "sum")).reset_index())
     g60["hit_rate_60"] = g60["hits_60"] / g60["sample_size_60"]
@@ -736,8 +727,6 @@ def compute_all_hit_rates(props_df, history_df, opp_info):
     for col in ("weighted_hit_rate", "hit_rate_60", "hit_rate_20"):
         result[col] = result[col].apply(lambda x: round(x, 4) if pd.notna(x) else None)
 
-    # --- vs-opponent hit rate ---
-    # Build a lookup: player_id -> today's opp_team_id
     player_opp = {
         pid: int(info["opp_team_id"])
         for pid, info in opp_info.items()
@@ -745,7 +734,6 @@ def compute_all_hit_rates(props_df, history_df, opp_info):
     }
 
     if player_opp and "opp_team_id" in merged.columns:
-        # Keep only history rows where the player faced today's opponent
         merged["today_opp"] = merged["player_id"].map(player_opp)
         opp_rows = merged[
             merged["today_opp"].notna() &
@@ -773,7 +761,6 @@ def compute_all_hit_rates(props_df, history_df, opp_info):
         result["hit_rate_opp"]   = None
         result["sample_size_opp"] = 0
 
-    # Replace 0-sample opp rows with NULL for cleaner display
     if "sample_size_opp" in result.columns:
         result.loc[result["sample_size_opp"] == 0, "hit_rate_opp"]   = None
         result.loc[result["sample_size_opp"] == 0, "sample_size_opp"] = None
@@ -970,7 +957,7 @@ def upsert_grades(engine, rows):
                 grade_date DATE, event_id VARCHAR(50), game_id VARCHAR(15),
                 player_id BIGINT, player_name NVARCHAR(100),
                 market_key VARCHAR(100), bookmaker_key VARCHAR(50),
-                line_value DECIMAL(6,1),
+                line_value DECIMAL(6,1), over_price INT,
                 hit_rate_60 FLOAT, hit_rate_20 FLOAT,
                 sample_size_60 INT, sample_size_20 INT,
                 weighted_hit_rate FLOAT, grade FLOAT,
@@ -982,10 +969,10 @@ def upsert_grades(engine, rows):
         for i in range(0, len(rows), 500):
             chunk = rows[i:i + 500]
             conn.exec_driver_sql(
-                "INSERT INTO #stage_grades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO #stage_grades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r["grade_date"], r["event_id"], r["game_id"],
                   r["player_id"], r["player_name"], r["market_key"],
-                  r["bookmaker_key"], r["line_value"],
+                  r["bookmaker_key"], r["line_value"], r["over_price"],
                   r["hit_rate_60"], r["hit_rate_20"],
                   r["sample_size_60"], r["sample_size_20"],
                   r["weighted_hit_rate"], r["grade"],
@@ -1002,6 +989,7 @@ def upsert_grades(engine, rows):
                 AND t.bookmaker_key = s.bookmaker_key AND t.line_value = s.line_value)
             WHEN MATCHED THEN UPDATE SET
                 t.game_id = s.game_id,
+                t.over_price = COALESCE(s.over_price, t.over_price),
                 t.hit_rate_60 = s.hit_rate_60, t.hit_rate_20 = s.hit_rate_20,
                 t.sample_size_60 = s.sample_size_60, t.sample_size_20 = s.sample_size_20,
                 t.weighted_hit_rate = s.weighted_hit_rate, t.grade = s.grade,
@@ -1011,14 +999,14 @@ def upsert_grades(engine, rows):
                 t.hit_rate_opp = s.hit_rate_opp, t.sample_size_opp = s.sample_size_opp
             WHEN NOT MATCHED THEN INSERT (
                 grade_date, event_id, game_id, player_id, player_name,
-                market_key, bookmaker_key, line_value,
+                market_key, bookmaker_key, line_value, over_price,
                 hit_rate_60, hit_rate_20, sample_size_60, sample_size_20,
                 weighted_hit_rate, grade, trend_grade, momentum_grade,
                 pattern_grade, matchup_grade, regression_grade, composite_grade,
                 hit_rate_opp, sample_size_opp
             ) VALUES (
                 s.grade_date, s.event_id, s.game_id, s.player_id, s.player_name,
-                s.market_key, s.bookmaker_key, s.line_value,
+                s.market_key, s.bookmaker_key, s.line_value, s.over_price,
                 s.hit_rate_60, s.hit_rate_20, s.sample_size_60, s.sample_size_20,
                 s.weighted_hit_rate, s.grade, s.trend_grade, s.momentum_grade,
                 s.pattern_grade, s.matchup_grade, s.regression_grade, s.composite_grade,
@@ -1056,7 +1044,6 @@ def grade_props_for_date(engine, grade_date_str, props_df):
             matchup_pairs.append((int(info["opp_team_id"]), pg))
     matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
 
-    # Pass opp_info so compute_all_hit_rates can compute vs-opp rates
     graded_df   = compute_all_hit_rates(props_df, history_df, opp_info)
     pm_grades   = precompute_player_market_grades(season_df, graded_df)
     line_grades = precompute_line_grades(season_df, graded_df)
@@ -1090,6 +1077,9 @@ def grade_props_for_date(engine, grade_date_str, props_df):
         n_opp   = r.get("sample_size_opp")
         n_opp   = int(n_opp) if pd.notna(n_opp) and n_opp else None
 
+        raw_price = r.get("over_price")
+        over_price = int(raw_price) if pd.notna(raw_price) and raw_price is not None else None
+
         rows.append({
             "grade_date":        grade_date_str,
             "event_id":          r["event_id"],
@@ -1099,6 +1089,7 @@ def grade_props_for_date(engine, grade_date_str, props_df):
             "market_key":        mkt,
             "bookmaker_key":     r["bookmaker_key"],
             "line_value":        lv,
+            "over_price":        over_price,
             "hit_rate_60":       r.get("hit_rate_60")     if pd.notna(r.get("hit_rate_60"))     else None,
             "hit_rate_20":       r.get("hit_rate_20")     if pd.notna(r.get("hit_rate_20"))     else None,
             "sample_size_60":    int(r["sample_size_60"]) if pd.notna(r.get("sample_size_60")) else 0,
@@ -1136,9 +1127,6 @@ def run_upcoming(engine):
     event_map = fetch_event_map_today(engine, today)
     alt_props = build_alt_props(posted, active, event_map)
 
-    # Drop standard bracket lines that overlap with an alternate-market line
-    # for the same player and stat. The alternate row carries the real FanDuel
-    # price; the bracket-generated duplicate at the same line value does not.
     std_props = drop_bracket_lines_covered_by_alts(std_props, alt_props)
 
     all_props = pd.concat(
