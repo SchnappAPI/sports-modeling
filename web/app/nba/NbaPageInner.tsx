@@ -5,9 +5,10 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import GameStrip, { type Game } from '@/components/GameStrip';
 import GameTabs from '@/components/GameTabs';
+import { randomLoadingWord } from '@/lib/loadingWord';
+import { useAuth } from '@/lib/auth-context';
 
 // Convert an ET time string like "7:30 pm ET" to CT by subtracting 1 hour.
-// Returns the original string unchanged if it cannot be parsed.
 function convertEtToCt(text: string | null): string | null {
   if (!text) return text;
   const m = text.match(/^(\d{1,2}):(\d{2})\s*(am|pm)\s*ET$/i);
@@ -15,13 +16,10 @@ function convertEtToCt(text: string | null): string | null {
   let h = parseInt(m[1], 10);
   const min = m[2];
   const ampm = m[3].toLowerCase();
-  // Convert to 24-hour
   if (ampm === 'pm' && h !== 12) h += 12;
   if (ampm === 'am' && h === 12) h = 0;
-  // Subtract 1 hour for CT
   h -= 1;
   if (h < 0) h += 24;
-  // Back to 12-hour
   let displayAmPm = h >= 12 ? 'pm' : 'am';
   let displayH = h % 12;
   if (displayH === 0) displayH = 12;
@@ -71,28 +69,36 @@ function shiftDate(dateStr: string, days: number): string {
 export default function NbaPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { mode, demoDates, logout } = useAuth();
+
+  const isDemo   = mode === 'demo';
+  const demoDate = demoDates.nba;
 
   const urlDate = searchParams.get('date');
-  const [selectedDate, setSelectedDate] = useState<string>(urlDate ?? todayLocal());
+  const defaultDate = isDemo && demoDate ? demoDate : todayLocal();
+  const [selectedDate, setSelectedDate] = useState<string>(urlDate ?? defaultDate);
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingWord] = useState(() => randomLoadingWord());
   const [error, setError] = useState<string | null>(null);
 
   const activeGameId = searchParams.get('gameId');
   const activeGame   = games.find((g) => g.gameId === activeGameId) ?? null;
+
+  // In demo mode, always force the date back to the demo date
+  const effectiveDate = isDemo && demoDate ? demoDate : selectedDate;
 
   useEffect(() => {
     setLoading(true);
     setError(null);
     setGames([]);
 
-    fetch(`/api/games?sport=nba&date=${selectedDate}`)
+    fetch(`/api/games?sport=nba&date=${effectiveDate}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
       })
       .then((data: { games: Game[] }) => {
-        // Convert ET to CT for upcoming game times before storing
         const converted = (data.games ?? []).map((g) => ({
           ...g,
           gameStatusText:
@@ -105,23 +111,24 @@ export default function NbaPageInner() {
         const currentGameId = searchParams.get('gameId');
         const stillValid = sorted.some((g) => g.gameId === currentGameId);
         if (sorted.length > 0 && !stillValid) {
-          router.replace(`/nba?gameId=${sorted[0].gameId}&date=${selectedDate}`);
+          router.replace(`/nba?gameId=${sorted[0].gameId}&date=${effectiveDate}`);
         }
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [selectedDate]);
+  }, [effectiveDate]);
 
   function handleSelectGame(gameId: string) {
     const params = new URLSearchParams();
     params.set('gameId', gameId);
-    params.set('date', selectedDate);
+    params.set('date', effectiveDate);
     const currentTab = searchParams.get('tab');
     if (currentTab) params.set('tab', currentTab);
     router.replace(`/nba?${params.toString()}`);
   }
 
   function applyDate(newDate: string) {
+    if (isDemo) return; // locked in demo mode
     setSelectedDate(newDate);
     router.replace(`/nba?date=${newDate}`);
   }
@@ -130,7 +137,7 @@ export default function NbaPageInner() {
     applyDate(e.target.value);
   }
 
-  const gradesHref = `/nba/grades?date=${selectedDate}`;
+  const gradesHref = `/nba/grades?date=${effectiveDate}`;
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -138,38 +145,55 @@ export default function NbaPageInner() {
         <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">NBA</span>
 
         <div className="flex items-center gap-1">
-          <button
-            onClick={() => applyDate(shiftDate(selectedDate, -1))}
-            className="px-2 py-1 text-gray-400 hover:text-gray-200 text-base leading-none"
-            aria-label="Previous day"
-          >
-            &#8249;
-          </button>
+          {!isDemo && (
+            <button
+              onClick={() => applyDate(shiftDate(selectedDate, -1))}
+              className="px-2 py-1 text-gray-400 hover:text-gray-200 text-base leading-none"
+              aria-label="Previous day"
+            >
+              &#8249;
+            </button>
+          )}
           <input
             type="date"
-            value={selectedDate}
+            value={effectiveDate}
             onChange={handleDateChange}
-            className="text-sm bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300
-                       focus:outline-none focus:border-gray-500 cursor-pointer"
+            disabled={isDemo}
+            className={`text-sm bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300
+                       focus:outline-none focus:border-gray-500 ${
+                         isDemo ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                       }`}
           />
-          <button
-            onClick={() => applyDate(shiftDate(selectedDate, 1))}
-            className="px-2 py-1 text-gray-400 hover:text-gray-200 text-base leading-none"
-            aria-label="Next day"
-          >
-            &#8250;
-          </button>
+          {!isDemo && (
+            <button
+              onClick={() => applyDate(shiftDate(selectedDate, 1))}
+              className="px-2 py-1 text-gray-400 hover:text-gray-200 text-base leading-none"
+              aria-label="Next day"
+            >
+              &#8250;
+            </button>
+          )}
         </div>
 
-        <Link
-          href={gradesHref}
-          className="text-sm font-medium text-gray-400 hover:text-blue-400 transition-colors"
-        >
-          At a Glance
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link
+            href={gradesHref}
+            className="text-sm font-medium text-gray-400 hover:text-blue-400 transition-colors"
+          >
+            At a Glance
+          </Link>
+          {!isDemo && (
+            <button
+              onClick={logout}
+              className="text-xs text-gray-600 hover:text-gray-400 transition-colors"
+            >
+              Log out
+            </button>
+          )}
+        </div>
       </div>
 
-      {loading && <div className="px-4 py-3 text-sm text-gray-500">Loading games...</div>}
+      {loading && <div className="px-4 py-3 text-sm text-gray-500">{loadingWord}...</div>}
       {error && <div className="px-4 py-3 text-sm text-red-400">Error: {error}</div>}
       {!loading && !error && (
         <GameStrip
@@ -187,7 +211,7 @@ export default function NbaPageInner() {
             awayTeamId={activeGame.awayTeamId}
             homeTeamAbbr={activeGame.homeTeamAbbr}
             awayTeamAbbr={activeGame.awayTeamAbbr}
-            selectedDate={selectedDate}
+            selectedDate={effectiveDate}
             gameStatus={activeGame.gameStatus}
           />
         ) : (

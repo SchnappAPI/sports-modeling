@@ -340,6 +340,21 @@ export default function GradesPageInner() {
     if (minOdds > ODDS_DEFAULT) {
       rows = rows.filter((r) => r.overPrice != null && r.overPrice >= minOdds);
     }
+
+    // Suppress alternate rows when a standard row exists for the same
+    // player, base market, and line value. Alternates at a different line
+    // value than the standard line are distinct and remain visible.
+    const standardKeys = new Set<string>();
+    for (const r of rows) {
+      if (!isAlternate(r.marketKey)) {
+        standardKeys.add(`${r.playerId}:${r.marketKey}:${r.lineValue}`);
+      }
+    }
+    rows = rows.filter((r) => {
+      if (!isAlternate(r.marketKey)) return true;
+      return !standardKeys.has(`${r.playerId}:${baseMarket(r.marketKey)}:${r.lineValue}`);
+    });
+
     return rows;
   }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds]);
 
@@ -459,9 +474,6 @@ export default function GradesPageInner() {
     );
   }
 
-  // Derive a label for the vs-opp column header from the grades data.
-  // Most rows on a given date will share a small set of opponents; show the
-  // first one encountered or fall back to a generic label.
   const oppLabel = useMemo(() => {
     const abbrs = new Set(sorted.map((r) => r.oppTeamAbbr).filter(Boolean));
     if (abbrs.size === 1) return `vs ${Array.from(abbrs)[0]}`;
@@ -601,7 +613,6 @@ export default function GradesPageInner() {
                 {sorted.map((row) => {
                   const def = defRankCell(row);
                   const alt = isAlternate(row.marketKey);
-                  // vs-opp cell: show % with sample count in tooltip
                   const oppPct = fmtPct(row.hitRateOpp);
                   const oppTitle = row.sampleSizeOpp
                     ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'}`

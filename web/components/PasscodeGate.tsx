@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react';
 
+const BYPASS = false; // Set to true to disable passcode gate
+
 const TOKEN_KEY = 'schnapp_auth_token';
 
 export default function PasscodeGate({ children }: { children: React.ReactNode }) {
@@ -11,6 +13,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
   const [submitting, setSubmitting] = useState(false);
 
   const verify = useCallback(async () => {
+    if (BYPASS) { setStatus('authed'); return; }
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) { setStatus('gate'); return; }
     try {
