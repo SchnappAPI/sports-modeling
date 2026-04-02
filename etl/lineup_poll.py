@@ -28,16 +28,35 @@ Secrets required
 """
 
 import argparse
-import math
-import os
-import re
+import sys
 import time
 import logging
 from datetime import date, datetime, timezone, timedelta
+import re
 
 import pandas as pd
+from sqlalchemy import text
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Import shared infrastructure from nba_etl.
+# nba_etl guards main() under if __name__ == "__main__" so importing it
+# does not trigger argparse or any side effects.
+# ---------------------------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from etl.nba_etl import (
+    get_engine,
+    upsert,
+    safe_int,
+    safe_str,
+    NBA_HEADERS,
+    get_proxies,
+    API_DELAY,
+    RETRY_COUNT,
+    RETRY_WAIT,
+)
+
 import requests
-from sqlalchemy import create_engine, text
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -49,125 +68,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-PROXY_URL   = os.environ.get("NBA_PROXY_URL")
-API_DELAY   = 1.5
-RETRY_WAIT  = 30
-RETRY_COUNT = 3
-
-NBA_HEADERS = {
-    "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept":             "application/json, text/plain, */*",
-    "Accept-Language":    "en-US,en;q=0.9",
-    "x-nba-stats-origin": "stats",
-    "x-nba-stats-token":  "true",
-    "Origin":             "https://www.nba.com",
-    "Referer":            "https://www.nba.com/",
-}
-
-def get_proxies():
-    if not PROXY_URL:
-        return None
-    return {"http": PROXY_URL, "https": PROXY_URL}
-
-
-# ---------------------------------------------------------------------------
-# Database
-# ---------------------------------------------------------------------------
-def get_engine():
-    server   = os.environ["AZURE_SQL_SERVER"]
-    database = os.environ["AZURE_SQL_DATABASE"]
-    username = os.environ["AZURE_SQL_USERNAME"]
-    password = os.environ["AZURE_SQL_PASSWORD"]
-    conn_str = (
-        f"mssql+pyodbc://{username}:{password}"
-        f"@{server}/{database}"
-        "?driver=ODBC+Driver+18+for+SQL+Server"
-        "&Encrypt=yes&TrustServerCertificate=no"
-        "&Connection+Timeout=90"
-    )
-    engine = create_engine(conn_str, fast_executemany=True)
-    for attempt in range(1, 4):
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            log.info("Database connection established.")
-            return engine
-        except Exception as exc:
-            log.warning(f"DB connection attempt {attempt}/3 failed: {exc}")
-            if attempt < 3:
-                log.info("Waiting 60s for Azure SQL to resume...")
-                time.sleep(60)
-    raise RuntimeError("Could not connect to Azure SQL after 3 attempts.")
-
-
-# ---------------------------------------------------------------------------
-# Safe type helpers
-# ---------------------------------------------------------------------------
-def safe_int(val):
-    try:
-        if val is None or (isinstance(val, float) and pd.isna(val)):
-            return None
-        return int(val)
-    except (ValueError, TypeError):
-        return None
-
-def safe_str(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return None
-    s = str(val).strip()
-    return s if s else None
-
-
-# ---------------------------------------------------------------------------
-# MERGE upsert
-# ---------------------------------------------------------------------------
-def _clean_val(v):
-    import numpy as np
-    if v is None:
-        return None
-    try:
-        if pd.isna(v):
-            return None
-    except (TypeError, ValueError):
-        pass
-    if isinstance(v, float):
-        if math.isnan(v) or math.isinf(v):
-            return None
-        return v
-    if isinstance(v, (np.integer,)):
-        return int(v)
-    if isinstance(v, (np.floating,)):
-        f = float(v)
-        return None if (math.isnan(f) or math.isinf(f)) else f
-    return v
-
-def upsert(df, engine, schema, table, pk_cols):
-    if df is None or df.empty:
-        return
-    records = [
-        {col: _clean_val(val) for col, val in row.items()}
-        for row in df.to_dict(orient="records")
-    ]
-    non_pk    = [c for c in df.columns if c not in pk_cols]
-    col_list  = ", ".join(df.columns)
-    val_list  = ", ".join(f":{c}" for c in df.columns)
-    on_clause = " AND ".join(f"tgt.{c} = src.{c}" for c in pk_cols)
-    update_set = (
-        ", ".join(f"tgt.{c} = src.{c}" for c in non_pk)
-        if non_pk else f"tgt.{pk_cols[0]} = tgt.{pk_cols[0]}"
-    )
-    merge_sql = f"""
-        MERGE {schema}.{table} AS tgt
-        USING (VALUES ({val_list})) AS src ({col_list})
-        ON {on_clause}
-        WHEN MATCHED THEN UPDATE SET {update_set}
-        WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({val_list});
-    """
-    with engine.begin() as conn:
-        conn.execute(text(merge_sql), records)
+PROXY_URL = __import__('os').environ.get("NBA_PROXY_URL")
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +222,7 @@ def fetch_projected_lineups(game_id, game_date):
     players with no position are predicted bench.
     """
     url  = "https://stats.nba.com/stats/boxscorepreviewv3"
-    data = _direct_get(url, f"boxscorepreviewv3 {game_id}",
-                       timeout=60)
+    data = _direct_get(url, f"boxscorepreviewv3 {game_id}", timeout=60)
     if data is None:
         return []
 

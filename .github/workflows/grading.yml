@@ -1,7 +1,8 @@
 name: NBA Grading
 
-# Manual dispatch only -- nightly schedule is in odds-grading-pipeline.yml.
-# Use this workflow for one-off upcoming runs and historical backfill.
+# Nightly upcoming run at UTC 10:30 (after odds-etl.yml fetches today's lines
+# at UTC 10:00). Also supports manual dispatch for one-off upcoming runs and
+# historical backfill.
 #
 # Backfill mode uses a time-aware loop: each run processes dates in batches
 # until the time limit is reached, then re-dispatches automatically. Already-
@@ -10,6 +11,8 @@ name: NBA Grading
 # the script printing "Backfill: nothing to do." to stdout.
 
 on:
+  schedule:
+    - cron: '30 10 * * *'   # UTC 10:30 nightly — grade today's lines
   workflow_dispatch:
     inputs:
       mode:

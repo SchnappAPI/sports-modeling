@@ -1,9 +1,14 @@
 name: Odds ETL
 
-# Manual dispatch only -- nightly schedule moved to odds-grading-pipeline.yml.
-# Use this workflow for one-off runs: probe, discover, or targeted backfill.
+# Nightly upcoming fetch at UTC 10:00 keeps today's FanDuel lines and the
+# event_game_map current each morning. grading.yml fires at UTC 10:30 and
+# depends on this run completing first.
+#
+# Use manual dispatch for one-off runs: probe, discover, or targeted backfill.
 
 on:
+  schedule:
+    - cron: '0 10 * * *'   # UTC 10:00 nightly — fetch today's NBA lines
   workflow_dispatch:
     inputs:
       mode:
@@ -69,6 +74,12 @@ jobs:
       - name: Build CLI flags
         id: flags
         run: |
+          # Scheduled run always uses upcoming nba mode.
+          # Manual dispatch uses whatever inputs are provided.
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "flags=--mode upcoming --sport nba --days-ahead 1" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
           FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'nba' }}"
           FLAGS="$FLAGS --snapshots ${{ github.event.inputs.snapshots || '50' }}"

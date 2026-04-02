@@ -783,19 +783,29 @@ def _safe(v):
 
 
 def precompute_player_market_grades(season_df, props_df):
+    """
+    Compute trend_grade and regression_grade for every (player_id, market_key)
+    combo present in props_df.
+
+    Pre-groups season_df by player_id once so each player's data is looked
+    up via dict instead of scanning the full DataFrame on every iteration.
+    """
     combos = props_df[["player_id", "market_key"]].drop_duplicates()
     result = {}
+
+    # Pre-group once — O(n) instead of O(players * markets) full scans.
+    player_groups = {
+        pid: grp.sort_values("game_date")
+        for pid, grp in season_df.groupby("player_id")
+    }
 
     for _, row in combos.iterrows():
         pid      = int(row["player_id"])
         mkt      = row["market_key"]
         stat_col = MARKET_STAT_COL.get(mkt)
-        if stat_col is None:
-            result[(pid, mkt)] = {"trend_grade": None, "regression_grade": None}
-            continue
+        pdf      = player_groups.get(pid)
 
-        pdf = season_df[season_df["player_id"] == pid].sort_values("game_date")
-        if pdf.empty or stat_col not in pdf.columns:
+        if stat_col is None or pdf is None or pdf.empty or stat_col not in pdf.columns:
             result[(pid, mkt)] = {"trend_grade": None, "regression_grade": None}
             continue
 
