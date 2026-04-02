@@ -129,7 +129,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
             value={code}
             onChange={(e) => setCode(e.target.value.toUpperCase())}
             onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-            placeholder="DRAMA-LLAMA"
+            placeholder="ENTER-CODE-HERE"
             autoCapitalize="characters"
             autoCorrect="off"
             autoComplete="off"
