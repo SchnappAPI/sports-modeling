@@ -12,68 +12,51 @@ many line values are graded per player per market.
 
 DB round trips per grade date
 ------------------------------
-  1. Fetch FanDuel prop lines for the date.
+  1. Fetch FanDuel prop lines for the date (Over rows for building props;
+     Under prices fetched separately for standard markets).
   2. Fetch 60-day hit-rate history (bulk, all players + markets at once).
-     Now also returns opp_team_id per game row via nba.schedule join.
+     Also returns opp_team_id per game row via nba.schedule join.
   3. Fetch full-season game totals (bulk, all players at once).
   4. Fetch matchup defense ranks (one query for all opp/position pairs).
   5. Fetch opponent/position info per player (one query).
-  6. Write all grade rows in one batched upsert.
+  6. Write all grade rows (overs + unders) in one batched upsert.
 
 Modes
 -----
-  upcoming   Grades today's standard lines (posted FanDuel line ± 5 bracket)
+  upcoming   Grades today's standard lines (posted FanDuel line +/- 5 bracket)
              plus alternate lines from the static grid filtered to lines
              FanDuel has actually priced. Full component computation.
-
              Standard bracket lines that overlap with an alternate-market line
-             for the same player and stat are dropped — the alternate row with
-             its real FanDuel price takes precedence.
+             for the same player and stat are dropped.
+             Both Over and Under grades are produced for standard lines.
+             Alternates are Over-only (no under lines for alts).
 
   intraday   Standard lines only. Checks for line movement since last grade.
              Only re-grades players/markets where the posted line changed.
-             Skips alternate markets entirely. Triggered by pregame-refresh.
+             Skips alternate markets entirely.
 
   backfill   Works through historical game dates, oldest ungraded first.
              Uses posted historical FanDuel lines only (no bracket, no grid).
-
-Standard line bracket
----------------------
-  Posted FanDuel line ± 5 increments of 1.0 (integer steps on a half-point
-  line). Minimum 0.5. Example: posted 14.5 → grades 9.5–19.5 in 1.0 steps.
-  11 line values per player per market.
-
-Alternate line grid (half-points matching FanDuel's actual format)
-------------------------------------------------------------------
-  pts:  4.5, 9.5, 14.5, 19.5, 24.5, 29.5, 34.5, 39.5, 44.5
-  reb:  3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5
-  ast:  1.5, 3.5, 5.5, 7.5, 9.5, 11.5, 13.5
-  fg3m: 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5
-  blk:  0.5, 1.5, 2.5, 3.5
-  stl:  0.5, 1.5, 2.5, 3.5
-  pra:  9.5, 14.5, 19.5, 24.5, 29.5, 34.5, 39.5, 44.5, 49.5, 54.5, 59.5
-  pr:   9.5, 14.5, 19.5, 24.5, 29.5, 34.5, 39.5, 44.5, 49.5
-  pa:   9.5, 14.5, 19.5, 24.5, 29.5, 34.5, 39.5, 44.5, 49.5
-  ra:   4.5, 9.5, 14.5, 19.5, 24.5
-
-  Only lines where FanDuel has posted odds are written. Graded overnight
-  only; never re-graded intraday.
+             Over-only (historical under prices not fetched).
 
 Component grades (all 0-100)
 -----------------------------
   weighted_hit_rate  Blended 20/60-day hit rate. Primary signal.
-  trend_grade        Raw stat mean: last-10 games vs last-30. Centered at 50.
-  momentum_grade     Consecutive hit/miss streak, log-scaled, uncapped.
-  pattern_grade      Historical reversal rate after runs of the current length.
+  trend_grade        Stat mean last-10 vs last-30. Centered at 50.
+                     Inverted for unders (falling trend favors under).
+  momentum_grade     Consecutive hit/miss streak, log-scaled.
+                     Inverted for unders.
+  pattern_grade      Historical reversal rate after runs of current length.
+                     Inverted for unders.
   matchup_grade      Defense rank for player position vs today's opponent.
-  regression_grade   Z-score of recent 10-game mean vs season. Reversion signal.
+                     Inverted for unders (tough defense = good matchup for under).
+  regression_grade   Z-score of recent mean vs season. Reversion signal.
+                     Inverted for unders.
   composite_grade    Equal-weighted average of all non-NULL components.
 
-Args
-----
-  --mode      upcoming | intraday | backfill  (default: upcoming)
-  --batch N   Backfill mode: max game dates per run (default 10)
-  --date      Backfill mode: grade a specific date (YYYY-MM-DD)
+The over_price column stores the Over price for Over rows and the Under
+price for Under rows. The outcome_name column ('Over' or 'Under') tells
+you which direction the row represents.
 
 Secrets required
 ----------------
@@ -276,6 +259,7 @@ def ensure_tables(engine):
                 market_key        VARCHAR(100)  NOT NULL,
                 bookmaker_key     VARCHAR(50)   NOT NULL,
                 line_value        DECIMAL(6,1)  NOT NULL,
+                outcome_name      VARCHAR(5)    NOT NULL DEFAULT 'Over',
                 over_price        INT           NULL,
                 hit_rate_60       FLOAT         NULL,
                 hit_rate_20       FLOAT         NULL,
@@ -293,13 +277,12 @@ def ensure_tables(engine):
                 sample_size_opp   INT           NULL,
                 created_at        DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
                 CONSTRAINT pk_daily_grades PRIMARY KEY (grade_id),
-                CONSTRAINT uq_daily_grades UNIQUE (
+                CONSTRAINT uq_daily_grades_v3 UNIQUE (
                     grade_date, event_id, player_id,
-                    market_key, bookmaker_key, line_value
+                    market_key, bookmaker_key, line_value, outcome_name
                 )
             )
         """))
-        # Idempotent migrations for all columns.
         for col, dtype in [
             ("over_price",       "INT"),
             ("trend_grade",      "FLOAT"),
@@ -310,6 +293,7 @@ def ensure_tables(engine):
             ("composite_grade",  "FLOAT"),
             ("hit_rate_opp",     "FLOAT"),
             ("sample_size_opp",  "INT"),
+            ("outcome_name",     "VARCHAR(5)"),
         ]:
             conn.execute(text(f"""
                 IF NOT EXISTS (
@@ -326,13 +310,6 @@ def ensure_tables(engine):
 # DB fetches
 # ---------------------------------------------------------------------------
 def fetch_history(engine, player_ids, market_keys, as_of_date):
-    """
-    Fetch per-game stat history for hit rate computation.
-    Returns one row per (player_id, market_key, game_id) with:
-      stat_value, in_short_window, opp_team_id.
-    The opp_team_id column enables vs-opponent hit rate computation
-    without a separate DB round trip.
-    """
     gradeable = [m for m in market_keys if m in MARKET_STAT_MAP]
     if not player_ids or not gradeable:
         return pd.DataFrame()
@@ -501,6 +478,38 @@ def fetch_matchup_defense(engine, opp_player_pairs):
     return result
 
 
+def fetch_under_prices(engine, table="odds.upcoming_player_props", date_filter="", params=None):
+    """
+    Returns a dict keyed by (player_id, market_key, line_value) -> under_price.
+    Used only for standard markets on standard lines (bracket center only).
+    """
+    std_mkt_list = ", ".join(f"'{m}'" for m in STANDARD_MARKETS)
+    sql = text(f"""
+        SELECT pm.player_id, pp.market_key, pp.outcome_point AS line_value,
+               pp.outcome_price AS under_price
+        FROM {table} pp
+        JOIN odds.event_game_map egm
+            ON egm.event_id = pp.event_id AND egm.sport_key = 'basketball_nba'
+           AND egm.game_id IS NOT NULL
+        JOIN odds.player_map pm
+            ON pm.odds_player_name = pp.player_name AND pm.sport_key = pp.sport_key
+           AND pm.player_id IS NOT NULL
+        WHERE pp.sport_key = 'basketball_nba'
+          AND pp.bookmaker_key = :bk
+          AND pp.outcome_name = 'Under'
+          AND pp.outcome_point IS NOT NULL
+          AND pp.market_key IN ({std_mkt_list})
+          {date_filter}
+    """)
+    df = pd.read_sql(sql, engine, params={**(params or {}), "bk": BOOKMAKER})
+    result = {}
+    for _, row in df.iterrows():
+        if pd.notna(row["player_id"]) and pd.notna(row["under_price"]):
+            result[(int(row["player_id"]), row["market_key"], float(row["line_value"]))] = int(row["under_price"])
+    log.info(f"  Under prices: {len(result)} lines.")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Props building
 # ---------------------------------------------------------------------------
@@ -533,7 +542,7 @@ def fetch_posted_props(engine, table="odds.upcoming_player_props", date_filter="
     return pd.read_sql(sql, engine, params={**(params or {}), "bk": BOOKMAKER})
 
 
-def build_standard_props(posted_df):
+def build_standard_props(posted_df, under_prices=None):
     std = posted_df[posted_df["market_key"].isin(STANDARD_MARKETS)].copy()
     if std.empty:
         return pd.DataFrame()
@@ -555,13 +564,44 @@ def build_standard_props(posted_df):
                 "bookmaker_key": r["bookmaker_key"],
                 "line_value":    lv,
                 "game_id":       r["game_id"],
-                # Only store the real price on the posted center line.
-                # Bracket lines above/below have no real FanDuel price.
                 "over_price":    int(r["over_price"]) if step == 0 and pd.notna(r.get("over_price")) else None,
+                "outcome_name":  "Over",
             })
     return pd.DataFrame(rows).drop_duplicates(
         subset=["player_id", "market_key", "line_value"]
     )
+
+
+def build_under_props(posted_df, under_prices):
+    if not under_prices:
+        return pd.DataFrame()
+
+    std = posted_df[posted_df["market_key"].isin(STANDARD_MARKETS)].copy()
+    if std.empty:
+        return pd.DataFrame()
+
+    std = std.drop_duplicates(subset=["player_id", "market_key"])
+
+    rows = []
+    for _, r in std.iterrows():
+        pid = int(r["player_id"])
+        mkt = r["market_key"]
+        lv  = float(r["line_value"])
+        price = under_prices.get((pid, mkt, lv))
+        if price is None:
+            continue
+        rows.append({
+            "event_id":      r["event_id"],
+            "player_id":     pid,
+            "player_name":   r["player_name"],
+            "market_key":    mkt,
+            "bookmaker_key": r["bookmaker_key"],
+            "line_value":    lv,
+            "game_id":       r["game_id"],
+            "over_price":    price,
+            "outcome_name":  "Under",
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 def build_alt_props(posted_df, active_players_df, event_map):
@@ -607,6 +647,7 @@ def build_alt_props(posted_df, active_players_df, event_map):
                     "line_value":    float(lv),
                     "game_id":       game_id,
                     "over_price":    price_lookup.get((pid, mkt, float(lv))),
+                    "outcome_name":  "Over",
                 })
 
     return pd.DataFrame(rows).drop_duplicates(
@@ -615,10 +656,6 @@ def build_alt_props(posted_df, active_players_df, event_map):
 
 
 def drop_bracket_lines_covered_by_alts(std_df, alt_df):
-    """
-    Remove standard-market bracket lines that are already covered by an
-    alternate-market line for the same player and underlying stat.
-    """
     if std_df.empty or alt_df.empty:
         return std_df
 
@@ -678,7 +715,7 @@ def fetch_event_map_today(engine, grade_date_str):
 # ---------------------------------------------------------------------------
 # Hit rate computation
 # ---------------------------------------------------------------------------
-def compute_all_hit_rates(props_df, history_df, opp_info):
+def compute_all_hit_rates(props_df, history_df, opp_info, direction="over"):
     result = props_df.copy()
     all_grade_cols = (
         "hit_rate_60", "sample_size_60", "hit_rate_20", "sample_size_20",
@@ -695,7 +732,11 @@ def compute_all_hit_rates(props_df, history_df, opp_info):
 
     lines  = result[["player_id", "market_key", "line_value"]].drop_duplicates()
     merged = history.merge(lines, on=["player_id", "market_key"], how="inner")
-    merged["hit"] = (merged["stat_value"] > merged["line_value"]).astype(int)
+
+    if direction == "under":
+        merged["hit"] = (merged["stat_value"] < merged["line_value"]).astype(int)
+    else:
+        merged["hit"] = (merged["stat_value"] > merged["line_value"]).astype(int)
 
     g60 = (merged.groupby(["player_id", "market_key", "line_value"])
            .agg(sample_size_60=("hit", "count"), hits_60=("hit", "sum")).reset_index())
@@ -782,18 +823,17 @@ def _safe(v):
         return None
 
 
-def precompute_player_market_grades(season_df, props_df):
-    """
-    Compute trend_grade and regression_grade for every (player_id, market_key)
-    combo present in props_df.
+def _invert(v):
+    """Invert a 0-100 grade around 50 for under direction."""
+    if v is None:
+        return None
+    return _safe(100.0 - float(v))
 
-    Pre-groups season_df by player_id once so each player's data is looked
-    up via dict instead of scanning the full DataFrame on every iteration.
-    """
+
+def precompute_player_market_grades(season_df, props_df):
     combos = props_df[["player_id", "market_key"]].drop_duplicates()
     result = {}
 
-    # Pre-group once — O(n) instead of O(players * markets) full scans.
     player_groups = {
         pid: grp.sort_values("game_date")
         for pid, grp in season_df.groupby("player_id")
@@ -943,9 +983,6 @@ def compute_composite(whr, trend, momentum, pattern, matchup, regression):
 # ---------------------------------------------------------------------------
 # Upsert
 # ---------------------------------------------------------------------------
-MERGE_KEY = ["grade_date", "event_id", "player_id", "market_key", "bookmaker_key", "line_value"]
-
-
 def upsert_grades(engine, rows):
     if not rows:
         return 0
@@ -953,7 +990,7 @@ def upsert_grades(engine, rows):
     seen = {}
     for r in rows:
         k = (r["grade_date"], r["event_id"], r["player_id"],
-             r["market_key"], r["bookmaker_key"], r["line_value"])
+             r["market_key"], r["bookmaker_key"], r["line_value"], r.get("outcome_name", "Over"))
         seen[k] = r
     rows = list(seen.values())
 
@@ -967,7 +1004,7 @@ def upsert_grades(engine, rows):
                 grade_date DATE, event_id VARCHAR(50), game_id VARCHAR(15),
                 player_id BIGINT, player_name NVARCHAR(100),
                 market_key VARCHAR(100), bookmaker_key VARCHAR(50),
-                line_value DECIMAL(6,1), over_price INT,
+                line_value DECIMAL(6,1), outcome_name VARCHAR(5), over_price INT,
                 hit_rate_60 FLOAT, hit_rate_20 FLOAT,
                 sample_size_60 INT, sample_size_20 INT,
                 weighted_hit_rate FLOAT, grade FLOAT,
@@ -979,10 +1016,10 @@ def upsert_grades(engine, rows):
         for i in range(0, len(rows), 500):
             chunk = rows[i:i + 500]
             conn.exec_driver_sql(
-                "INSERT INTO #stage_grades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO #stage_grades VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r["grade_date"], r["event_id"], r["game_id"],
                   r["player_id"], r["player_name"], r["market_key"],
-                  r["bookmaker_key"], r["line_value"], r["over_price"],
+                  r["bookmaker_key"], r["line_value"], r.get("outcome_name", "Over"), r["over_price"],
                   r["hit_rate_60"], r["hit_rate_20"],
                   r["sample_size_60"], r["sample_size_20"],
                   r["weighted_hit_rate"], r["grade"],
@@ -996,7 +1033,8 @@ def upsert_grades(engine, rows):
             USING #stage_grades AS s
             ON (t.grade_date = s.grade_date AND t.event_id = s.event_id
                 AND t.player_id = s.player_id AND t.market_key = s.market_key
-                AND t.bookmaker_key = s.bookmaker_key AND t.line_value = s.line_value)
+                AND t.bookmaker_key = s.bookmaker_key AND t.line_value = s.line_value
+                AND t.outcome_name = s.outcome_name)
             WHEN MATCHED THEN UPDATE SET
                 t.game_id = s.game_id,
                 t.over_price = COALESCE(s.over_price, t.over_price),
@@ -1009,14 +1047,14 @@ def upsert_grades(engine, rows):
                 t.hit_rate_opp = s.hit_rate_opp, t.sample_size_opp = s.sample_size_opp
             WHEN NOT MATCHED THEN INSERT (
                 grade_date, event_id, game_id, player_id, player_name,
-                market_key, bookmaker_key, line_value, over_price,
+                market_key, bookmaker_key, line_value, outcome_name, over_price,
                 hit_rate_60, hit_rate_20, sample_size_60, sample_size_20,
                 weighted_hit_rate, grade, trend_grade, momentum_grade,
                 pattern_grade, matchup_grade, regression_grade, composite_grade,
                 hit_rate_opp, sample_size_opp
             ) VALUES (
                 s.grade_date, s.event_id, s.game_id, s.player_id, s.player_name,
-                s.market_key, s.bookmaker_key, s.line_value, s.over_price,
+                s.market_key, s.bookmaker_key, s.line_value, s.outcome_name, s.over_price,
                 s.hit_rate_60, s.hit_rate_20, s.sample_size_60, s.sample_size_20,
                 s.weighted_hit_rate, s.grade, s.trend_grade, s.momentum_grade,
                 s.pattern_grade, s.matchup_grade, s.regression_grade, s.composite_grade,
@@ -1027,36 +1065,22 @@ def upsert_grades(engine, rows):
 
 
 # ---------------------------------------------------------------------------
-# Core: grade a set of props rows
+# Core grading
 # ---------------------------------------------------------------------------
-def grade_props_for_date(engine, grade_date_str, props_df):
+def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df,
+                         opp_info, matchup_cache, direction="over"):
     if props_df.empty:
-        log.info(f"  {grade_date_str}: no props.")
-        return 0
+        return []
 
     props_df = props_df.drop_duplicates(
         subset=["player_id", "market_key", "line_value"]
     ).copy()
 
-    player_ids  = props_df["player_id"].dropna().unique().tolist()
-    market_keys = props_df["market_key"].dropna().unique().tolist()
-
-    history_df = fetch_history(engine, player_ids, market_keys, grade_date_str)
-    season_df  = fetch_season_history(engine, player_ids, grade_date_str)
-    opp_info   = fetch_opp_info(engine, player_ids, grade_date_str)
-
-    matchup_pairs = []
-    for pid, info in opp_info.items():
-        pos = info.get("position", "")
-        pg  = ("G" if pos.startswith("G") else "F" if pos.startswith("F") else
-               "C" if pos.startswith("C") else None)
-        if pg and info.get("opp_team_id"):
-            matchup_pairs.append((int(info["opp_team_id"]), pg))
-    matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
-
-    graded_df   = compute_all_hit_rates(props_df, history_df, opp_info)
+    graded_df   = compute_all_hit_rates(props_df, history_df, opp_info, direction=direction)
     pm_grades   = precompute_player_market_grades(season_df, graded_df)
     line_grades = precompute_line_grades(season_df, graded_df)
+
+    is_under = (direction == "under")
 
     rows = []
     for _, r in graded_df.iterrows():
@@ -1075,12 +1099,26 @@ def grade_props_for_date(engine, grade_date_str, props_df):
         pm = pm_grades.get((pid_int, mkt), {})
         lk = line_grades.get((pid_int, mkt, lv), {})
 
-        trend      = pm.get("trend_grade")
-        regression = pm.get("regression_grade")
-        momentum   = lk.get("momentum_grade")
-        pattern    = lk.get("pattern_grade")
-        matchup    = compute_matchup_grade(mkt, opp_id, position, matchup_cache)
-        composite  = compute_composite(whr, trend, momentum, pattern, matchup, regression)
+        trend_raw      = pm.get("trend_grade")
+        regression_raw = pm.get("regression_grade")
+        momentum_raw   = lk.get("momentum_grade")
+        pattern_raw    = lk.get("pattern_grade")
+        matchup_raw    = compute_matchup_grade(mkt, opp_id, position, matchup_cache)
+
+        if is_under:
+            trend      = _invert(trend_raw)
+            regression = _invert(regression_raw)
+            momentum   = _invert(momentum_raw)
+            pattern    = _invert(pattern_raw)
+            matchup    = _invert(matchup_raw)
+        else:
+            trend      = trend_raw
+            regression = regression_raw
+            momentum   = momentum_raw
+            pattern    = pattern_raw
+            matchup    = matchup_raw
+
+        composite = compute_composite(whr, trend, momentum, pattern, matchup, regression)
 
         hr_opp  = r.get("hit_rate_opp")
         hr_opp  = hr_opp if pd.notna(hr_opp) else None
@@ -1088,7 +1126,7 @@ def grade_props_for_date(engine, grade_date_str, props_df):
         n_opp   = int(n_opp) if pd.notna(n_opp) and n_opp else None
 
         raw_price = r.get("over_price")
-        over_price = int(raw_price) if pd.notna(raw_price) and raw_price is not None else None
+        price = int(raw_price) if pd.notna(raw_price) and raw_price is not None else None
 
         rows.append({
             "grade_date":        grade_date_str,
@@ -1099,7 +1137,8 @@ def grade_props_for_date(engine, grade_date_str, props_df):
             "market_key":        mkt,
             "bookmaker_key":     r["bookmaker_key"],
             "line_value":        lv,
-            "over_price":        over_price,
+            "outcome_name":      r.get("outcome_name", "Over" if not is_under else "Under"),
+            "over_price":        price,
             "hit_rate_60":       r.get("hit_rate_60")     if pd.notna(r.get("hit_rate_60"))     else None,
             "hit_rate_20":       r.get("hit_rate_20")     if pd.notna(r.get("hit_rate_20"))     else None,
             "sample_size_60":    int(r["sample_size_60"]) if pd.notna(r.get("sample_size_60")) else 0,
@@ -1116,11 +1155,7 @@ def grade_props_for_date(engine, grade_date_str, props_df):
             "sample_size_opp":   n_opp,
         })
 
-    written = upsert_grades(engine, rows)
-    graded  = sum(1 for r in rows if r["composite_grade"] is not None)
-    with_opp = sum(1 for r in rows if r["hit_rate_opp"] is not None)
-    log.info(f"  {grade_date_str}: {written} rows written, {graded} with composite, {with_opp} with opp rate.")
-    return written
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -1137,18 +1172,49 @@ def run_upcoming(engine):
     event_map = fetch_event_map_today(engine, today)
     alt_props = build_alt_props(posted, active, event_map)
 
-    std_props = drop_bracket_lines_covered_by_alts(std_props, alt_props)
+    std_props_trimmed = drop_bracket_lines_covered_by_alts(std_props, alt_props)
 
-    all_props = pd.concat(
-        [p for p in [std_props, alt_props] if not p.empty], ignore_index=True
+    all_over_props = pd.concat(
+        [p for p in [std_props_trimmed, alt_props] if not p.empty], ignore_index=True
     )
-    if all_props.empty:
+    if all_over_props.empty:
         log.info("No props to grade.")
         return
 
-    all_props = all_props.drop_duplicates(subset=["player_id", "market_key", "line_value"])
-    log.info(f"  {len(all_props)} prop rows ({len(std_props)} standard, {len(alt_props)} alternate).")
-    grade_props_for_date(engine, today, all_props)
+    all_over_props = all_over_props.drop_duplicates(subset=["player_id", "market_key", "line_value"])
+    log.info(f"  {len(all_over_props)} over prop rows ({len(std_props_trimmed)} standard, {len(alt_props)} alternate).")
+
+    under_prices = fetch_under_prices(engine)
+    under_props  = build_under_props(posted, under_prices)
+    log.info(f"  {len(under_props)} under prop rows (standard markets, posted line only).")
+
+    all_player_ids  = list(set(
+        all_over_props["player_id"].dropna().tolist() +
+        (under_props["player_id"].dropna().tolist() if not under_props.empty else [])
+    ))
+    all_market_keys = list(set(
+        all_over_props["market_key"].dropna().tolist() +
+        (under_props["market_key"].dropna().tolist() if not under_props.empty else [])
+    ))
+
+    history_df    = fetch_history(engine, all_player_ids, all_market_keys, today)
+    season_df     = fetch_season_history(engine, all_player_ids, today)
+    opp_info      = fetch_opp_info(engine, all_player_ids, today)
+    matchup_pairs = []
+    for pid, info in opp_info.items():
+        pos = info.get("position", "")
+        pg  = ("G" if pos.startswith("G") else "F" if pos.startswith("F") else
+               "C" if pos.startswith("C") else None)
+        if pg and info.get("opp_team_id"):
+            matchup_pairs.append((int(info["opp_team_id"]), pg))
+    matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
+
+    over_rows  = grade_props_for_date(engine, today, all_over_props, history_df, season_df, opp_info, matchup_cache, direction="over")
+    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under") if not under_props.empty else []
+
+    all_rows = over_rows + under_rows
+    written  = upsert_grades(engine, all_rows)
+    log.info(f"  {written} total rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
 
 def run_intraday(engine):
@@ -1177,6 +1243,7 @@ def run_intraday(engine):
             FROM common.daily_grades
             WHERE grade_date = :gd AND player_id IN ({pid_list})
               AND market_key IN ({std_mkt_list}) AND bookmaker_key = :bk
+              AND outcome_name = 'Over'
         ) ranked
         WHERE rn = 1
     """), engine, params={"gd": today, "bk": BOOKMAKER})
@@ -1201,10 +1268,39 @@ def run_intraday(engine):
     moved_posted = std_posted.merge(
         moved[["player_id", "market_key"]], on=["player_id", "market_key"], how="inner"
     )
-    bracket = build_standard_props(moved_posted)
-    if bracket.empty:
+    over_bracket = build_standard_props(moved_posted)
+    if over_bracket.empty:
         return
-    grade_props_for_date(engine, today, bracket)
+
+    under_prices = fetch_under_prices(engine)
+    under_props  = build_under_props(moved_posted, under_prices)
+
+    all_player_ids  = list(set(
+        over_bracket["player_id"].dropna().tolist() +
+        (under_props["player_id"].dropna().tolist() if not under_props.empty else [])
+    ))
+    all_market_keys = list(set(
+        over_bracket["market_key"].dropna().tolist() +
+        (under_props["market_key"].dropna().tolist() if not under_props.empty else [])
+    ))
+
+    history_df    = fetch_history(engine, all_player_ids, all_market_keys, today)
+    season_df     = fetch_season_history(engine, all_player_ids, today)
+    opp_info      = fetch_opp_info(engine, all_player_ids, today)
+    matchup_pairs = []
+    for pid, info in opp_info.items():
+        pos = info.get("position", "")
+        pg  = ("G" if pos.startswith("G") else "F" if pos.startswith("F") else
+               "C" if pos.startswith("C") else None)
+        if pg and info.get("opp_team_id"):
+            matchup_pairs.append((int(info["opp_team_id"]), pg))
+    matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
+
+    over_rows  = grade_props_for_date(engine, today, over_bracket, history_df, season_df, opp_info, matchup_cache, direction="over")
+    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under") if not under_props.empty else []
+
+    written = upsert_grades(engine, over_rows + under_rows)
+    log.info(f"  {written} rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
 
 def run_backfill(engine, batch_size, specific_date=None):
@@ -1240,7 +1336,23 @@ def run_backfill(engine, batch_size, specific_date=None):
             date_filter="AND CAST(egm.game_date AS DATE) = :gd",
             params={"gd": gd},
         )
-        total += grade_props_for_date(engine, gd, props)
+        if props.empty:
+            continue
+        player_ids  = props["player_id"].dropna().unique().tolist()
+        market_keys = props["market_key"].dropna().unique().tolist()
+        history_df  = fetch_history(engine, player_ids, market_keys, gd)
+        season_df   = fetch_season_history(engine, player_ids, gd)
+        opp_info    = fetch_opp_info(engine, player_ids, gd)
+        matchup_pairs = []
+        for pid, info in opp_info.items():
+            pos = info.get("position", "")
+            pg  = ("G" if pos.startswith("G") else "F" if pos.startswith("F") else
+                   "C" if pos.startswith("C") else None)
+            if pg and info.get("opp_team_id"):
+                matchup_pairs.append((int(info["opp_team_id"]), pg))
+        matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
+        rows  = grade_props_for_date(engine, gd, props, history_df, season_df, opp_info, matchup_cache, direction="over")
+        total += upsert_grades(engine, rows)
     log.info(f"Backfill complete. {total} total rows written.")
 
 
