@@ -1,19 +1,34 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { AuthContext, type DemoDates } from '@/lib/auth-context';
 
-const BYPASS = false; // Set to true to disable passcode gate
+const TOKEN_KEY      = 'schnapp_auth_token';
+const MODE_KEY       = 'schnapp_auth_mode';
+const DEMO_DATES_KEY = 'schnapp_demo_dates';
 
-const TOKEN_KEY = 'schnapp_auth_token';
+function readDemoDates(): DemoDates {
+  try {
+    const raw = localStorage.getItem(DEMO_DATES_KEY);
+    return raw ? JSON.parse(raw) : { nba: null };
+  } catch {
+    return { nba: null };
+  }
+}
+
+function writeDemoDates(d: DemoDates) {
+  localStorage.setItem(DEMO_DATES_KEY, JSON.stringify(d));
+}
 
 export default function PasscodeGate({ children }: { children: React.ReactNode }) {
-  const [status, setStatus] = useState<'loading' | 'authed' | 'gate'>('loading');
-  const [code, setCode] = useState('');
-  const [error, setError] = useState('');
+  const [status, setStatus]       = useState<'loading' | 'authed' | 'gate'>('loading');
+  const [mode, setMode]           = useState<'live' | 'demo'>('live');
+  const [demoDates, setDemoDates] = useState<DemoDates>({ nba: null });
+  const [code, setCode]           = useState('');
+  const [error, setError]         = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const verify = useCallback(async () => {
-    if (BYPASS) { setStatus('authed'); return; }
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) { setStatus('gate'); return; }
     try {
@@ -21,13 +36,26 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
         headers: { 'x-auth-token': token },
       });
       if (res.ok) {
+        const data = await res.json();
+        const m: 'live' | 'demo' = data.mode === 'demo' ? 'demo' : 'live';
+        const dd: DemoDates = data.demoDates ?? { nba: null };
+        localStorage.setItem(MODE_KEY, m);
+        writeDemoDates(dd);
+        setMode(m);
+        setDemoDates(dd);
         setStatus('authed');
       } else {
         localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(MODE_KEY);
+        localStorage.removeItem(DEMO_DATES_KEY);
         setStatus('gate');
       }
     } catch {
-      setStatus('gate');
+      // Network error — trust cached mode so offline PWA still works.
+      const cachedMode = localStorage.getItem(MODE_KEY);
+      setMode(cachedMode === 'demo' ? 'demo' : 'live');
+      setDemoDates(readDemoDates());
+      setStatus('authed');
     }
   }, []);
 
@@ -45,7 +73,13 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
       });
       const data = await res.json();
       if (res.ok && data.token) {
+        const m: 'live' | 'demo' = data.mode === 'demo' ? 'demo' : 'live';
+        const dd: DemoDates = data.demoDates ?? { nba: null };
         localStorage.setItem(TOKEN_KEY, data.token);
+        localStorage.setItem(MODE_KEY, m);
+        writeDemoDates(dd);
+        setMode(m);
+        setDemoDates(dd);
         setStatus('authed');
       } else {
         setError(data.error ?? 'Invalid code.');
@@ -57,6 +91,15 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
     }
   }
 
+  function logout() {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(MODE_KEY);
+    localStorage.removeItem(DEMO_DATES_KEY);
+    setStatus('gate');
+    setCode('');
+    setError('');
+  }
+
   if (status === 'loading') {
     return (
       <div className="min-h-screen bg-gray-950 flex items-center justify-center">
@@ -66,7 +109,11 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
   }
 
   if (status === 'authed') {
-    return <>{children}</>;
+    return (
+      <AuthContext.Provider value={{ mode, demoDates, logout }}>
+        {children}
+      </AuthContext.Provider>
+    );
   }
 
   return (

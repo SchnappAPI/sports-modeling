@@ -1,9 +1,12 @@
 """
 Seeds common.user_codes with the initial set of funny access codes.
-Run once via db_inventory.yml (swap db_inventory.py temporarily) or
-add a one-off GitHub Actions workflow.
+Run via seed-user-codes.yml (workflow_dispatch).
 
 All codes are created active=1, activated=0.
+This script is idempotent: existing codes are skipped.
+
+Also runs the DDL migration to add is_demo and demo_date_nba columns
+if they do not already exist. Safe to re-run on an existing table.
 """
 
 import os
@@ -44,7 +47,7 @@ def main():
     conn = get_conn()
     cur = conn.cursor()
 
-    # Create table if it doesn't exist
+    # Create table if it doesn't exist (full schema including demo columns).
     cur.execute("""
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.tables
@@ -57,8 +60,28 @@ def main():
             activated     BIT           NOT NULL DEFAULT 0,
             activated_at  DATETIME2     NULL,
             last_seen_at  DATETIME2     NULL,
-            created_at    DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+            created_at    DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+            is_demo       BIT           NOT NULL DEFAULT 0,
+            demo_date_nba DATE          NULL
         )
+    """)
+
+    # Idempotent migrations for tables created before demo columns existed.
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'common' AND table_name = 'user_codes'
+              AND column_name = 'is_demo'
+        )
+        ALTER TABLE common.user_codes ADD is_demo BIT NOT NULL DEFAULT 0
+    """)
+    cur.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'common' AND table_name = 'user_codes'
+              AND column_name = 'demo_date_nba'
+        )
+        ALTER TABLE common.user_codes ADD demo_date_nba DATE NULL
     """)
 
     inserted = 0
@@ -77,6 +100,7 @@ def main():
     conn.commit()
     conn.close()
     print(f"Done. Inserted {inserted}, skipped {skipped} existing.")
+    print("Columns is_demo and demo_date_nba verified.")
 
 if __name__ == '__main__':
     main()

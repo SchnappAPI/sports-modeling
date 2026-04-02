@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPool } from '@/lib/db';
-import { randomBytes, createHmac } from 'crypto';
+import { createHmac } from 'crypto';
 
 const SECRET = process.env.AUTH_TOKEN_SECRET ?? 'fallback-dev-secret-change-me';
 
@@ -21,7 +21,11 @@ export async function POST(req: NextRequest) {
     const pool = await getPool();
     const result = await pool.request()
       .input('code', normalized)
-      .query(`SELECT code, name, active, activated FROM common.user_codes WHERE code = @code`);
+      .query(`
+        SELECT code, name, active, activated, is_demo, demo_date_nba
+        FROM common.user_codes
+        WHERE code = @code
+      `);
 
     if (result.recordset.length === 0) {
       return NextResponse.json({ error: 'That code does not exist. Double-check and try again.' }, { status: 401 });
@@ -36,21 +40,31 @@ export async function POST(req: NextRequest) {
     const now = new Date();
 
     if (!row.activated) {
-      // First-time activation
       await pool.request()
         .input('code', normalized)
         .input('now', now)
         .query(`UPDATE common.user_codes SET activated = 1, activated_at = @now, last_seen_at = @now WHERE code = @code`);
     } else {
-      // Returning user (new device or cleared storage)
       await pool.request()
         .input('code', normalized)
         .input('now', now)
         .query(`UPDATE common.user_codes SET last_seen_at = @now WHERE code = @code`);
     }
 
+    const isDemo = !!row.is_demo;
+    const demoDates = {
+      nba: row.demo_date_nba
+        ? new Date(row.demo_date_nba).toISOString().slice(0, 10)
+        : null,
+    };
+
     const token = makeToken(normalized);
-    return NextResponse.json({ token, name: row.name });
+    return NextResponse.json({
+      token,
+      name: row.name,
+      mode: isDemo ? 'demo' : 'live',
+      demoDates,
+    });
   } catch (err) {
     console.error('Auth validate error:', err);
     return NextResponse.json({ error: 'Server error.' }, { status: 500 });

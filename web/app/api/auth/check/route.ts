@@ -29,19 +29,36 @@ export async function GET(req: NextRequest) {
     const pool = await getPool();
     const result = await pool.request()
       .input('code', code)
-      .query(`SELECT active, name FROM common.user_codes WHERE code = @code`);
+      .query(`
+        SELECT active, name, is_demo, demo_date_nba
+        FROM common.user_codes
+        WHERE code = @code
+      `);
 
     if (result.recordset.length === 0 || !result.recordset[0].active) {
       return NextResponse.json({ valid: false }, { status: 401 });
     }
 
-    // Update last seen
+    const row = result.recordset[0];
+
     await pool.request()
       .input('code', code)
       .input('now', new Date())
       .query(`UPDATE common.user_codes SET last_seen_at = @now WHERE code = @code`);
 
-    return NextResponse.json({ valid: true, name: result.recordset[0].name });
+    const isDemo = !!row.is_demo;
+    const demoDates = {
+      nba: row.demo_date_nba
+        ? new Date(row.demo_date_nba).toISOString().slice(0, 10)
+        : null,
+    };
+
+    return NextResponse.json({
+      valid: true,
+      name: row.name,
+      mode: isDemo ? 'demo' : 'live',
+      demoDates,
+    });
   } catch (err) {
     console.error('Auth check error:', err);
     return NextResponse.json({ valid: false }, { status: 500 });
