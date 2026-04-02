@@ -384,7 +384,6 @@ export interface GradeRow {
   playerId: number;
   playerName: string;
   marketKey: string;
-  outcomeName: string;
   lineValue: number;
   overPrice: number | null;
   hitRate60: number | null;
@@ -414,33 +413,68 @@ export async function getGrades(
 ): Promise<GradeRow[]> {
   const pool = await getPool();
 
+  const colCheck = await pool.request().query<{ column_name: string }>(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'common'
+       AND table_name   = 'daily_grades'
+       AND column_name  IN (
+           'composite_grade','trend_grade','momentum_grade',
+           'matchup_grade','regression_grade','hit_rate_opp','sample_size_opp'
+       )`
+  );
+  const existingCols = new Set(colCheck.recordset.map((r) => r.column_name));
+
+  const sel = (col: string, alias: string) =>
+    existingCols.has(col) ? `dg.${col} AS ${alias}` : `NULL AS ${alias}`;
+
   const req = pool.request().input('gradeDate', mssql.VarChar, gradeDate);
   const gameFilter = gameId != null ? `AND egm.game_id = @gameId` : '';
   if (gameId != null) req.input('gameId', mssql.VarChar, gameId);
 
   const result = await req.query<GradeRow>(
-    `SELECT
+    `WITH prop_prices AS (
+       SELECT event_id, market_key, player_id, MIN(outcome_price) AS over_price
+       FROM odds.upcoming_player_props
+       WHERE bookmaker_key = 'fanduel' AND outcome_name = 'Over' AND player_id IS NOT NULL
+       GROUP BY event_id, market_key, player_id
+
+       UNION ALL
+
+       SELECT pp.event_id, pp.market_key, pm.player_id, MIN(pp.outcome_price) AS over_price
+       FROM odds.player_props pp
+       JOIN odds.player_map pm
+         ON pm.odds_player_name = pp.player_name AND pm.sport_key = pp.sport_key
+        AND pm.player_id IS NOT NULL
+       WHERE pp.bookmaker_key = 'fanduel' AND pp.outcome_name = 'Over'
+       GROUP BY pp.event_id, pp.market_key, pm.player_id
+     ),
+     best_price AS (
+       SELECT event_id, market_key, player_id, MIN(over_price) AS over_price
+       FROM prop_prices
+       GROUP BY event_id, market_key, player_id
+     )
+     SELECT
        dg.grade_id          AS gradeId,
        CONVERT(VARCHAR(10), dg.grade_date, 120) AS gradeDate,
        dg.player_id         AS playerId,
        dg.player_name       AS playerName,
        dg.market_key        AS marketKey,
-       COALESCE(dg.outcome_name, 'Over') AS outcomeName,
        dg.line_value        AS lineValue,
-       dg.over_price        AS overPrice,
+       bp.over_price        AS overPrice,
        dg.hit_rate_60       AS hitRate60,
        dg.hit_rate_20       AS hitRate20,
        dg.sample_size_60    AS sampleSize60,
        dg.sample_size_20    AS sampleSize20,
        dg.weighted_hit_rate AS weightedHitRate,
        dg.grade             AS grade,
-       dg.composite_grade   AS compositeGrade,
-       dg.trend_grade       AS trendGrade,
-       dg.momentum_grade    AS momentumGrade,
-       dg.matchup_grade     AS matchupGrade,
-       dg.regression_grade  AS regressionGrade,
-       dg.hit_rate_opp      AS hitRateOpp,
-       dg.sample_size_opp   AS sampleSizeOpp,
+       ${sel('composite_grade',  'compositeGrade')},
+       ${sel('trend_grade',      'trendGrade')},
+       ${sel('momentum_grade',   'momentumGrade')},
+       ${sel('matchup_grade',    'matchupGrade')},
+       ${sel('regression_grade', 'regressionGrade')},
+       ${sel('hit_rate_opp',     'hitRateOpp')},
+       ${sel('sample_size_opp',  'sampleSizeOpp')},
        CASE
          WHEN p.team_id = s.home_team_id THEN s.away_team_id
          ELSE s.home_team_id
@@ -455,6 +489,8 @@ export async function getGrades(
        at.team_tricode      AS awayTeamAbbr
      FROM common.daily_grades dg
      LEFT JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
+     LEFT JOIN best_price bp
+       ON bp.event_id = dg.event_id AND bp.market_key = dg.market_key AND bp.player_id = dg.player_id
      LEFT JOIN nba.players p ON p.player_id = dg.player_id
      LEFT JOIN nba.schedule s ON s.game_id = egm.game_id
      LEFT JOIN nba.teams ht ON ht.team_id = s.home_team_id
@@ -490,23 +526,46 @@ export async function getPlayerProps(playerId: number): Promise<PlayerPropRow[]>
     .request()
     .input('playerId', mssql.Int, playerId)
     .query<PlayerPropRow>(
-      `SELECT
+      `WITH prop_prices AS (
+         SELECT event_id, market_key, player_id, MIN(outcome_price) AS over_price
+         FROM odds.upcoming_player_props
+         WHERE bookmaker_key = 'fanduel' AND outcome_name = 'Over' AND player_id IS NOT NULL
+         GROUP BY event_id, market_key, player_id
+
+         UNION ALL
+
+         SELECT pp.event_id, pp.market_key, pm.player_id, MIN(pp.outcome_price) AS over_price
+         FROM odds.player_props pp
+         JOIN odds.player_map pm
+           ON pm.odds_player_name = pp.player_name AND pm.sport_key = pp.sport_key
+          AND pm.player_id IS NOT NULL
+         WHERE pp.bookmaker_key = 'fanduel' AND pp.outcome_name = 'Over'
+         GROUP BY pp.event_id, pp.market_key, pm.player_id
+       ),
+       best_price AS (
+         SELECT event_id, market_key, player_id, MIN(over_price) AS over_price
+         FROM prop_prices
+         GROUP BY event_id, market_key, player_id
+       )
+       SELECT
          dg.grade_id          AS gradeId,
          CONVERT(VARCHAR(10), dg.grade_date, 120) AS gradeDate,
          dg.market_key        AS marketKey,
          dg.line_value        AS lineValue,
-         dg.over_price        AS overPrice,
+         bp.over_price        AS overPrice,
          dg.hit_rate_60       AS hitRate60,
          dg.hit_rate_20       AS hitRate20,
          dg.sample_size_60    AS sampleSize60,
          dg.sample_size_20    AS sampleSize20,
          dg.grade             AS grade,
-         dg.composite_grade   AS compositeGrade
+         NULL                 AS compositeGrade
        FROM common.daily_grades dg
+       LEFT JOIN best_price bp
+         ON bp.event_id = dg.event_id AND bp.market_key = dg.market_key AND bp.player_id = dg.player_id
        WHERE dg.player_id = @playerId
          AND dg.bookmaker_key = 'fanduel'
        ORDER BY dg.grade_date DESC, dg.market_key, dg.line_value
-      `
+    `
     );
   return result.recordset;
 }

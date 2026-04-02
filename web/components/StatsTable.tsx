@@ -45,10 +45,10 @@ const PERIOD_OPTIONS = [
 ] as const;
 
 const N_OPTIONS = [
-  { label: 'L10',   value: '10' },
-  { label: 'L20',   value: '20' },
-  { label: 'L40',   value: '40' },
-  { label: 'All',   value: 'all' },
+  { label: 'L10',  value: '10' },
+  { label: 'L20',  value: '20' },
+  { label: 'L40',  value: '40' },
+  { label: 'All',  value: 'all' },
   { label: 'vs Opp', value: 'opp' },
 ];
 
@@ -67,9 +67,10 @@ function TeamStatsTable({
 }) {
   const searchParams = useSearchParams();
   const tab = searchParams.get('tab') ?? 'stats';
+  const [benchOpen, setBenchOpen] = useState(false);
 
-  const starters = players.filter((p) => p.starterStatus === 'Starter');
-  const bench    = players.filter((p) => p.starterStatus !== 'Starter');
+  const starters  = players.filter((p) => p.starterStatus === 'Starter');
+  const bench     = players.filter((p) => p.starterStatus !== 'Starter');
   const hasLineup = players.some((p) => p.starterStatus != null);
 
   const renderRow = (p: PlayerAvg) => (
@@ -94,14 +95,6 @@ function TeamStatsTable({
     </tr>
   );
 
-  const sectionHeader = (label: string) => (
-    <tr>
-      <td colSpan={10} className="pt-3 pb-1 text-xs text-gray-600 font-semibold uppercase tracking-wider">
-        {label}
-      </td>
-    </tr>
-  );
-
   return (
     <div className="overflow-x-auto">
       <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{abbr}</div>
@@ -123,10 +116,24 @@ function TeamStatsTable({
         <tbody>
           {hasLineup ? (
             <>
-              {starters.length > 0 && sectionHeader('Starters')}
               {starters.map(renderRow)}
-              {bench.length > 0 && sectionHeader('Bench')}
-              {bench.map(renderRow)}
+              {bench.length > 0 && (
+                <>
+                  <tr
+                    className="border-b border-gray-800 cursor-pointer select-none"
+                    onClick={() => setBenchOpen((o) => !o)}
+                  >
+                    <td
+                      colSpan={10}
+                      className="py-1.5 text-xs text-gray-500 font-semibold uppercase tracking-wider"
+                    >
+                      <span className="mr-1.5 text-gray-600">{benchOpen ? '▾' : '▸'}</span>
+                      Bench ({bench.length})
+                    </td>
+                  </tr>
+                  {benchOpen && bench.map(renderRow)}
+                </>
+              )}
             </>
           ) : (
             players.map(renderRow)
@@ -167,10 +174,8 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
     url.searchParams.set('homeTeamId', String(homeTeamId));
     url.searchParams.set('awayTeamId', String(awayTeamId));
     url.searchParams.set('context', nGames);
-    url.searchParams.set('gameId', gameId);  // for starter status lookup
+    url.searchParams.set('gameId', gameId);
     if (periodsParam) url.searchParams.set('periods', periodsParam);
-    // vs Opp mode: pass opponent abbreviations so the API can filter matchup column.
-    // Away team's opponent is the home team; home team's opponent is the away team.
     if (nGames === 'opp') {
       url.searchParams.set('opp', `${awayTeamAbbr},${homeTeamAbbr}`);
     }

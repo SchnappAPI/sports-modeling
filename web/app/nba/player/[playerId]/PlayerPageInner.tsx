@@ -25,6 +25,7 @@ interface GameLogRow {
   tov: number | null;
   min: number | null;
   fg3m: number | null;
+  fg3a: number | null;
   fgm: number | null;
   fga: number | null;
   ftm: number | null;
@@ -76,6 +77,7 @@ interface GameSummary {
   tov: number;
   min: number;
   fg3m: number;
+  fg3a: number;
   fgm: number;
   fga: number;
   ftm: number;
@@ -193,7 +195,7 @@ function buildGameSummaries(
   >>();
   for (const r of filtered) {
     if (r.dnp) continue;
-    const t = totals.get(r.gameId) ?? { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 };
+    const t = totals.get(r.gameId) ?? { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fg3a:0, fgm:0, fga:0, ftm:0, fta:0 };
     t.pts  += r.pts  ?? 0;
     t.reb  += r.reb  ?? 0;
     t.ast  += r.ast  ?? 0;
@@ -202,6 +204,7 @@ function buildGameSummaries(
     t.tov  += r.tov  ?? 0;
     t.min  += r.min  ?? 0;
     t.fg3m += r.fg3m ?? 0;
+    t.fg3a += r.fg3a ?? 0;
     t.fgm  += r.fgm  ?? 0;
     t.fga  += r.fga  ?? 0;
     t.ftm  += r.ftm  ?? 0;
@@ -209,7 +212,7 @@ function buildGameSummaries(
     totals.set(r.gameId, t);
   }
 
-  const ZERO = { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 };
+  const ZERO = { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fg3a:0, fgm:0, fga:0, ftm:0, fta:0 };
   return gameOrder.map((gid) => ({
     gameId: gid,
     ...gameMeta.get(gid)!,
@@ -222,11 +225,11 @@ type SplitKey = 'season' | 'l10' | 'opp';
 interface SplitStats {
   gp: number;
   pts: number; reb: number; ast: number; stl: number; blk: number; tov: number;
-  min: number; fg3m: number; fgm: number; fga: number; ftm: number; fta: number;
+  min: number; fg3m: number; fg3a: number; fgm: number; fga: number; ftm: number; fta: number;
 }
 
 function computeSplit(summaries: GameSummary[], opp: string | null): Record<SplitKey, SplitStats> {
-  const zero = (): SplitStats => ({ gp:0, pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 });
+  const zero = (): SplitStats => ({ gp:0, pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fg3a:0, fgm:0, fga:0, ftm:0, fta:0 });
   const acc  = { season: zero(), l10: zero(), opp: zero() };
 
   const played = summaries.filter((g) => !g.dnp);
@@ -236,7 +239,7 @@ function computeSplit(summaries: GameSummary[], opp: string | null): Record<Spli
   function add(target: SplitStats, g: GameSummary) {
     target.gp++;  target.pts += g.pts; target.reb += g.reb; target.ast += g.ast;
     target.stl += g.stl; target.blk += g.blk; target.tov += g.tov; target.min += g.min;
-    target.fg3m += g.fg3m; target.fgm += g.fgm; target.fga += g.fga;
+    target.fg3m += g.fg3m; target.fg3a += g.fg3a; target.fgm += g.fgm; target.fga += g.fga;
     target.ftm += g.ftm;  target.fta += g.fta;
   }
   played.forEach((g) => add(acc.season, g));
@@ -607,7 +610,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.blk, s.gp)}</td>
                   <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.tov, s.gp)}</td>
                   <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fgm, s.fga, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fg3m, s.fg3m > 0 ? s.fg3m / s.gp * s.gp : s.fga, s.gp)}</td>
+                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fg3m, s.fg3a, s.gp)}</td>
                   <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.ftm, s.fta, s.gp)}</td>
                 </tr>
               );
@@ -658,49 +661,32 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         )}
       </div>
 
-      {/* Game log — sticky header + sticky player name column */}
+      {/* Game log */}
       <div className="flex-1 overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-20 bg-gray-950">
             <tr className="text-xs text-gray-500 border-b border-gray-800">
               <th className="text-left px-4 py-1.5 font-medium sticky left-0 bg-gray-950 z-30 whitespace-nowrap">Date</th>
               <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Opp</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="S=Starter B=Bench">Str</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">MIN</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="* = Starter">MIN</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PTS</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FG</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">REB</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">AST</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">STL</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">BLK</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">TOV</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PM</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FG</th>
               <th className="text-right px-4 py-1.5 font-medium whitespace-nowrap">FT</th>
             </tr>
           </thead>
           <tbody>
             {summaries.map((g) => {
-              if (g.dnp) {
-                return (
-                  <tr key={g.gameId} className="border-b border-gray-800 opacity-40">
-                    <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{g.gameDate.slice(5)}</td>
-                    <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
-                      {g.isHome ? '' : '@'}{g.opponentAbbr}
-                    </td>
-                    <td colSpan={11} className="px-2 py-1.5 text-xs text-gray-600">DNP</td>
-                  </tr>
-                );
-              }
-              const ptsLine = getLineCls(g.gameId, 'player_points', g.pts);
-              const rebLine = getLineCls(g.gameId, 'player_rebounds', g.reb);
-              const astLine = getLineCls(g.gameId, 'player_assists', g.ast);
-              const stlLine = getLineCls(g.gameId, 'player_steals', g.stl);
-              const blkLine = getLineCls(g.gameId, 'player_blocks', g.blk);
-              const fg3Line = getLineCls(g.gameId, 'player_threes', g.fg3m);
-              const fmtM = (min: number) => {
+              const fmtM = (min: number, started: boolean | null): string => {
                 const m = Math.floor(min);
                 const s = Math.round((min - m) * 60);
-                return `${m}:${s.toString().padStart(2, '0')}`;
+                const t = `${m}:${s.toString().padStart(2, '0')}`;
+                return started === true ? `*${t}` : t;
               };
               const fmtS = (made: number, att: number) =>
                 att === 0 ? '-' : `${made}/${att}`;
@@ -708,20 +694,39 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 if (potential == null) return String(actual);
                 return `${actual}/${Math.round(potential)}`;
               };
-              const starterBadge = g.started === true
-                ? <span className="text-blue-500 font-medium">S</span>
-                : g.started === false
-                ? <span className="text-gray-600">B</span>
-                : null;
+
+              if (g.dnp) {
+                return (
+                  <tr key={g.gameId} className="border-b border-gray-800 opacity-40">
+                    <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{g.gameDate.slice(5)}</td>
+                    <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
+                      {g.isHome ? '' : '@'}{g.opponentAbbr}
+                    </td>
+                    <td className="px-2 py-1.5 text-right text-gray-600 text-xs whitespace-nowrap">DNP</td>
+                    <td colSpan={9} />
+                  </tr>
+                );
+              }
+
+              const ptsLine = getLineCls(g.gameId, 'player_points', g.pts);
+              const rebLine = getLineCls(g.gameId, 'player_rebounds', g.reb);
+              const astLine = getLineCls(g.gameId, 'player_assists', g.ast);
+              const stlLine = getLineCls(g.gameId, 'player_steals', g.stl);
+              const blkLine = getLineCls(g.gameId, 'player_blocks', g.blk);
+              const fg3Line = getLineCls(g.gameId, 'player_threes', g.fg3m);
+
               return (
                 <tr key={g.gameId} className="border-b border-gray-800">
                   <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{g.gameDate.slice(5)}</td>
                   <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
                     {g.isHome ? '' : '@'}{g.opponentAbbr}
                   </td>
-                  <td className="px-2 py-1.5 text-right text-xs whitespace-nowrap">{starterBadge}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtM(g.min)}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">
+                    {fmtM(g.min, g.started)}
+                  </td>
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${ptsLine}`}>{g.pts}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.fgm, g.fga)}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{fmtS(g.fg3m, g.fg3a)}</td>
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${rebLine} tabular-nums`}>
                     {fmtPT(g.reb, selectedPeriods.size === 0 ? g.rebChances : null)}
                   </td>
@@ -731,9 +736,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${stlLine}`}>{g.stl}</td>
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${blkLine}`}>{g.blk}</td>
                   <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line}`}>{g.fg3m}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtS(g.fgm, g.fga)}</td>
-                  <td className="px-4 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtS(g.ftm, g.fta)}</td>
+                  <td className="px-4 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.ftm, g.fta)}</td>
                 </tr>
               );
             })}
