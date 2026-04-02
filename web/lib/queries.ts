@@ -229,9 +229,6 @@ export async function getBoxscore(gameId: string): Promise<BoxscoreRow[]> {
     .request()
     .input('gameId', mssql.VarChar, gameId)
     .query<BoxscoreRow>(
-      // LEFT JOIN nba.players so players whose player_id was written by the
-      // live ETL but not yet in nba.players (two-ways, call-ups) are still
-      // returned. Fall back to pbs.player_name when the join misses.
       `SELECT
          pbs.player_id                              AS playerId,
          COALESCE(p.player_name, pbs.player_name)  AS playerName,
@@ -274,6 +271,7 @@ export interface PlayerGameRow {
   tov: number | null;
   min: number | null;
   fg3m: number | null;
+  fg3a: number | null;
   fgm: number | null;
   fga: number | null;
   ftm: number | null;
@@ -294,10 +292,6 @@ export async function getPlayerGames(
     .input('playerId', mssql.Int, playerId)
     .input('lastN', mssql.Int, lastN)
     .query<PlayerGameRow>(
-      // Uses nba.schedule (not nba.games) so in-progress games appear in the
-      // log alongside completed ones.
-      // Future scheduled games (game_date > today) are excluded from the DNP
-      // branch so upcoming fixtures don't appear as blank rows in the log.
       `WITH player_team AS (
          SELECT team_id FROM nba.players WHERE player_id = @playerId
        ),
@@ -322,7 +316,7 @@ export async function getPlayerGames(
            pbs.period,
            pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk, pbs.tov,
            pbs.minutes AS min,
-           pbs.fg3m, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta
+           pbs.fg3m, pbs.fg3a, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta
          FROM nba.player_box_score_stats pbs
          WHERE pbs.player_id = @playerId
        ),
@@ -347,7 +341,7 @@ export async function getPlayerGames(
          ls.started                              AS started,
          pq.period,
          pq.pts, pq.reb, pq.ast, pq.stl, pq.blk, pq.tov,
-         pq.min, pq.fg3m, pq.fgm, pq.fga, pq.ftm, pq.fta,
+         pq.min, pq.fg3m, pq.fg3a, pq.fgm, pq.fga, pq.ftm, pq.fta,
          pps.potential_ast                       AS potentialAst,
          prc.reb_chances                         AS rebChances
        FROM team_games tg
@@ -371,7 +365,7 @@ export async function getPlayerGames(
          1                                       AS dnp,
          NULL                                    AS started,
          'FullGame'                              AS period,
-         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
          NULL AS potentialAst,
          NULL AS rebChances
        FROM team_games tg
@@ -400,7 +394,7 @@ export interface GradeRow {
   sampleSize20: number | null;
   weightedHitRate: number | null;
   grade: number | null;
-  // Step 13 columns — NULL until migration runs
+  // Step 13 columns — NULL until migration runs and SELECT is updated
   compositeGrade: number | null;
   trendGrade: number | null;
   momentumGrade: number | null;
@@ -421,23 +415,6 @@ export async function getGrades(
   gameId: string | null
 ): Promise<GradeRow[]> {
   const pool = await getPool();
-
-  // Probe which optional Step 13 columns exist so we degrade gracefully
-  // if the migration hasn't run yet.
-  const colCheck = await pool.request().query<{ column_name: string }>(
-    `SELECT column_name
-     FROM information_schema.columns
-     WHERE table_schema = 'common'
-       AND table_name   = 'daily_grades'
-       AND column_name  IN (
-           'composite_grade','trend_grade','momentum_grade',
-           'matchup_grade','regression_grade','hit_rate_opp','sample_size_opp'
-       )`
-  );
-  const existingCols = new Set(colCheck.recordset.map((r) => r.column_name));
-
-  const sel = (col: string, alias: string) =>
-    existingCols.has(col) ? `dg.${col} AS ${alias}` : `NULL AS ${alias}`;
 
   const req = pool.request().input('gradeDate', mssql.VarChar, gradeDate);
   const gameFilter = gameId != null ? `AND egm.game_id = @gameId` : '';
@@ -479,13 +456,13 @@ export async function getGrades(
        dg.sample_size_20    AS sampleSize20,
        dg.weighted_hit_rate AS weightedHitRate,
        dg.grade             AS grade,
-       ${sel('composite_grade',  'compositeGrade')},
-       ${sel('trend_grade',      'trendGrade')},
-       ${sel('momentum_grade',   'momentumGrade')},
-       ${sel('matchup_grade',    'matchupGrade')},
-       ${sel('regression_grade', 'regressionGrade')},
-       ${sel('hit_rate_opp',     'hitRateOpp')},
-       ${sel('sample_size_opp',  'sampleSizeOpp')},
+       NULL                 AS compositeGrade,
+       NULL                 AS trendGrade,
+       NULL                 AS momentumGrade,
+       NULL                 AS matchupGrade,
+       NULL                 AS regressionGrade,
+       NULL                 AS hitRateOpp,
+       NULL                 AS sampleSizeOpp,
        CASE
          WHEN p.team_id = s.home_team_id THEN s.away_team_id
          ELSE s.home_team_id
