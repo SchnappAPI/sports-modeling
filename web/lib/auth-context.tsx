@@ -9,22 +9,25 @@
  *   live  — normal user, full date navigation
  *   demo  — locked to demoDates, no date picker, no Refresh Lines
  *
- * demoDates: { nba: string | null }
- *   The fixed date shown to demo users for each sport (YYYY-MM-DD).
- *   null when the sport has no demo date configured.
+ * demoDates: { nba?: string; nfl?: string; mlb?: string }
+ *   The fixed date shown to demo users per sport (YYYY-MM-DD).
+ *   Sourced from common.demo_config via the auth/check route on every
+ *   page load, so admin changes to the demo date take effect immediately
+ *   without requiring users to log in again.
  *
  * logout: () => void
- *   Clears localStorage and reloads to force the passcode gate.
+ *   Clears localStorage and resets to the passcode gate.
  *
- * AuthContext is populated by PasscodeGate, which writes mode and demoDates
- * to localStorage after a successful login or token check. Components that
- * call useAuth() must be descendants of PasscodeGate in the tree.
+ * AuthContext is populated by PasscodeGate. Components that call useAuth()
+ * must be descendants of PasscodeGate in the tree.
  */
 
 import { createContext, useContext } from 'react';
 
 export interface DemoDates {
-  nba: string | null;
+  nba?: string;
+  nfl?: string;
+  mlb?: string;
 }
 
 export interface AuthState {
@@ -35,7 +38,7 @@ export interface AuthState {
 
 const DEFAULT: AuthState = {
   mode: 'live',
-  demoDates: { nba: null },
+  demoDates: {},
   logout: () => {
     localStorage.removeItem('schnapp_auth_token');
     localStorage.removeItem('schnapp_auth_mode');

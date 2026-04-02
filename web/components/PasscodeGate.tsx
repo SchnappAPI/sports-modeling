@@ -7,25 +7,21 @@ const TOKEN_KEY      = 'schnapp_auth_token';
 const MODE_KEY       = 'schnapp_auth_mode';
 const DEMO_DATES_KEY = 'schnapp_demo_dates';
 
-function readDemoDates(): DemoDates {
+function readCachedDemoDates(): DemoDates {
   try {
     const raw = localStorage.getItem(DEMO_DATES_KEY);
-    return raw ? JSON.parse(raw) : { nba: null };
+    return raw ? JSON.parse(raw) : {};
   } catch {
-    return { nba: null };
+    return {};
   }
 }
 
-function writeDemoDates(d: DemoDates) {
-  localStorage.setItem(DEMO_DATES_KEY, JSON.stringify(d));
-}
-
 export default function PasscodeGate({ children }: { children: React.ReactNode }) {
-  const [status, setStatus]       = useState<'loading' | 'authed' | 'gate'>('loading');
-  const [mode, setMode]           = useState<'live' | 'demo'>('live');
-  const [demoDates, setDemoDates] = useState<DemoDates>({ nba: null });
-  const [code, setCode]           = useState('');
-  const [error, setError]         = useState('');
+  const [status, setStatus]         = useState<'loading' | 'authed' | 'gate'>('loading');
+  const [mode, setMode]             = useState<'live' | 'demo'>('live');
+  const [demoDates, setDemoDates]   = useState<DemoDates>({});
+  const [code, setCode]             = useState('');
+  const [error, setError]           = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const verify = useCallback(async () => {
@@ -38,9 +34,9 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
       if (res.ok) {
         const data = await res.json();
         const m: 'live' | 'demo' = data.mode === 'demo' ? 'demo' : 'live';
-        const dd: DemoDates = data.demoDates ?? { nba: null };
+        const dd: DemoDates = data.demoDates ?? {};
         localStorage.setItem(MODE_KEY, m);
-        writeDemoDates(dd);
+        localStorage.setItem(DEMO_DATES_KEY, JSON.stringify(dd));
         setMode(m);
         setDemoDates(dd);
         setStatus('authed');
@@ -51,10 +47,10 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
         setStatus('gate');
       }
     } catch {
-      // Network error — trust cached mode so offline PWA still works.
+      // Network error — trust cached values so the PWA still works offline.
       const cachedMode = localStorage.getItem(MODE_KEY);
       setMode(cachedMode === 'demo' ? 'demo' : 'live');
-      setDemoDates(readDemoDates());
+      setDemoDates(readCachedDemoDates());
       setStatus('authed');
     }
   }, []);
@@ -74,10 +70,10 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
       const data = await res.json();
       if (res.ok && data.token) {
         const m: 'live' | 'demo' = data.mode === 'demo' ? 'demo' : 'live';
-        const dd: DemoDates = data.demoDates ?? { nba: null };
+        const dd: DemoDates = data.demoDates ?? {};
         localStorage.setItem(TOKEN_KEY, data.token);
         localStorage.setItem(MODE_KEY, m);
-        writeDemoDates(dd);
+        localStorage.setItem(DEMO_DATES_KEY, JSON.stringify(dd));
         setMode(m);
         setDemoDates(dd);
         setStatus('authed');
@@ -133,7 +129,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
             value={code}
             onChange={(e) => setCode(e.target.value.toUpperCase())}
             onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-            placeholder="SPICY-WALRUS-429"
+            placeholder="DRAMA-LLAMA"
             autoCapitalize="characters"
             autoCorrect="off"
             autoComplete="off"
