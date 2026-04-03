@@ -217,6 +217,7 @@ export interface BoxscoreRow {
   tov: number | null;
   min: number | null;
   fg3m: number | null;
+  fg3a: number | null;
   fgm: number | null;
   fga: number | null;
   ftm: number | null;
@@ -237,7 +238,7 @@ export async function getBoxscore(gameId: string): Promise<BoxscoreRow[]> {
          dl.starter_status                          AS starterStatus,
          pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk, pbs.tov,
          pbs.minutes AS min,
-         pbs.fg3m, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta
+         pbs.fg3m, pbs.fg3a, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta
        FROM nba.player_box_score_stats pbs
        LEFT JOIN nba.players p ON p.player_id = pbs.player_id
        LEFT JOIN nba.daily_lineups dl

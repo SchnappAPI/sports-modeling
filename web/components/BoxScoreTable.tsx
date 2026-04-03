@@ -18,6 +18,7 @@ interface BoxRow {
   tov: number | null;
   min: number | null;
   fg3m: number | null;
+  fg3a: number | null;
   fgm: number | null;
   fga: number | null;
   ftm: number | null;
@@ -41,6 +42,7 @@ interface PlayerTotals {
   tov: number;
   min: number;
   fg3m: number;
+  fg3a: number;
   fgm: number;
   fga: number;
   ftm: number;
@@ -80,7 +82,7 @@ function sumRows(rows: BoxRow[], key: keyof BoxRow): number {
 
 const ZERO_TOTALS: PlayerTotals = {
   pts: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0,
-  min: 0, fg3m: 0, fgm: 0, fga: 0, ftm: 0, fta: 0,
+  min: 0, fg3m: 0, fg3a: 0, fgm: 0, fga: 0, ftm: 0, fta: 0,
 };
 
 function buildTotals(rows: BoxRow[]): PlayerTotals {
@@ -94,6 +96,7 @@ function buildTotals(rows: BoxRow[]): PlayerTotals {
     tov:  sumRows(rows, 'tov'),
     min:  sumRows(rows, 'min'),
     fg3m: sumRows(rows, 'fg3m'),
+    fg3a: sumRows(rows, 'fg3a'),
     fgm:  sumRows(rows, 'fgm'),
     fga:  sumRows(rows, 'fga'),
     ftm:  sumRows(rows, 'ftm'),
@@ -109,7 +112,7 @@ function fmtMin(min: number): string {
 }
 
 function fmtShoot(made: number, att: number): string {
-  return att === 0 ? '-' : `${made}/${att}`;
+  return att === 0 ? '-' : `${made}-${att}`;
 }
 
 function getLine(propMap: PropMap, playerId: number, statKey: keyof PlayerTotals): number | null {
@@ -162,7 +165,6 @@ function TeamBox({
         key={slot.playerId}
         className={['border-b border-gray-800', inactive ? 'opacity-40' : ''].join(' ')}
       >
-        {/* Sticky player name cell */}
         <td className="py-1.5 pr-3 sticky left-0 bg-gray-950 z-10 whitespace-nowrap min-w-[120px] max-w-[160px]">
           <Link
             href={playerHref}
@@ -179,7 +181,7 @@ function TeamBox({
         <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.blk,  line('blk'))}`}>{t.blk}</td>
         <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.tov,  line('tov'))}`}>{t.tov}</td>
         <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(t.fgm, t.fga)}</td>
-        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fga)}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fg3a)}</td>
         <td className="py-1.5 pl-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(t.ftm, t.fta)}</td>
       </tr>
     );
@@ -207,7 +209,6 @@ function TeamBox({
       <table className="w-full text-sm">
         <thead>
           <tr className="text-xs text-gray-500 border-b border-gray-800">
-            {/* Sticky header for player name */}
             <th className="text-left py-1.5 pr-3 font-medium sticky left-0 bg-gray-950 z-20 whitespace-nowrap">Player</th>
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">MIN</th>
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">PTS</th>
@@ -277,18 +278,18 @@ export default function BoxScoreTable({
     setSelectedPeriods(new Set());
     setGrades([]);
 
-    Promise.all([
-      fetch(`/api/boxscore?gameId=${gameId}`)
-        .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-      fetch(`/api/game-grades?gameId=${gameId}`)
-        .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-    ])
-      .then(([boxData, gradeData]) => {
-        setRows(boxData.rows ?? []);
-        setGrades(gradeData.grades ?? []);
-      })
+    // Fetch box score and grades independently — a grading failure should not
+    // prevent the box score from rendering.
+    fetch(`/api/boxscore?gameId=${gameId}`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((boxData) => setRows(boxData.rows ?? []))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
+
+    fetch(`/api/game-grades?gameId=${gameId}`)
+      .then((r) => { if (!r.ok) return; return r.json(); })
+      .then((gradeData) => { if (gradeData) setGrades(gradeData.grades ?? []); })
+      .catch(() => { /* grading failure is non-fatal */ });
   }, [gameId]);
 
   function togglePeriod(p: QuarterKey) {
@@ -303,7 +304,6 @@ export default function BoxScoreTable({
     const map: PropMap = new Map();
     for (const g of grades) {
       if (!map.has(g.playerId)) map.set(g.playerId, new Map());
-      // Keep the lowest line per market (standard line preferred over alternate)
       const existing = map.get(g.playerId)!.get(g.marketKey);
       if (existing == null || g.lineValue < existing) {
         map.get(g.playerId)!.set(g.marketKey, g.lineValue);
