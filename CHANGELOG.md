@@ -9,6 +9,47 @@
 
 ---
 
+## 2026-04-03 (session close 2)
+
+### ETL | nba_etl.py — today's games in nba.games
+- Changed `game_date < today` to `game_date <= today` in `load_schedule` when populating `nba.games`.
+- Root cause: today's final games were excluded from `nba.games`, blocking the FK on `nba.player_box_score_stats`, so box score rows could never be written for same-day games.
+- Box score tab now shows data for today's completed games after the nightly ETL runs.
+
+### ETL | nba_etl.py — inactive player detection
+- Added `INACTIVE_LINEUP_KEYWORDS` constant: `("out", "inactive", "not with team", "gtd")`.
+- `fetch_lineups_for_game_date` now checks `lineupStatus` before assigning `starter_status`. Players whose `lineupStatus` contains any inactive keyword get `'Inactive'` regardless of `rosterStatus`.
+- Root cause: active-roster players listed as Out (e.g. Wembanyama) had `rosterStatus='Active'` with no position, so they were assigned `'Bench'` and appeared mixed in with available bench players.
+- Do not revert the keyword check — the old logic of `"Bench" if roster == "Active"` was incorrect for injured/inactive players.
+
+### ETL | etl/gate_check.py — recreated
+- Recreated `etl/gate_check.py` after it was deleted earlier. The file had been missing, causing `pregame-refresh.yml` to fail on every run with "No such file or directory".
+- Queries `nba.schedule` for any game today with `game_status IN (1, 2)`. Prints `true` or `false`. Exit code always 0.
+- Uses pyodbc directly (not SQLAlchemy) with 3-attempt retry and 45s wait.
+
+### UI | web/components/StatsTable.tsx — inactive player section
+- Added separate collapsible `Inactive (N)` section below Bench for players with `starterStatus === 'Inactive'`.
+- Inactive rows rendered with `opacity-40`. Section defaults to collapsed.
+- Added `inactiveOpen` state alongside existing `benchOpen`.
+- `bench` filter now strictly checks `starterStatus === 'Bench'` instead of `!== 'Starter'`, so inactive players no longer fall through to bench.
+- Do not revert — previously inactive players like Wembanyama appeared as bench players.
+
+### API | web/lib/queries.ts — fg3a in getBoxscore
+- Added `fg3a` to `BoxscoreRow` interface and to the `getBoxscore` SQL (`pbs.fg3a`).
+- Root cause: `fg3a` was missing from the interface and query, so `BoxScoreTable.tsx` had no 3PA value to use.
+
+### UI | web/components/BoxScoreTable.tsx — 3P column fix + fetch decoupling
+- Added `fg3a` to `BoxRow`, `PlayerTotals`, `ZERO_TOTALS`, `buildTotals`.
+- Fixed 3P render cell: `fmtShoot(t.fg3m, t.fg3a)` — was incorrectly using `t.fga` (field goal attempts) as the denominator, showing e.g. `5/15` instead of `5/8`.
+- Changed separator in `fmtShoot` from `/` to `-` to match canonical dash separator.
+- Decoupled `/api/boxscore` and `/api/game-grades` fetches — grading failure is now non-fatal and does not prevent the box score from rendering.
+- Do not revert the `fg3a` fix or the fetch decoupling.
+
+### ETL | etl/lineup_fix_fragment.py — deleted
+- Accidentally created during session; replaced with a comment stub. Safe to delete entirely.
+
+---
+
 ## 2026-04-03 (session close)
 
 ### Docs | sports-session-close SKILL.md
