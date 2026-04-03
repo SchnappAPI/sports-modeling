@@ -350,7 +350,7 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
 }
 
 // ---------------------------------------------------------------------------
-// Dot plot
+// Dot plot — full width via preserveAspectRatio="none" on a wide viewBox
 // ---------------------------------------------------------------------------
 
 type DotWindow = 'L10' | 'L30' | 'L50' | 'All';
@@ -371,6 +371,7 @@ function StatDotPlot({
 
   const played = summaries.filter((g) => !g.dnp);
   const count  = win === 'L10' ? 10 : win === 'L30' ? 30 : win === 'L50' ? 50 : played.length;
+  // Oldest game left, most recent right
   const slice  = played.slice(0, count).reverse();
 
   if (slice.length === 0) return null;
@@ -380,12 +381,13 @@ function StatDotPlot({
   const maxVal = Math.max(...values, lineValue);
   const range  = maxVal - minVal || 1;
 
-  const W = 280;
-  const H = 64;
-  const PAD_X = 6;
+  // Wide fixed viewBox — SVG stretches to fill container via preserveAspectRatio="none"
+  const VW = 600;
+  const VH = 64;
+  const PAD_X = 8;
   const PAD_Y = 10;
-  const plotW = W - PAD_X * 2;
-  const plotH = H - PAD_Y * 2;
+  const plotW = VW - PAD_X * 2;
+  const plotH = VH - PAD_Y * 2;
 
   const xPos = (i: number) =>
     PAD_X + (slice.length <= 1 ? plotW / 2 : (i / (slice.length - 1)) * plotW);
@@ -395,22 +397,35 @@ function StatDotPlot({
   const lineY = yPos(lineValue);
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
+    <svg
+      viewBox={`0 0 ${VW} ${VH}`}
+      preserveAspectRatio="none"
+      className="w-full"
+      style={{ height: VH }}
+    >
+      {/* Prop line */}
       <line
-        x1={PAD_X} y1={lineY} x2={W - PAD_X} y2={lineY}
-        stroke="#4b5563" strokeWidth="1" strokeDasharray="3 3"
+        x1={PAD_X} y1={lineY} x2={VW - PAD_X} y2={lineY}
+        stroke="#4b5563" strokeWidth="1.5" strokeDasharray="4 4"
       />
-      <text x={W - PAD_X - 2} y={lineY - 3} fill="#6b7280" fontSize="8" textAnchor="end">
+      {/* Line value label — fixed aspect so text isn't distorted */}
+      <text x={VW - PAD_X - 4} y={lineY - 4} fill="#6b7280" fontSize="9" textAnchor="end"
+        style={{ fontVariantNumeric: 'tabular-nums' }}>
         {lineValue.toFixed(1)}
       </text>
+      {/* Dots */}
       {slice.map((g, i) => {
         const v   = Number(g[statKey] ?? 0);
         const cx  = xPos(i);
         const cy  = yPos(v);
         const hit = v > lineValue;
         return (
-          <circle key={g.gameId} cx={cx} cy={cy} r={3.5}
-            fill={hit ? '#4ade80' : '#f87171'} opacity={0.85} />
+          <circle
+            key={g.gameId}
+            cx={cx} cy={cy} r={4}
+            fill={hit ? '#4ade80' : '#f87171'}
+            opacity={0.9}
+          />
         );
       })}
     </svg>
@@ -418,7 +433,7 @@ function StatDotPlot({
 }
 
 // ---------------------------------------------------------------------------
-// Market panel — dot plot + alt lines with full detail (no std line rows)
+// Market panel — full-width dot plot + two-row alt line entries
 // ---------------------------------------------------------------------------
 
 function MarketPanel({
@@ -434,19 +449,21 @@ function MarketPanel({
   const lineValue = posted?.lineValue ?? 0;
 
   return (
-    <div className="border-t border-gray-800 px-4 pt-3 pb-3">
-      {/* Dot plot — always shown, keyed to the posted line */}
-      <StatDotPlot
-        summaries={summaries}
-        baseKey={group.baseKey}
-        lineValue={lineValue}
-        window={dotWindow}
-      />
+    <div className="border-t border-gray-800 pt-3 pb-3">
+      {/* Full-width dot plot — no horizontal padding so it reaches the edges */}
+      <div className="px-2">
+        <StatDotPlot
+          summaries={summaries}
+          baseKey={group.baseKey}
+          lineValue={lineValue}
+          window={dotWindow}
+        />
+      </div>
 
-      {/* Alt lines — full detail, always expanded, no toggle */}
+      {/* Alt lines — two-row layout per entry */}
       {group.altLines.length > 0 && (
-        <div className="mt-3 space-y-1">
-          <div className="text-xs text-gray-600 mb-1.5">Alt lines</div>
+        <div className="mt-3 px-4 space-y-1.5">
+          <div className="text-xs text-gray-600 mb-1">Alt lines</div>
           {group.altLines.map((pair) => {
             const over  = pair.over;
             const under = pair.under;
@@ -456,24 +473,28 @@ function MarketPanel({
             return (
               <div
                 key={pair.lineValue}
-                className={`flex items-center gap-2 px-2 py-1 rounded text-xs tabular-nums border border-gray-700/60 ${gradeBg(grade)}`}
+                className={`px-3 py-1.5 rounded border border-gray-700/60 ${gradeBg(grade)}`}
               >
-                <span className="font-semibold text-gray-200 w-8 shrink-0">
-                  {pair.lineValue.toFixed(1)}
-                </span>
-                <span className="text-gray-400 shrink-0">O {fmtOdds(over?.overPrice ?? null)}</span>
-                {under && (
-                  <span className="text-gray-500 shrink-0">U {fmtOdds(under.overPrice)}</span>
-                )}
-                {grade != null && (
-                  <span className={`font-semibold ml-auto ${gradeColor(grade)}`}>
-                    {grade.toFixed(0)}
+                {/* Row 1: line | O odds | U odds | grade */}
+                <div className="flex items-center gap-3 text-xs tabular-nums">
+                  <span className="font-semibold text-gray-200 w-9 shrink-0">
+                    {pair.lineValue.toFixed(1)}
                   </span>
-                )}
-                <span className="flex gap-1.5 text-gray-600 shrink-0">
-                  <span>{fmtPct(hr20)}</span>
-                  <span>{fmtPct(hr60)}</span>
-                </span>
+                  <span className="text-gray-400">O {fmtOdds(over?.overPrice ?? null)}</span>
+                  {under && (
+                    <span className="text-gray-500">U {fmtOdds(under.overPrice)}</span>
+                  )}
+                  {grade != null && (
+                    <span className={`font-semibold ml-auto ${gradeColor(grade)}`}>
+                      {grade.toFixed(0)}
+                    </span>
+                  )}
+                </div>
+                {/* Row 2: hit rate percentages */}
+                <div className="flex gap-2 mt-0.5 text-xs tabular-nums text-gray-500">
+                  {hr20 != null && <span>L20: {fmtPct(hr20)}</span>}
+                  {hr60 != null && <span>L60: {fmtPct(hr60)}</span>}
+                </div>
               </div>
             );
           })}
@@ -532,8 +553,12 @@ function TodayPropsSection({
 
   return (
     <div className="border-b border-gray-800">
-      {/* Header + dot window selector */}
-      <div className="px-4 pt-2 pb-1 flex items-center gap-3">
+      {/*
+        Header row + market strip share the same border-b so there is no
+        stray horizontal line between them. The strip itself uses border-t
+        only on the row that separates it from the header text.
+      */}
+      <div className="flex items-center px-4 py-1.5 border-b border-gray-800">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today's Props</span>
         <div className="flex gap-1 ml-auto">
           {(['L10', 'L30', 'L50', 'All'] as DotWindow[]).map((w) => (
@@ -552,12 +577,12 @@ function TodayPropsSection({
       </div>
 
       {/*
-        Strip: overflow-x-auto so it scrolls when cramped, but each cell uses
-        flex-1 + min-w so they fill available space and spread evenly when
-        there is room — matching VS Defense layout behaviour.
+        Strip: w-full flex so cells fill the full width and spread evenly.
+        overflow-x-auto kicks in only when total min-width exceeds viewport.
+        No border-t here — it would appear as the "extra line" seen in the screenshot.
       */}
-      <div className="overflow-x-auto border-t border-gray-800">
-        <div className="flex w-full min-w-max divide-x divide-gray-800">
+      <div className="overflow-x-auto">
+        <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
             const posted   = group.standardLines[0];
             const grade    = posted?.over?.compositeGrade ?? null;
@@ -567,7 +592,7 @@ function TodayPropsSection({
                 key={group.baseKey}
                 onClick={() => setActiveBase(isActive ? null : group.baseKey)}
                 className={[
-                  'flex flex-col items-center flex-1 min-w-[56px] py-2 transition-colors text-xs',
+                  'flex flex-col items-center flex-1 min-w-[52px] py-2 transition-colors text-xs',
                   isActive ? 'bg-gray-800' : 'hover:bg-gray-900',
                 ].join(' ')}
               >
