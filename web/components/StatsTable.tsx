@@ -38,9 +38,9 @@ function fmt(val: number | null | undefined, decimals = 1): string {
   return val.toFixed(decimals);
 }
 
-function fmtPct(made: number | null, att: number | null): string {
+function fmtRatio(made: number | null, att: number | null): string {
   if (made == null || att == null || att === 0) return '-';
-  return `${((made / att) * 100).toFixed(0)}%`;
+  return `${made.toFixed(1)}/${att.toFixed(1)}`;
 }
 
 const PERIOD_OPTIONS = [
@@ -94,8 +94,8 @@ function TeamStatsTable({
       <td className="py-1.5 px-2 text-right text-gray-500 text-xs">{p.games}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgMin)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtPct(p.avgFgm, p.avgFga)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtPct(p.avg3pm, p.avg3pa)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtRatio(p.avgFgm, p.avgFga)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtRatio(p.avg3pm, p.avg3pa)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgAst)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgStl)}</td>
@@ -114,8 +114,8 @@ function TeamStatsTable({
             <th className="text-right py-1.5 px-2 font-medium">GP</th>
             <th className="text-right py-1.5 px-2 font-medium">MIN</th>
             <th className="text-right py-1.5 px-2 font-medium">PTS</th>
-            <th className="text-right py-1.5 px-2 font-medium">FG%</th>
-            <th className="text-right py-1.5 px-2 font-medium">3P%</th>
+            <th className="text-right py-1.5 px-2 font-medium">FG</th>
+            <th className="text-right py-1.5 px-2 font-medium">3PT</th>
             <th className="text-right py-1.5 px-2 font-medium">REB</th>
             <th className="text-right py-1.5 px-2 font-medium">AST</th>
             <th className="text-right py-1.5 px-2 font-medium">STL</th>
