@@ -104,7 +104,9 @@ function TeamStatsTable({
   );
   const hasLineup = players.some((p) => p.starterStatus != null);
 
-  const colSpanTotal = showAllStats ? 15 : 10;
+  // compact:  Player GP MIN PTS 3PM REB AST PRA PR PA RA = 11 cols
+  // all-stats adds FG 3PA FT STL BLK TOV = +6 = 17 cols
+  const colSpanTotal = showAllStats ? 17 : 11;
 
   const renderRow = (p: PlayerAvg, dimmed = false) => {
     const pra = (p.avgPts ?? 0) + (p.avgReb ?? 0) + (p.avgAst ?? 0);
@@ -126,12 +128,15 @@ function TeamStatsTable({
         <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
         {showAllStats ? (
           <>
+            {/* All Stats: FG (made-att), 3PM, 3PA (separate), FT (made-att) */}
             <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avgFgm, p.avgFga)}</td>
-            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avg3pm, p.avg3pa)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmt(p.avg3pm)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmt(p.avg3pa)}</td>
             <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avgFtm, p.avgFta)}</td>
           </>
         ) : (
-          <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avg3pm, p.avg3pa)}</td>
+          /* Compact: avg 3PM only */
+          <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmt(p.avg3pm)}</td>
         )}
         <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
         <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgAst)}</td>
@@ -188,11 +193,12 @@ function TeamStatsTable({
             {showAllStats ? (
               <>
                 <th className="text-right py-1.5 px-2 font-medium">FG</th>
-                <th className="text-right py-1.5 px-2 font-medium">3PT</th>
+                <th className="text-right py-1.5 px-2 font-medium">3PM</th>
+                <th className="text-right py-1.5 px-2 font-medium">3PA</th>
                 <th className="text-right py-1.5 px-2 font-medium">FT</th>
               </>
             ) : (
-              <th className="text-right py-1.5 px-2 font-medium">3PT</th>
+              <th className="text-right py-1.5 px-2 font-medium">3PM</th>
             )}
             <th className="text-right py-1.5 px-2 font-medium">REB</th>
             <th className="text-right py-1.5 px-2 font-medium">AST</th>
