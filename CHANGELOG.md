@@ -9,6 +9,44 @@
 
 ---
 
+## 2026-04-03 (session close 3)
+
+### UI | web/app/nba/player/[playerId]/PlayerPageInner.tsx — compact/all-stats toggle + props redesign
+- Added `showAllStats` boolean state shared between the splits strip and game log.
+- Compact view (default): Player, MIN, PTS, 3PT (as 3PM-3PA), REB, AST, PRA, PR, PA, RA.
+- All Stats view: adds FG (FGM-FGA), FT (FTM-FTA), STL, BLK, TOV. Toggle button lives in splits header row, far right.
+- PRA/PR/PA/RA are computed combo columns: PRA=pts+reb+ast, PR=pts+reb, PA=pts+ast, RA=reb+ast. Combo prop coloring added via `getComboLineCls`.
+- Companion values (REB-RebChances, AST-PotAst) shown only in player game log, only when full game (no period filter). Not added to team views.
+- PF dropped — not in schema. Note as future addition.
+- Today's Props section redesigned: `TodayGradeRow` now includes `outcomeName` field. Over/Under rows paired into `LinePair` structs keyed by `(baseMarket, lineValue)`. Each market is a collapsible section (expanded by default). Standard lines show Over price, Under price, composite grade, hit rates on one row. Alt lines rendered horizontally, collapsed by default under each market. Do not revert to the old card layout.
+
+### UI | web/components/StatsTable.tsx — compact/all-stats toggle + combo columns
+- `showAllStats` prop added to `TeamStatsTable`, controlled from parent `StatsTable`.
+- Compact: Player, GP, MIN, PTS, 3PT, REB, AST, PRA, PR, PA, RA.
+- All Stats: adds FG, FT, STL, BLK, TOV. Toggle button in filter bar.
+- `avgFtm` and `avgFta` added to `PlayerAvg` interface (were missing, required for FT column).
+- `colSpanTotal` updated to handle variable column count for collapsible section headers.
+- Do not revert to the old FG%/3P% percentage columns.
+
+### UI | web/components/BoxScoreTable.tsx — compact/all-stats toggle + combo columns
+- `showAllStats` state in `BoxScoreTable`, passed to `TeamBox`.
+- Same compact/all-stats column sets as StatsTable and PlayerPageInner.
+- `COMBO_MARKETS` constant added for PRA/PR/PA/RA prop coloring in box score rows.
+- `getComboLine` helper added alongside existing `getLine`.
+- `colSpanTotal` updated for DNP rows and section headers.
+- Toggle button right-aligned in period filter bar.
+
+### API | web/app/api/team-averages/route.ts — avgFtm, avgFta
+- Added `AVG(CAST(r.ftm AS FLOAT)) AS avgFtm` and `AVG(CAST(r.fta AS FLOAT)) AS avgFta` to SELECT.
+- Required by StatsTable FT column in all-stats mode.
+
+### UI | web/components/MatchupDefense.tsx — column order
+- Reordered `STAT_LABELS` to match game log column order: PTS, 3PM, REB, AST, STL, BLK, TOV.
+- Was: PTS, REB, AST, STL, BLK, 3PM, TOV.
+- PRA/PR/PA/RA not added — requires extending `/api/contextual` query to compute combo defense averages. Deferred.
+
+---
+
 ## 2026-04-03 (session close 2)
 
 ### ETL | nba_etl.py — today's games in nba.games
