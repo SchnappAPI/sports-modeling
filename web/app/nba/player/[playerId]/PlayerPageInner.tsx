@@ -47,6 +47,7 @@ interface TodayGradeRow {
   playerName: string;
   marketKey: string;
   lineValue: number;
+  outcomeName: string;
   overPrice: number | null;
   hitRate60: number | null;
   hitRate20: number | null;
@@ -283,62 +284,170 @@ const MARKET_STAT: Record<string, keyof GameSummary> = {
 };
 
 // ---------------------------------------------------------------------------
-// Prop cards section
+// Props section — new design
 // ---------------------------------------------------------------------------
+
+interface LinePair {
+  lineValue: number;
+  over: TodayGradeRow | null;
+  under: TodayGradeRow | null;
+}
 
 interface MarketGroup {
   baseKey: string;
   label: string;
-  lines: TodayGradeRow[];
+  standardLines: LinePair[];
+  altLines: LinePair[];
 }
 
 function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
-  const order: string[] = [];
-  const map = new Map<string, TodayGradeRow[]>();
+  // Separate standard and alt rows
+  const stdRows  = grades.filter((g) => !isAlternate(g.marketKey));
+  const altRows  = grades.filter((g) =>  isAlternate(g.marketKey));
 
-  for (const g of grades) {
-    if (g.overPrice == null) continue;
-    const base = baseMarket(g.marketKey);
-    if (!map.has(base)) { order.push(base); map.set(base, []); }
-    map.get(base)!.push(g);
+  // Build pairs keyed by baseMarket + lineValue
+  function pairRows(rows: TodayGradeRow[]): Map<string, Map<number, LinePair>> {
+    const grouped = new Map<string, Map<number, LinePair>>();
+    for (const r of rows) {
+      const base = baseMarket(r.marketKey);
+      if (!grouped.has(base)) grouped.set(base, new Map());
+      const byLine = grouped.get(base)!;
+      const existing = byLine.get(r.lineValue) ?? { lineValue: r.lineValue, over: null, under: null };
+      if (r.outcomeName === 'Over') existing.over = r;
+      else existing.under = r;
+      byLine.set(r.lineValue, existing);
+    }
+    return grouped;
   }
 
-  return order.map((base) => ({
-    baseKey: base,
-    label: marketLabel(base),
-    lines: (map.get(base) ?? []).sort((a, b) => a.lineValue - b.lineValue),
-  }));
+  const stdPaired = pairRows(stdRows);
+  const altPaired = pairRows(altRows);
+
+  // Collect all base market keys in order they first appear
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const r of grades) {
+    const base = baseMarket(r.marketKey);
+    if (!seen.has(base)) { order.push(base); seen.add(base); }
+  }
+
+  return order.map((base) => {
+    const stdMap = stdPaired.get(base);
+    const altMap = altPaired.get(base);
+    const sortPairs = (m: Map<number, LinePair> | undefined): LinePair[] =>
+      m ? Array.from(m.values()).sort((a, b) => a.lineValue - b.lineValue) : [];
+    return {
+      baseKey: base,
+      label: marketLabel(base),
+      standardLines: sortPairs(stdMap),
+      altLines:      sortPairs(altMap),
+    };
+  }).filter((g) => g.standardLines.length > 0 || g.altLines.length > 0);
 }
 
-function PropCard({ row }: { row: TodayGradeRow }) {
-  const alt = isAlternate(row.marketKey);
+function LinePairRow({ pair }: { pair: LinePair }) {
+  const over  = pair.over;
+  const under = pair.under;
+  // Use Over row for grades; Under row only for price
+  const grade  = over?.compositeGrade ?? null;
+  const hrOver = over?.grade ?? null;
+  const hr20   = over?.hitRate20 ?? null;
+  const hr60   = over?.hitRate60 ?? null;
+
   return (
-    <div className={`rounded border px-3 py-2 min-w-[90px] ${
-      alt ? 'border-yellow-900 bg-yellow-950/20' : 'border-gray-700 bg-gray-900'
-    }`}>
-      <div className="text-base font-semibold text-gray-100 tabular-nums leading-none">
-        {row.lineValue.toFixed(1)}
-        {alt && <span className="text-yellow-600 text-xs ml-1">alt</span>}
-      </div>
-      <div className="text-xs text-gray-400 tabular-nums mt-0.5">
-        {fmtOdds(row.overPrice)}
-      </div>
-      <div className="flex gap-2 mt-1.5 text-xs">
-        {row.compositeGrade != null && (
-          <span className={`font-medium ${gradeColor(row.compositeGrade)}`}>
-            C:{row.compositeGrade.toFixed(0)}
+    <div className="flex items-center gap-3 py-1 text-xs">
+      {/* Line value */}
+      <span className="tabular-nums font-semibold text-gray-100 w-10 shrink-0">
+        {pair.lineValue.toFixed(1)}
+      </span>
+      {/* Over price */}
+      <span className="tabular-nums text-gray-400 w-14 shrink-0">
+        O {fmtOdds(over?.overPrice ?? null)}
+      </span>
+      {/* Under price */}
+      <span className="tabular-nums text-gray-400 w-14 shrink-0">
+        U {fmtOdds(under?.overPrice ?? null)}
+      </span>
+      {/* Grades */}
+      <span className="flex gap-2 ml-auto">
+        {grade != null && (
+          <span className={`font-medium ${gradeColor(grade)}`}>C:{grade.toFixed(0)}</span>
+        )}
+        {hrOver != null && (
+          <span className={gradeColor(hrOver)}>HR:{hrOver.toFixed(0)}</span>
+        )}
+      </span>
+      {/* Hit rates */}
+      <span className="flex gap-1.5 text-gray-600 w-16 justify-end shrink-0">
+        <span>{fmtPct(hr20)}</span>
+        <span>{fmtPct(hr60)}</span>
+      </span>
+    </div>
+  );
+}
+
+function MarketSection({ group }: { group: MarketGroup }) {
+  const [open, setOpen]       = useState(true);
+  const [altsOpen, setAltsOpen] = useState(false);
+
+  // Summary line for header: posted line value + over price from first standard line
+  const posted = group.standardLines[0];
+
+  return (
+    <div className="border-b border-gray-800 last:border-b-0">
+      {/* Market header row — tappable to collapse */}
+      <button
+        className="w-full flex items-center gap-2 px-4 py-2 text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="text-xs font-semibold text-gray-300 w-8 shrink-0">{group.label}</span>
+        {posted && (
+          <span className="text-xs text-gray-500 tabular-nums">
+            {posted.lineValue.toFixed(1)}
+            {posted.over && (
+              <span className="ml-1.5">{fmtOdds(posted.over.overPrice)}</span>
+            )}
+            {posted.under && (
+              <span className="ml-1 text-gray-600">/ {fmtOdds(posted.under.overPrice)}</span>
+            )}
           </span>
         )}
-        {row.grade != null && (
-          <span className={gradeColor(row.grade)}>
-            HR:{row.grade.toFixed(0)}
+        {posted?.over?.compositeGrade != null && (
+          <span className={`text-xs font-medium ml-auto ${gradeColor(posted.over.compositeGrade)}`}>
+            {posted.over.compositeGrade.toFixed(0)}
           </span>
         )}
-      </div>
-      <div className="flex gap-2 mt-0.5 text-xs text-gray-600">
-        <span>{fmtPct(row.hitRate20)}</span>
-        <span>{fmtPct(row.hitRate60)}</span>
-      </div>
+        <span className="text-gray-600 text-xs ml-1">{open ? '▾' : '▸'}</span>
+      </button>
+
+      {open && (
+        <div className="px-4 pb-2">
+          {/* Standard lines */}
+          {group.standardLines.map((pair) => (
+            <LinePairRow key={pair.lineValue} pair={pair} />
+          ))}
+
+          {/* Alt lines sub-section */}
+          {group.altLines.length > 0 && (
+            <div className="mt-1">
+              <button
+                className="flex items-center gap-1 text-xs text-yellow-700 hover:text-yellow-500 py-0.5"
+                onClick={() => setAltsOpen((o) => !o)}
+              >
+                <span>{altsOpen ? '▾' : '▸'}</span>
+                <span>Alt lines ({group.altLines.length})</span>
+              </button>
+              {altsOpen && (
+                <div className="mt-1 pl-2 border-l border-yellow-900/40">
+                  {group.altLines.map((pair) => (
+                    <LinePairRow key={pair.lineValue} pair={pair} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -370,19 +479,12 @@ function TodayPropsSection({ playerId, gradeDate }: { playerId: string; gradeDat
 
   return (
     <div className="border-b border-gray-800">
-      <div className="px-4 pt-3 pb-1">
+      <div className="px-4 pt-2 pb-1 flex items-center">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today's Props</span>
       </div>
-      <div className="px-4 pb-3 flex flex-col gap-3">
+      <div>
         {groups.map((group) => (
-          <div key={group.baseKey}>
-            <div className="text-xs text-gray-500 font-medium mb-1.5">{group.label}</div>
-            <div className="flex flex-wrap gap-2">
-              {group.lines.map((row) => (
-                <PropCard key={row.gradeId} row={row} />
-              ))}
-            </div>
-          </div>
+          <MarketSection key={group.baseKey} group={group} />
         ))}
       </div>
     </div>
@@ -578,8 +680,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     ...(oppParam ? [{ key: 'opp' as SplitKey, label: `vs ${oppParam}` }] : []),
   ];
 
-  // Splits compact cols: MIN PTS 3PM-3PA REB AST PRA PR PA RA
-  // Splits all-stats cols: MIN PTS FGM-FGA 3PM-3PA FTM-FTA REB AST PRA PR PA RA STL BLK TOV
   const compactSplitHeaders = ['MIN', 'PTS', '3PT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA'];
   const allStatsSplitHeaders = ['MIN', 'PTS', 'FG', '3PT', 'FT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'STL', 'BLK', 'TOV'];
   const splitHeaders = showAllStats ? allStatsSplitHeaders : compactSplitHeaders;
@@ -771,9 +871,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">TOV</th>
                 </>
               )}
-              <th className="text-right py-1.5 pl-2 pr-4">
-                {/* toggle placeholder — button lives in splits header, keep empty for alignment */}
-              </th>
+              <th className="text-right py-1.5 pl-2 pr-4" />
             </tr>
           </thead>
           <tbody>
