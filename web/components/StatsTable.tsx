@@ -22,6 +22,8 @@ interface PlayerAvg {
   avg3pa: number | null;
   avgFgm: number | null;
   avgFga: number | null;
+  avgFtm: number | null;
+  avgFta: number | null;
 }
 
 interface Props {
@@ -38,8 +40,8 @@ function fmt(val: number | null | undefined, decimals = 1): string {
   return val.toFixed(decimals);
 }
 
-function fmtRatio(made: number | null, att: number | null): string {
-  if (made == null || att == null || att === 0) return '-';
+function fmtMade(made: number | null, att: number | null): string {
+  if (made == null || att == null) return '-';
   return `${made.toFixed(1)}-${att.toFixed(1)}`;
 }
 
@@ -53,12 +55,26 @@ const PERIOD_OPTIONS = [
 ] as const;
 
 const N_OPTIONS = [
-  { label: 'L10',  value: '10' },
-  { label: 'L20',  value: '20' },
-  { label: 'L40',  value: '40' },
-  { label: 'All',  value: 'all' },
+  { label: 'L10',    value: '10' },
+  { label: 'L20',    value: '20' },
+  { label: 'L40',    value: '40' },
+  { label: 'All',    value: 'all' },
   { label: 'vs Opp', value: 'opp' },
 ];
+
+function StatsToggle({ showAll, onToggle }: { showAll: boolean; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      className={[
+        'px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap',
+        showAll ? 'bg-gray-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+      ].join(' ')}
+    >
+      {showAll ? 'Compact' : 'All Stats'}
+    </button>
+  );
+}
 
 function TeamStatsTable({
   abbr,
@@ -66,12 +82,14 @@ function TeamStatsTable({
   players,
   gameId,
   selectedDate,
+  showAllStats,
 }: {
   abbr: string;
   opponentAbbr: string;
   players: PlayerAvg[];
   gameId: string;
   selectedDate: string;
+  showAllStats: boolean;
 }) {
   const searchParams = useSearchParams();
   const tab = searchParams.get('tab') ?? 'stats';
@@ -81,34 +99,56 @@ function TeamStatsTable({
   const starters  = players.filter((p) => p.starterStatus === 'Starter');
   const bench     = players.filter((p) => p.starterStatus === 'Bench');
   const inactive  = players.filter((p) => p.starterStatus === 'Inactive');
-  // Players with no lineup data at all fall through to bench bucket
   const noLineup  = players.filter(
     (p) => p.starterStatus == null || (p.starterStatus !== 'Starter' && p.starterStatus !== 'Bench' && p.starterStatus !== 'Inactive')
   );
   const hasLineup = players.some((p) => p.starterStatus != null);
 
-  const renderRow = (p: PlayerAvg, dimmed = false) => (
-    <tr key={p.playerId} className={['border-b border-gray-800', dimmed ? 'opacity-40' : ''].join(' ')}>
-      <td className="py-1.5 pr-3">
-        <Link
-          href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}&date=${selectedDate}`}
-          className="text-gray-100 hover:text-blue-400 transition-colors"
-        >
-          {p.playerName}
-        </Link>
-      </td>
-      <td className="py-1.5 px-2 text-right text-gray-500 text-xs">{p.games}</td>
-      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgMin)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtRatio(p.avgFgm, p.avgFga)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtRatio(p.avg3pm, p.avg3pa)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgAst)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgStl)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgBlk)}</td>
-      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgTov)}</td>
-    </tr>
-  );
+  const colSpanTotal = showAllStats ? 15 : 10;
+
+  const renderRow = (p: PlayerAvg, dimmed = false) => {
+    const pra = (p.avgPts ?? 0) + (p.avgReb ?? 0) + (p.avgAst ?? 0);
+    const pr  = (p.avgPts ?? 0) + (p.avgReb ?? 0);
+    const pa  = (p.avgPts ?? 0) + (p.avgAst ?? 0);
+    const ra  = (p.avgReb ?? 0) + (p.avgAst ?? 0);
+    return (
+      <tr key={p.playerId} className={['border-b border-gray-800', dimmed ? 'opacity-40' : ''].join(' ')}>
+        <td className="py-1.5 pr-3">
+          <Link
+            href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}&date=${selectedDate}`}
+            className="text-gray-100 hover:text-blue-400 transition-colors"
+          >
+            {p.playerName}
+          </Link>
+        </td>
+        <td className="py-1.5 px-2 text-right text-gray-500 text-xs">{p.games}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgMin)}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
+        {showAllStats ? (
+          <>
+            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avgFgm, p.avgFga)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avg3pm, p.avg3pa)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avgFtm, p.avgFta)}</td>
+          </>
+        ) : (
+          <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avg3pm, p.avg3pa)}</td>
+        )}
+        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgAst)}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300">{pra > 0 ? pra.toFixed(1) : '-'}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300">{pr  > 0 ? pr.toFixed(1)  : '-'}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300">{pa  > 0 ? pa.toFixed(1)  : '-'}</td>
+        <td className="py-1.5 px-2 text-right text-gray-300">{ra  > 0 ? ra.toFixed(1)  : '-'}</td>
+        {showAllStats && (
+          <>
+            <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgStl)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgBlk)}</td>
+            <td className="py-1.5 pl-2 text-right text-gray-300">{fmt(p.avgTov)}</td>
+          </>
+        )}
+      </tr>
+    );
+  };
 
   const collapsibleSection = (
     label: string,
@@ -124,10 +164,10 @@ function TeamStatsTable({
         onClick={toggle}
       >
         <td
-          colSpan={11}
+          colSpan={colSpanTotal}
           className="py-1.5 text-xs text-gray-500 font-semibold uppercase tracking-wider"
         >
-          <span className="mr-1.5 text-gray-600">{open ? '▾' : '▸'}</span>
+          <span className="mr-1.5 text-gray-600">{open ? '\u25be' : '\u25b8'}</span>
           {label} ({count})
         </td>
       </tr>
@@ -145,13 +185,28 @@ function TeamStatsTable({
             <th className="text-right py-1.5 px-2 font-medium">GP</th>
             <th className="text-right py-1.5 px-2 font-medium">MIN</th>
             <th className="text-right py-1.5 px-2 font-medium">PTS</th>
-            <th className="text-right py-1.5 px-2 font-medium">FG</th>
-            <th className="text-right py-1.5 px-2 font-medium">3PT</th>
+            {showAllStats ? (
+              <>
+                <th className="text-right py-1.5 px-2 font-medium">FG</th>
+                <th className="text-right py-1.5 px-2 font-medium">3PT</th>
+                <th className="text-right py-1.5 px-2 font-medium">FT</th>
+              </>
+            ) : (
+              <th className="text-right py-1.5 px-2 font-medium">3PT</th>
+            )}
             <th className="text-right py-1.5 px-2 font-medium">REB</th>
             <th className="text-right py-1.5 px-2 font-medium">AST</th>
-            <th className="text-right py-1.5 px-2 font-medium">STL</th>
-            <th className="text-right py-1.5 px-2 font-medium">BLK</th>
-            <th className="text-right py-1.5 pl-2 font-medium">TOV</th>
+            <th className="text-right py-1.5 px-2 font-medium">PRA</th>
+            <th className="text-right py-1.5 px-2 font-medium">PR</th>
+            <th className="text-right py-1.5 px-2 font-medium">PA</th>
+            <th className="text-right py-1.5 px-2 font-medium">RA</th>
+            {showAllStats && (
+              <>
+                <th className="text-right py-1.5 px-2 font-medium">STL</th>
+                <th className="text-right py-1.5 px-2 font-medium">BLK</th>
+                <th className="text-right py-1.5 pl-2 font-medium">TOV</th>
+              </>
+            )}
           </tr>
         </thead>
         <tbody>
@@ -177,6 +232,7 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
   const [players, setPlayers] = useState<PlayerAvg[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showAllStats, setShowAllStats] = useState(false);
 
   function togglePeriod(value: string) {
     setActivePeriods((prev) => {
@@ -252,6 +308,7 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
             </button>
           ))}
         </div>
+        <StatsToggle showAll={showAllStats} onToggle={() => setShowAllStats((v) => !v)} />
       </div>
 
       {loading && <div className="text-sm text-gray-500 py-2">Loading stats...</div>}
@@ -260,16 +317,16 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
       {!loading && !error && (
         <div className="flex flex-col gap-6">
           {awayPlayers.length > 0 && (
-            <TeamStatsTable abbr={awayTeamAbbr} opponentAbbr={homeTeamAbbr} players={awayPlayers} gameId={gameId} selectedDate={selectedDate} />
+            <TeamStatsTable abbr={awayTeamAbbr} opponentAbbr={homeTeamAbbr} players={awayPlayers} gameId={gameId} selectedDate={selectedDate} showAllStats={showAllStats} />
           )}
           {homePlayers.length > 0 && (
-            <TeamStatsTable abbr={homeTeamAbbr} opponentAbbr={awayTeamAbbr} players={homePlayers} gameId={gameId} selectedDate={selectedDate} />
+            <TeamStatsTable abbr={homeTeamAbbr} opponentAbbr={awayTeamAbbr} players={homePlayers} gameId={gameId} selectedDate={selectedDate} showAllStats={showAllStats} />
           )}
           {otherAbbrs.map((abbr) => (
             <TeamStatsTable
               key={abbr} abbr={abbr} opponentAbbr=''
               players={players.filter((p) => p.teamAbbr === abbr)}
-              gameId={gameId} selectedDate={selectedDate}
+              gameId={gameId} selectedDate={selectedDate} showAllStats={showAllStats}
             />
           ))}
           {players.length === 0 && <div className="text-sm text-gray-500">No stats available.</div>}

@@ -248,9 +248,9 @@ function computeSplit(summaries: GameSummary[], opp: string | null): Record<Spli
   return acc;
 }
 
-function avg(total: number, gp: number): string {
+function avg(total: number, gp: number, decimals = 1): string {
   if (gp === 0) return '-';
-  return (total / gp).toFixed(1);
+  return (total / gp).toFixed(decimals);
 }
 
 function fmtMin(min: number, gp: number): string {
@@ -390,6 +390,24 @@ function TodayPropsSection({ playerId, gradeDate }: { playerId: string; gradeDat
 }
 
 // ---------------------------------------------------------------------------
+// Stats toggle button
+// ---------------------------------------------------------------------------
+
+function StatsToggle({ showAll, onToggle }: { showAll: boolean; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      className={[
+        'px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap',
+        showAll ? 'bg-gray-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+      ].join(' ')}
+    >
+      {showAll ? 'Compact' : 'All Stats'}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -420,6 +438,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [error, setError]           = useState<string | null>(null);
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
   const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
+  const [showAllStats, setShowAllStats] = useState(false);
+
+  // Full game = no period filter active
+  const isFullGame = selectedPeriods.size === 0;
 
   useEffect(() => {
     setLoading(true);
@@ -503,7 +525,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     [log],
   );
 
-  const showPropColors = selectedPeriods.size === 0;
+  const showPropColors = isFullGame;
 
   const teamGameCount = useMemo(() => new Set(summaries.map((s) => s.gameId)).size, [summaries]);
   const playedCount   = useMemo(() => summaries.filter((s) => !s.dnp).length, [summaries]);
@@ -526,6 +548,17 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     return value > line ? 'text-green-400' : 'text-red-400';
   }
 
+  function getComboLineCls(gameId: string, value: number, markets: string[]): string {
+    if (!showPropColors) return 'text-gray-300';
+    const gameMap = gradeMap.get(gameId);
+    if (!gameMap) return 'text-gray-300';
+    for (const market of markets) {
+      const line = gameMap.get(market);
+      if (line != null) return value > line ? 'text-green-400' : 'text-red-400';
+    }
+    return 'text-gray-300';
+  }
+
   const displayName = playerInfo.playerName ?? `Player ${playerId}`;
 
   const todayMarket = useMemo(() => {
@@ -544,6 +577,60 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     { key: 'l10',    label: 'Last 10' },
     ...(oppParam ? [{ key: 'opp' as SplitKey, label: `vs ${oppParam}` }] : []),
   ];
+
+  // Splits compact cols: MIN PTS 3PM-3PA REB AST PRA PR PA RA
+  // Splits all-stats cols: MIN PTS FGM-FGA 3PM-3PA FTM-FTA REB AST PRA PR PA RA STL BLK TOV
+  const compactSplitHeaders = ['MIN', 'PTS', '3PT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA'];
+  const allStatsSplitHeaders = ['MIN', 'PTS', 'FG', '3PT', 'FT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'STL', 'BLK', 'TOV'];
+  const splitHeaders = showAllStats ? allStatsSplitHeaders : compactSplitHeaders;
+
+  function renderSplitCells(s: SplitStats) {
+    const pra = s.gp === 0 ? '-' : ((s.pts + s.reb + s.ast) / s.gp).toFixed(1);
+    const pr  = s.gp === 0 ? '-' : ((s.pts + s.reb) / s.gp).toFixed(1);
+    const pa  = s.gp === 0 ? '-' : ((s.pts + s.ast) / s.gp).toFixed(1);
+    const ra  = s.gp === 0 ? '-' : ((s.reb + s.ast) / s.gp).toFixed(1);
+    if (showAllStats) {
+      return (
+        <>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+            {s.gp === 0 ? '-' : `${(s.fgm/s.gp).toFixed(1)}-${(s.fga/s.gp).toFixed(1)}`}
+          </td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+            {s.gp === 0 ? '-' : `${(s.fg3m/s.gp).toFixed(1)}-${(s.fg3a/s.gp).toFixed(1)}`}
+          </td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+            {s.gp === 0 ? '-' : `${(s.ftm/s.gp).toFixed(1)}-${(s.fta/s.gp).toFixed(1)}`}
+          </td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pra}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pr}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pa}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{ra}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.stl, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.blk, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.tov, s.gp)}</td>
+        </>
+      );
+    }
+    return (
+      <>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+          {s.gp === 0 ? '-' : `${(s.fg3m/s.gp).toFixed(1)}-${(s.fg3a/s.gp).toFixed(1)}`}
+        </td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pra}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pr}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pa}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{ra}</td>
+      </>
+    );
+  }
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -583,16 +670,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
             <tr className="text-gray-500">
               <th className="text-left px-4 py-2 font-medium sticky left-0 bg-gray-950 z-10">Split</th>
               <th className="text-right px-2 py-2 font-medium whitespace-nowrap">GP</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">MIN</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">PTS</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">REB</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">AST</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">STL</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">BLK</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">TOV</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">FG%</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">3P%</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">FT%</th>
+              {splitHeaders.map((h) => (
+                <th key={h} className="text-right px-2 py-2 font-medium whitespace-nowrap">{h}</th>
+              ))}
+              <th className="text-right py-2 pl-2 pr-4">
+                <StatsToggle showAll={showAllStats} onToggle={() => setShowAllStats((v) => !v)} />
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -602,16 +685,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 <tr key={key} className="border-t border-gray-800">
                   <td className="px-4 py-2 text-gray-400 font-medium sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{label}</td>
                   <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{s.gp}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.stl, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.blk, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.tov, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fgm, s.fga, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fg3m, s.fg3a, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.ftm, s.fta, s.gp)}</td>
+                  {renderSplitCells(s)}
+                  <td />
                 </tr>
               );
             })}
@@ -670,14 +745,35 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Opp</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="* = Starter">MIN</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PTS</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FG</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">REB</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">AST</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">STL</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">BLK</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">TOV</th>
-              <th className="text-right px-4 py-1.5 font-medium whitespace-nowrap">FT</th>
+              {showAllStats ? (
+                <>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FG</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FT</th>
+                </>
+              ) : (
+                <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
+              )}
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">
+                REB
+              </th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">
+                AST
+              </th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PRA</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PR</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PA</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">RA</th>
+              {showAllStats && (
+                <>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">STL</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">BLK</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">TOV</th>
+                </>
+              )}
+              <th className="text-right py-1.5 pl-2 pr-4">
+                {/* toggle placeholder — button lives in splits header, keep empty for alignment */}
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -703,17 +799,21 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                       {g.isHome ? '' : '@'}{g.opponentAbbr}
                     </td>
                     <td className="px-2 py-1.5 text-right text-gray-600 text-xs whitespace-nowrap">DNP</td>
-                    <td colSpan={9} />
+                    <td colSpan={showAllStats ? 12 : 9} />
                   </tr>
                 );
               }
 
-              const ptsLine = getLineCls(g.gameId, 'player_points', g.pts);
-              const rebLine = getLineCls(g.gameId, 'player_rebounds', g.reb);
-              const astLine = getLineCls(g.gameId, 'player_assists', g.ast);
-              const stlLine = getLineCls(g.gameId, 'player_steals', g.stl);
-              const blkLine = getLineCls(g.gameId, 'player_blocks', g.blk);
-              const fg3Line = getLineCls(g.gameId, 'player_threes', g.fg3m);
+              const ptsLine  = getLineCls(g.gameId, 'player_points', g.pts);
+              const rebLine  = getLineCls(g.gameId, 'player_rebounds', g.reb);
+              const astLine  = getLineCls(g.gameId, 'player_assists', g.ast);
+              const stlLine  = getLineCls(g.gameId, 'player_steals', g.stl);
+              const blkLine  = getLineCls(g.gameId, 'player_blocks', g.blk);
+              const fg3Line  = getLineCls(g.gameId, 'player_threes', g.fg3m);
+              const praLine  = getComboLineCls(g.gameId, g.pts + g.reb + g.ast, ['player_points_rebounds_assists', 'player_points_rebounds_assists_alternate']);
+              const prLine   = getComboLineCls(g.gameId, g.pts + g.reb, ['player_points_rebounds', 'player_points_rebounds_alternate']);
+              const paLine   = getComboLineCls(g.gameId, g.pts + g.ast, ['player_points_assists', 'player_points_assists_alternate']);
+              const raLine   = getComboLineCls(g.gameId, g.reb + g.ast, ['player_rebounds_assists', 'player_rebounds_assists_alternate']);
 
               return (
                 <tr key={g.gameId} className="border-b border-gray-800">
@@ -725,18 +825,41 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                     {fmtM(g.min, g.started)}
                   </td>
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${ptsLine}`}>{g.pts}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.fgm, g.fga)}</td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{fmtS(g.fg3m, g.fg3a)}</td>
+                  {showAllStats ? (
+                    <>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.fgm, g.fga)}</td>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{fmtS(g.fg3m, g.fg3a)}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.ftm, g.fta)}</td>
+                    </>
+                  ) : (
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{fmtS(g.fg3m, g.fg3a)}</td>
+                  )}
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${rebLine} tabular-nums`}>
-                    {fmtPT(g.reb, selectedPeriods.size === 0 ? g.rebChances : null)}
+                    {isFullGame ? fmtPT(g.reb, g.rebChances) : g.reb}
                   </td>
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${astLine} tabular-nums`}>
-                    {fmtPT(g.ast, selectedPeriods.size === 0 ? g.potentialAst : null)}
+                    {isFullGame ? fmtPT(g.ast, g.potentialAst) : g.ast}
                   </td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${stlLine}`}>{g.stl}</td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${blkLine}`}>{g.blk}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
-                  <td className="px-4 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.ftm, g.fta)}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${praLine} tabular-nums`}>
+                    {g.pts + g.reb + g.ast}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${prLine} tabular-nums`}>
+                    {g.pts + g.reb}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${paLine} tabular-nums`}>
+                    {g.pts + g.ast}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${raLine} tabular-nums`}>
+                    {g.reb + g.ast}
+                  </td>
+                  {showAllStats && (
+                    <>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${stlLine}`}>{g.stl}</td>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${blkLine}`}>{g.blk}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
+                    </>
+                  )}
+                  <td />
                 </tr>
               );
             })}

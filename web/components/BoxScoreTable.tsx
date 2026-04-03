@@ -76,6 +76,13 @@ const MARKET_TO_STAT: Record<string, keyof PlayerTotals> = {
   player_threes_alternate:   'fg3m',
 };
 
+const COMBO_MARKETS: Record<string, string[]> = {
+  pra: ['player_points_rebounds_assists', 'player_points_rebounds_assists_alternate'],
+  pr:  ['player_points_rebounds',  'player_points_rebounds_alternate'],
+  pa:  ['player_points_assists',   'player_points_assists_alternate'],
+  ra:  ['player_rebounds_assists', 'player_rebounds_assists_alternate'],
+};
+
 function sumRows(rows: BoxRow[], key: keyof BoxRow): number {
   return rows.reduce((acc, r) => acc + ((r[key] as number) ?? 0), 0);
 }
@@ -127,9 +134,33 @@ function getLine(propMap: PropMap, playerId: number, statKey: keyof PlayerTotals
   return null;
 }
 
+function getComboLine(propMap: PropMap, playerId: number, markets: string[]): number | null {
+  const playerMap = propMap.get(playerId);
+  if (!playerMap) return null;
+  for (const market of markets) {
+    const line = playerMap.get(market);
+    if (line != null) return line;
+  }
+  return null;
+}
+
 function statCls(value: number, line: number | null): string {
   if (line == null) return 'text-gray-300';
   return value > line ? 'text-green-400 font-medium' : 'text-red-400';
+}
+
+function StatsToggle({ showAll, onToggle }: { showAll: boolean; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      className={[
+        'px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap',
+        showAll ? 'bg-gray-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+      ].join(' ')}
+    >
+      {showAll ? 'Compact' : 'All Stats'}
+    </button>
+  );
 }
 
 function TeamBox({
@@ -138,6 +169,7 @@ function TeamBox({
   hasLineup,
   propMap,
   showColors,
+  showAllStats,
   gameId,
   selectedDate,
 }: {
@@ -146,6 +178,7 @@ function TeamBox({
   hasLineup: boolean;
   propMap: PropMap;
   showColors: boolean;
+  showAllStats: boolean;
   gameId: string;
   selectedDate: string;
 }) {
@@ -156,6 +189,13 @@ function TeamBox({
     const inactive = slot.appearedInGame && t.min === 0;
     const line = (sk: keyof PlayerTotals) =>
       showColors && !inactive ? getLine(propMap, slot.playerId, sk) : null;
+    const comboLine = (markets: string[]) =>
+      showColors && !inactive ? getComboLine(propMap, slot.playerId, markets) : null;
+
+    const pra = t.pts + t.reb + t.ast;
+    const pr  = t.pts + t.reb;
+    const pa  = t.pts + t.ast;
+    const ra  = t.reb + t.ast;
 
     const playerHref =
       `/nba/player/${slot.playerId}?gameId=${gameId}&tab=boxscore&date=${selectedDate}`;
@@ -174,29 +214,45 @@ function TeamBox({
           </Link>
         </td>
         <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(t.min)}</td>
-        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.pts,  line('pts'))}`}>{t.pts}</td>
-        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.reb,  line('reb'))}`}>{t.reb}</td>
-        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.ast,  line('ast'))}`}>{t.ast}</td>
-        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.stl,  line('stl'))}`}>{t.stl}</td>
-        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.blk,  line('blk'))}`}>{t.blk}</td>
-        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.tov,  line('tov'))}`}>{t.tov}</td>
-        <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(t.fgm, t.fga)}</td>
-        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fg3a)}</td>
-        <td className="py-1.5 pl-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(t.ftm, t.fta)}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.pts, line('pts'))}`}>{t.pts}</td>
+        {showAllStats ? (
+          <>
+            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtShoot(t.fgm, t.fga)}</td>
+            <td className={`py-1.5 px-2 text-right whitespace-nowrap tabular-nums ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fg3a)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtShoot(t.ftm, t.fta)}</td>
+          </>
+        ) : (
+          <td className={`py-1.5 px-2 text-right whitespace-nowrap tabular-nums ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fg3a)}</td>
+        )}
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.reb, line('reb'))}`}>{t.reb}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.ast, line('ast'))}`}>{t.ast}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(pra, comboLine(COMBO_MARKETS.pra))}`}>{pra}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(pr,  comboLine(COMBO_MARKETS.pr))}`}>{pr}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(pa,  comboLine(COMBO_MARKETS.pa))}`}>{pa}</td>
+        <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(ra,  comboLine(COMBO_MARKETS.ra))}`}>{ra}</td>
+        {showAllStats && (
+          <>
+            <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.stl, line('stl'))}`}>{t.stl}</td>
+            <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.blk, line('blk'))}`}>{t.blk}</td>
+            <td className="py-1.5 pl-2 text-right text-gray-300 whitespace-nowrap">{t.tov}</td>
+          </>
+        )}
       </tr>
     );
   };
 
-  const sectionHeader = (label: string) => (
+  const sectionHeader = (label: string, colSpan: number) => (
     <tr>
       <td
-        colSpan={11}
+        colSpan={colSpan}
         className="pt-3 pb-1 text-xs text-gray-600 font-semibold uppercase tracking-wider sticky left-0 bg-gray-950"
       >
         {label}
       </td>
     </tr>
   );
+
+  const colSpanTotal = showAllStats ? 15 : 11;
 
   const starters = slots.filter((s) => s.starterStatus === 'Starter');
   const bench    = slots.filter(
@@ -212,24 +268,38 @@ function TeamBox({
             <th className="text-left py-1.5 pr-3 font-medium sticky left-0 bg-gray-950 z-20 whitespace-nowrap">Player</th>
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">MIN</th>
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">PTS</th>
+            {showAllStats ? (
+              <>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FG</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3PT</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FT</th>
+              </>
+            ) : (
+              <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3PT</th>
+            )}
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">REB</th>
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">AST</th>
-            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">STL</th>
-            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">BLK</th>
-            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">TOV</th>
-            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FG</th>
-            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3P</th>
-            <th className="text-right py-1.5 pl-2 font-medium whitespace-nowrap">FT</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">PRA</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">PR</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">PA</th>
+            <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">RA</th>
+            {showAllStats && (
+              <>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">STL</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">BLK</th>
+                <th className="text-right py-1.5 pl-2 font-medium whitespace-nowrap">TOV</th>
+              </>
+            )}
           </tr>
         </thead>
         <tbody>
           {hasLineup ? (
             <>
-              {starters.length > 0 && sectionHeader('Starters')}
+              {starters.length > 0 && sectionHeader('Starters', colSpanTotal)}
               {starters.map(renderRow)}
-              {bench.length > 0 && sectionHeader('Bench')}
+              {bench.length > 0 && sectionHeader('Bench', colSpanTotal)}
               {bench.map(renderRow)}
-              {dnp.length > 0 && sectionHeader('Did Not Play')}
+              {dnp.length > 0 && sectionHeader('Did Not Play', colSpanTotal)}
               {dnp.map((s) => (
                 <tr key={s.playerId} className="border-b border-gray-800 opacity-40">
                   <td className="py-1.5 pr-3 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">
@@ -240,7 +310,7 @@ function TeamBox({
                       {s.playerName}
                     </Link>
                   </td>
-                  <td colSpan={10} className="py-1.5 px-2 text-xs text-gray-500">DNP</td>
+                  <td colSpan={colSpanTotal - 1} className="py-1.5 px-2 text-xs text-gray-500">DNP</td>
                 </tr>
               ))}
             </>
@@ -271,6 +341,7 @@ export default function BoxScoreTable({
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
+  const [showAllStats, setShowAllStats] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -278,8 +349,6 @@ export default function BoxScoreTable({
     setSelectedPeriods(new Set());
     setGrades([]);
 
-    // Fetch box score and grades independently — a grading failure should not
-    // prevent the box score from rendering.
     fetch(`/api/boxscore?gameId=${gameId}`)
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((boxData) => setRows(boxData.rows ?? []))
@@ -360,7 +429,7 @@ export default function BoxScoreTable({
 
   return (
     <div>
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
         <span className="text-xs text-gray-600">All</span>
         {availablePeriods.map((p) => (
           <button
@@ -387,6 +456,9 @@ export default function BoxScoreTable({
         {!showColors && grades.length > 0 && (
           <span className="text-xs text-gray-600 ml-2">Prop coloring off (full game only)</span>
         )}
+        <div className="ml-auto">
+          <StatsToggle showAll={showAllStats} onToggle={() => setShowAllStats((v) => !v)} />
+        </div>
       </div>
 
       <div className="flex flex-col gap-6">
@@ -401,6 +473,7 @@ export default function BoxScoreTable({
               hasLineup={hasLineup}
               propMap={propMap}
               showColors={showColors}
+              showAllStats={showAllStats}
               gameId={gameId}
               selectedDate={selectedDate}
             />
