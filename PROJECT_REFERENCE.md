@@ -19,9 +19,14 @@
 - Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
 - PWA active. Install via Safari Share → Add to Home Screen.
 - `sports-session-close` skill installed — use at end of every session to update docs and generate handoff primer.
+- Box Score tab: fixed — today's final games now populate `nba.games` (was `game_date < today`, now `<=`), unblocking same-day box score writes. Deploy pending nightly ETL run.
+- Box Score 3P column: fixed — was using `fga` as denominator instead of `fg3a`.
+- StatsTable inactive players: fixed — players with inactive `lineupStatus` now appear in separate dimmed Inactive section, not mixed into Bench.
+- `gate_check.py` recreated — `pregame-refresh.yml` was failing on every run due to missing file.
 
 **Known issues:**
-- Box score tab and live stats tab not loading — runtime error not yet diagnosed. Need browser error text to fix.
+- `etl/lineup_fix_fragment.py` is a stub file left from an accidental create during session — safe to delete.
+- Today's games (2026-04-03) still show Wembanyama as Bench because lineup data was already written before the ETL fix landed. Will correct automatically on next lineup-poll refresh for future games.
 - PasscodeGate `BYPASS = true` — gate disabled for dev. Re-enable before sharing with users (`PasscodeGate.tsx`).
 - Odds/grading backfill gap — pre-April 2026 dates still being backfilled by nightly chain.
 - NFL workflow missing — `nfl_etl.py` exists, `nfl-etl.yml` does not.
@@ -30,7 +35,8 @@
 - PNG icons not generated — SVG covers all modern browsers; generate via `web/scripts/generate-icons.mjs` if needed.
 
 **Next up:**
-- Diagnose box score / live stats breakage (need browser error text first).
+- Verify box score tab shows data for today's games after nightly ETL (the `game_date <= today` fix).
+- Verify inactive players display correctly in StatsTable for tomorrow's games.
 - Step 14: Mobile-first UI redesign — bottom nav, card-based grades list, swipeable game view.
 - Step 15: MLB ETL and web views.
 - Step 16: NFL ETL automation and web views.
@@ -95,10 +101,10 @@
 
 ### NBA Tables
 - `nba.schedule` — USE THIS for game queries. ALL games regardless of status. home/away scores updated live.
-- `nba.games` — completed games only (box score ETL source)
+- `nba.games` — completed games only (box score ETL source). Populated for `game_date <= today` and `game_status = 3`.
 - `nba.teams` — hardcoded static dict in ETL
 - `nba.players` — `player_id`, `player_name`, `team_id`, `team_tricode`, `roster_status` (1=active), `position`
-- `nba.daily_lineups` — keyed by `player_name` + `team_tricode`. No `player_id` or `team_id`. `starter_status` = 'Starter'/'Bench'.
+- `nba.daily_lineups` — keyed by `player_name` + `team_tricode`. No `player_id` or `team_id`. `starter_status` = 'Starter'/'Bench'/'Inactive'.
 - `nba.player_box_score_stats` — PK: `(game_id, player_id, period)`. Periods: '1Q','2Q','3Q','4Q','OT' only. Columns include `fg3a`. `minutes` is DECIMAL.
 - `nba.player_passing_stats` — `(player_id, game_date)`. `potential_ast`.
 - `nba.player_rebound_chances` — `(player_id, game_date)`. `reb_chances`.
@@ -145,10 +151,12 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 ### Lineup Poll
 - `etl/lineup_poll.py` — standalone, does NOT import nba_etl.py (top-level argparse would trigger)
 - Workflow: `lineup-poll.yml` — every 15 min UTC 16:00–03:59
+- `starter_status` values: 'Starter' (has position field), 'Inactive' (lineupStatus contains out/inactive/not with team/gtd), 'Bench' (Active roster, no position, not inactive)
 
 ### Pre-Game Refresh
 - `pregame-refresh.yml` — every 30 min UTC 14:00–03:30
-- Gate: non-final game starting within 3 hours. When passes: odds_etl upcoming → grade_props upcoming.
+- Gate: `etl/gate_check.py` queries `nba.schedule` for today's games with `game_status IN (1,2)`. Prints `true`/`false`.
+- When gate passes: odds_etl upcoming → grade_props intraday.
 
 ### Refresh Lines
 - `refresh-lines.yml` — triggered by POST to `/api/refresh-lines` via GITHUB_PAT in SWA app settings.
@@ -215,7 +223,7 @@ No Str column. `fg3a` flows: `nba.player_box_score_stats.fg3a` → `getPlayerGam
 | BLK | `avgBlk` | |
 | TOV | `avgTov` | |
 
-`fmtRatio()` helper used for FG and 3PT. `fmtPct()` is NOT used for these columns. API returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`. Starters first, bench collapsed (`benchOpen` state, tappable row).
+`fmtRatio()` helper used for FG and 3PT. `fmtPct()` is NOT used for these columns. API returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`. Starters first, bench collapsed (`benchOpen` state), inactive collapsed (`inactiveOpen` state, dimmed at `opacity-40`).
 
 **At a Glance (`GradesPageInner.tsx`):**
 - `r.overPrice != null` gates all display
@@ -268,3 +276,5 @@ No Str column. `fg3a` flows: `nba.player_box_score_stats.fg3a` → `getPlayerGam
 | `precompute_line_grades` iterates by player-market pair | Eliminates ~10x redundant DataFrame reads. |
 | Under component grades inverted | Rising trend/momentum/good matchup is bad for an under bet. |
 | Cloudflare DNS-only, not proxied | Azure SWA requires direct DNS resolution for SSL issuance. |
+| `nba.games` uses `game_date <= today` | Changed from `< today` — today's finals must enter `nba.games` so FK allows same-day box score writes. |
+| Inactive detection uses `lineupStatus` keywords | `rosterStatus='Active'` alone cannot distinguish injured/inactive players from available bench players. |
