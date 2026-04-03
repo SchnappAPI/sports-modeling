@@ -689,10 +689,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 return started === true ? `*${t}` : t;
               };
               const fmtS = (made: number, att: number) =>
-                att === 0 ? '-' : `${made}/${att}`;
+                att === 0 ? '-' : `${made}-${att}`;
               const fmtPT = (actual: number, potential: number | null): string => {
                 if (potential == null) return String(actual);
-                return `${actual}/${Math.round(potential)}`;
+                return `${actual}-${Math.round(potential)}`;
               };
 
               if (g.dnp) {

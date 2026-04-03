@@ -40,7 +40,7 @@ function fmt(val: number | null | undefined, decimals = 1): string {
 
 function fmtRatio(made: number | null, att: number | null): string {
   if (made == null || att == null || att === 0) return '-';
-  return `${made.toFixed(1)}/${att.toFixed(1)}`;
+  return `${made.toFixed(1)}-${att.toFixed(1)}`;
 }
 
 const PERIOD_OPTIONS = [
