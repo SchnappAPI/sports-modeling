@@ -21,6 +21,11 @@ Pt stats:        Direct HTTP to leaguedashptstats via proxy.
                  SeasonType filter removed; all game types returned.
                  --days controls how many dates are processed per run.
 Daily lineups:   Direct HTTP to NBA daily lineups JSON via proxy.
+                 starter_status logic:
+                   - 'Starter'  if position field is present
+                   - 'Inactive' if lineupStatus contains out/inactive/not with team
+                   - 'Bench'    if rosterStatus = 'Active' and not inactive
+                   - 'Inactive' otherwise
 
 All stats.nba.com calls are routed through the Webshare rotating residential
 proxy (NBA_PROXY_URL secret). GitHub Actions datacenter IPs are throttled or
@@ -106,6 +111,9 @@ PERIOD_CONFIG = [
     ("4",  None,       "4Q"),
     ("",   "Overtime", "OT"),
 ]
+
+# lineupStatus values that indicate a player is unavailable for tonight's game.
+INACTIVE_LINEUP_KEYWORDS = ("out", "inactive", "not with team", "gtd")
 
 # ---------------------------------------------------------------------------
 # Static team data
@@ -635,8 +643,7 @@ def load_schedule(engine, season):
             if row["game_id"] is None:
                 continue
             schedule_rows.append(row)
-            # Include today's final games — changed from game_date < today to
-            # game_date <= today so box scores can be written for same-day finals.
+            # Include today's final games so box scores can be written same-day.
             if game_date <= today and safe_int(g.get("gameStatus")) == 3:
                 games_rows.append(row)
 
@@ -655,8 +662,6 @@ def load_schedule(engine, season):
 
 # ---------------------------------------------------------------------------
 # Box scores via playergamelogs (via proxy)
-# SeasonType omitted so all game types (Regular Season, IST, PlayIn,
-# Playoffs) are returned in a single call per period.
 # ---------------------------------------------------------------------------
 def _fetch_playergamelogs_from(period_value, game_segment, period_label, date_from, season, timeout=90):
     date_str = date_from.strftime("%m/%d/%Y")
@@ -760,8 +765,6 @@ def get_earliest_missing_box_date(completed_pairs, engine):
 
 # ---------------------------------------------------------------------------
 # Pt stats via leaguedashptstats (via proxy)
-# SeasonType omitted so IST and other non-Regular Season game dates
-# are included when queried by DateFrom/DateTo.
 # ---------------------------------------------------------------------------
 def get_unloaded_pt_dates(completed_pairs, engine):
     with engine.connect() as conn:
@@ -899,7 +902,18 @@ def fetch_lineups_for_game_date(game_date):
             for p in team.get("players", []):
                 pos    = safe_str(p.get("position"))
                 roster = safe_str(p.get("rosterStatus"))
-                starter = "Starter" if pos else ("Bench" if roster == "Active" else "Inactive")
+                lineup = safe_str(p.get("lineupStatus")) or ""
+                # Use lineupStatus to detect game-night unavailability regardless
+                # of rosterStatus. Active roster players listed Out, Inactive, or
+                # Not With Team must not appear as Bench in the UI.
+                if any(kw in lineup.lower() for kw in INACTIVE_LINEUP_KEYWORDS):
+                    starter = "Inactive"
+                elif pos:
+                    starter = "Starter"
+                elif roster == "Active":
+                    starter = "Bench"
+                else:
+                    starter = "Inactive"
                 rows.append({
                     "game_id":        game_id,
                     "game_date":      game_date,
@@ -907,7 +921,7 @@ def fetch_lineups_for_game_date(game_date):
                     "team_tricode":   tricode,
                     "player_name":    safe_str(p.get("playerName")),
                     "position":       pos,
-                    "lineup_status":  safe_str(p.get("lineupStatus")),
+                    "lineup_status":  lineup or None,
                     "roster_status":  roster,
                     "starter_status": starter,
                 })
