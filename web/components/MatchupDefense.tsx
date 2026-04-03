@@ -40,13 +40,14 @@ export const MARKET_TO_STAT: Record<string, keyof MatchupData> = {
   player_turnovers:          'tov',
 };
 
+// Order matches game log column order: PTS, 3PT, REB, AST, STL, BLK, TOV
 const STAT_LABELS: { key: keyof MatchupData; label: string }[] = [
   { key: 'pts',  label: 'PTS' },
+  { key: 'fg3m', label: '3PM' },
   { key: 'reb',  label: 'REB' },
   { key: 'ast',  label: 'AST' },
   { key: 'stl',  label: 'STL' },
   { key: 'blk',  label: 'BLK' },
-  { key: 'fg3m', label: '3PM' },
   { key: 'tov',  label: 'TOV' },
 ];
 
