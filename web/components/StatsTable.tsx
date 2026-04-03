@@ -76,13 +76,19 @@ function TeamStatsTable({
   const searchParams = useSearchParams();
   const tab = searchParams.get('tab') ?? 'stats';
   const [benchOpen, setBenchOpen] = useState(false);
+  const [inactiveOpen, setInactiveOpen] = useState(false);
 
   const starters  = players.filter((p) => p.starterStatus === 'Starter');
-  const bench     = players.filter((p) => p.starterStatus !== 'Starter');
+  const bench     = players.filter((p) => p.starterStatus === 'Bench');
+  const inactive  = players.filter((p) => p.starterStatus === 'Inactive');
+  // Players with no lineup data at all fall through to bench bucket
+  const noLineup  = players.filter(
+    (p) => p.starterStatus == null || (p.starterStatus !== 'Starter' && p.starterStatus !== 'Bench' && p.starterStatus !== 'Inactive')
+  );
   const hasLineup = players.some((p) => p.starterStatus != null);
 
-  const renderRow = (p: PlayerAvg) => (
-    <tr key={p.playerId} className="border-b border-gray-800">
+  const renderRow = (p: PlayerAvg, dimmed = false) => (
+    <tr key={p.playerId} className={['border-b border-gray-800', dimmed ? 'opacity-40' : ''].join(' ')}>
       <td className="py-1.5 pr-3">
         <Link
           href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}&date=${selectedDate}`}
@@ -102,6 +108,31 @@ function TeamStatsTable({
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgBlk)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgTov)}</td>
     </tr>
+  );
+
+  const collapsibleSection = (
+    label: string,
+    count: number,
+    open: boolean,
+    toggle: () => void,
+    rows: PlayerAvg[],
+    dimmed = false,
+  ) => (
+    <>
+      <tr
+        className="border-b border-gray-800 cursor-pointer select-none"
+        onClick={toggle}
+      >
+        <td
+          colSpan={11}
+          className="py-1.5 text-xs text-gray-500 font-semibold uppercase tracking-wider"
+        >
+          <span className="mr-1.5 text-gray-600">{open ? '▾' : '▸'}</span>
+          {label} ({count})
+        </td>
+      </tr>
+      {open && rows.map((p) => renderRow(p, dimmed))}
+    </>
   );
 
   return (
@@ -126,27 +157,13 @@ function TeamStatsTable({
         <tbody>
           {hasLineup ? (
             <>
-              {starters.map(renderRow)}
-              {bench.length > 0 && (
-                <>
-                  <tr
-                    className="border-b border-gray-800 cursor-pointer select-none"
-                    onClick={() => setBenchOpen((o) => !o)}
-                  >
-                    <td
-                      colSpan={11}
-                      className="py-1.5 text-xs text-gray-500 font-semibold uppercase tracking-wider"
-                    >
-                      <span className="mr-1.5 text-gray-600">{benchOpen ? '▾' : '▸'}</span>
-                      Bench ({bench.length})
-                    </td>
-                  </tr>
-                  {benchOpen && bench.map(renderRow)}
-                </>
-              )}
+              {starters.map((p) => renderRow(p))}
+              {bench.length > 0 && collapsibleSection('Bench', bench.length, benchOpen, () => setBenchOpen((o) => !o), bench)}
+              {noLineup.length > 0 && collapsibleSection('Bench', noLineup.length, benchOpen, () => setBenchOpen((o) => !o), noLineup)}
+              {inactive.length > 0 && collapsibleSection('Inactive', inactive.length, inactiveOpen, () => setInactiveOpen((o) => !o), inactive, true)}
             </>
           ) : (
-            players.map(renderRow)
+            players.map((p) => renderRow(p))
           )}
         </tbody>
       </table>
