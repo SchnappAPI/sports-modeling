@@ -152,6 +152,13 @@ function gradeColor(grade: number | null): string {
   return 'text-gray-400';
 }
 
+function gradeBg(grade: number | null): string {
+  if (grade == null) return 'bg-gray-800';
+  if (grade >= 70) return 'bg-green-900/40';
+  if (grade >= 55) return 'bg-yellow-900/30';
+  return 'bg-gray-800';
+}
+
 function todayLocal(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -284,7 +291,7 @@ const MARKET_STAT: Record<string, keyof GameSummary> = {
 };
 
 // ---------------------------------------------------------------------------
-// Props section — new design
+// Props section types
 // ---------------------------------------------------------------------------
 
 interface LinePair {
@@ -301,11 +308,9 @@ interface MarketGroup {
 }
 
 function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
-  // Separate standard and alt rows
   const stdRows  = grades.filter((g) => !isAlternate(g.marketKey));
   const altRows  = grades.filter((g) =>  isAlternate(g.marketKey));
 
-  // Build pairs keyed by baseMarket + lineValue
   function pairRows(rows: TodayGradeRow[]): Map<string, Map<number, LinePair>> {
     const grouped = new Map<string, Map<number, LinePair>>();
     for (const r of rows) {
@@ -323,7 +328,6 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   const stdPaired = pairRows(stdRows);
   const altPaired = pairRows(altRows);
 
-  // Collect all base market keys in order they first appear
   const order: string[] = [];
   const seen = new Set<string>();
   for (const r of grades) {
@@ -345,105 +349,161 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   }).filter((g) => g.standardLines.length > 0 || g.altLines.length > 0);
 }
 
-function LinePairRow({ pair }: { pair: LinePair }) {
-  const over  = pair.over;
-  const under = pair.under;
-  // Use Over row for grades; Under row only for price
-  const grade  = over?.compositeGrade ?? null;
-  const hrOver = over?.grade ?? null;
-  const hr20   = over?.hitRate20 ?? null;
-  const hr60   = over?.hitRate60 ?? null;
+// ---------------------------------------------------------------------------
+// Dot plot
+// ---------------------------------------------------------------------------
+
+type DotWindow = 'L10' | 'L30' | 'L50' | 'All';
+
+function StatDotPlot({
+  summaries,
+  baseKey,
+  lineValue,
+  window: win,
+}: {
+  summaries: GameSummary[];
+  baseKey: string;
+  lineValue: number;
+  window: DotWindow;
+}) {
+  const statKey = MARKET_STAT[baseKey] as keyof GameSummary | undefined;
+  if (!statKey) return null;
+
+  const played = summaries.filter((g) => !g.dnp);
+  const count  = win === 'L10' ? 10 : win === 'L30' ? 30 : win === 'L50' ? 50 : played.length;
+  const slice  = played.slice(0, count).reverse();
+
+  if (slice.length === 0) return null;
+
+  const values = slice.map((g) => Number(g[statKey] ?? 0));
+  const minVal = Math.min(...values, lineValue);
+  const maxVal = Math.max(...values, lineValue);
+  const range  = maxVal - minVal || 1;
+
+  const W = 280;
+  const H = 64;
+  const PAD_X = 6;
+  const PAD_Y = 10;
+  const plotW = W - PAD_X * 2;
+  const plotH = H - PAD_Y * 2;
+
+  const xPos = (i: number) =>
+    PAD_X + (slice.length <= 1 ? plotW / 2 : (i / (slice.length - 1)) * plotW);
+  const yPos = (v: number) =>
+    PAD_Y + plotH - ((v - minVal) / range) * plotH;
+
+  const lineY = yPos(lineValue);
 
   return (
-    <div className="flex items-center gap-3 py-1 text-xs">
-      {/* Line value */}
-      <span className="tabular-nums font-semibold text-gray-100 w-10 shrink-0">
-        {pair.lineValue.toFixed(1)}
-      </span>
-      {/* Over price */}
-      <span className="tabular-nums text-gray-400 w-14 shrink-0">
-        O {fmtOdds(over?.overPrice ?? null)}
-      </span>
-      {/* Under price */}
-      <span className="tabular-nums text-gray-400 w-14 shrink-0">
-        U {fmtOdds(under?.overPrice ?? null)}
-      </span>
-      {/* Grades */}
-      <span className="flex gap-2 ml-auto">
-        {grade != null && (
-          <span className={`font-medium ${gradeColor(grade)}`}>C:{grade.toFixed(0)}</span>
-        )}
-        {hrOver != null && (
-          <span className={gradeColor(hrOver)}>HR:{hrOver.toFixed(0)}</span>
-        )}
-      </span>
-      {/* Hit rates */}
-      <span className="flex gap-1.5 text-gray-600 w-16 justify-end shrink-0">
-        <span>{fmtPct(hr20)}</span>
-        <span>{fmtPct(hr60)}</span>
-      </span>
-    </div>
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
+      <line
+        x1={PAD_X} y1={lineY} x2={W - PAD_X} y2={lineY}
+        stroke="#4b5563" strokeWidth="1" strokeDasharray="3 3"
+      />
+      <text x={W - PAD_X - 2} y={lineY - 3} fill="#6b7280" fontSize="8" textAnchor="end">
+        {lineValue.toFixed(1)}
+      </text>
+      {slice.map((g, i) => {
+        const v   = Number(g[statKey] ?? 0);
+        const cx  = xPos(i);
+        const cy  = yPos(v);
+        const hit = v > lineValue;
+        return (
+          <circle key={g.gameId} cx={cx} cy={cy} r={3.5}
+            fill={hit ? '#4ade80' : '#f87171'} opacity={0.85} />
+        );
+      })}
+    </svg>
   );
 }
 
-function MarketSection({ group }: { group: MarketGroup }) {
-  const [open, setOpen]       = useState(true);
+// ---------------------------------------------------------------------------
+// Market panel
+// ---------------------------------------------------------------------------
+
+function MarketPanel({
+  group,
+  summaries,
+  dotWindow,
+}: {
+  group: MarketGroup;
+  summaries: GameSummary[];
+  dotWindow: DotWindow;
+}) {
   const [altsOpen, setAltsOpen] = useState(false);
 
-  // Summary line for header: posted line value + over price from first standard line
-  const posted = group.standardLines[0];
+  const posted    = group.standardLines[0];
+  const lineValue = posted?.lineValue ?? 0;
 
   return (
-    <div className="border-b border-gray-800 last:border-b-0">
-      {/* Market header row — tappable to collapse */}
-      <button
-        className="w-full flex items-center gap-2 px-4 py-2 text-left"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="text-xs font-semibold text-gray-300 w-8 shrink-0">{group.label}</span>
-        {posted && (
-          <span className="text-xs text-gray-500 tabular-nums">
-            {posted.lineValue.toFixed(1)}
-            {posted.over && (
-              <span className="ml-1.5">{fmtOdds(posted.over.overPrice)}</span>
-            )}
-            {posted.under && (
-              <span className="ml-1 text-gray-600">/ {fmtOdds(posted.under.overPrice)}</span>
-            )}
-          </span>
-        )}
-        {posted?.over?.compositeGrade != null && (
-          <span className={`text-xs font-medium ml-auto ${gradeColor(posted.over.compositeGrade)}`}>
-            {posted.over.compositeGrade.toFixed(0)}
-          </span>
-        )}
-        <span className="text-gray-600 text-xs ml-1">{open ? '▾' : '▸'}</span>
-      </button>
+    <div className="border-t border-gray-800 px-4 pt-3 pb-3">
+      <StatDotPlot
+        summaries={summaries}
+        baseKey={group.baseKey}
+        lineValue={lineValue}
+        window={dotWindow}
+      />
 
-      {open && (
-        <div className="px-4 pb-2">
-          {/* Standard lines */}
-          {group.standardLines.map((pair) => (
-            <LinePairRow key={pair.lineValue} pair={pair} />
-          ))}
-
-          {/* Alt lines sub-section */}
-          {group.altLines.length > 0 && (
-            <div className="mt-1">
-              <button
-                className="flex items-center gap-1 text-xs text-yellow-700 hover:text-yellow-500 py-0.5"
-                onClick={() => setAltsOpen((o) => !o)}
-              >
-                <span>{altsOpen ? '▾' : '▸'}</span>
-                <span>Alt lines ({group.altLines.length})</span>
-              </button>
-              {altsOpen && (
-                <div className="mt-1 pl-2 border-l border-yellow-900/40">
-                  {group.altLines.map((pair) => (
-                    <LinePairRow key={pair.lineValue} pair={pair} />
-                  ))}
-                </div>
+      <div className="mt-2 space-y-0.5">
+        {group.standardLines.map((pair) => {
+          const over  = pair.over;
+          const under = pair.under;
+          const grade = over?.compositeGrade ?? null;
+          const hr20  = over?.hitRate20 ?? null;
+          const hr60  = over?.hitRate60 ?? null;
+          return (
+            <div key={pair.lineValue} className="flex items-center gap-2 text-xs py-0.5">
+              <span className="tabular-nums font-semibold text-gray-200 w-9 shrink-0">
+                {pair.lineValue.toFixed(1)}
+              </span>
+              <span className="tabular-nums text-gray-400 shrink-0">
+                O {fmtOdds(over?.overPrice ?? null)}
+              </span>
+              <span className="tabular-nums text-gray-500 shrink-0">
+                U {fmtOdds(under?.overPrice ?? null)}
+              </span>
+              {grade != null && (
+                <span className={`font-semibold ml-auto tabular-nums ${gradeColor(grade)}`}>
+                  {grade.toFixed(0)}
+                </span>
               )}
+              <span className="flex gap-1.5 text-gray-600 tabular-nums">
+                <span>{fmtPct(hr20)}</span>
+                <span>{fmtPct(hr60)}</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {group.altLines.length > 0 && (
+        <div className="mt-2">
+          <button
+            className="text-xs text-gray-600 hover:text-gray-400 mb-1"
+            onClick={() => setAltsOpen((o) => !o)}
+          >
+            {altsOpen ? '▾' : '▸'} Alt lines ({group.altLines.length})
+          </button>
+          {altsOpen && (
+            <div className="flex flex-wrap gap-1.5 mt-1">
+              {group.altLines.map((pair) => {
+                const grade = pair.over?.compositeGrade ?? null;
+                const hr    = pair.over?.hitRate20 ?? null;
+                return (
+                  <div
+                    key={pair.lineValue}
+                    className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs tabular-nums border border-gray-700 ${gradeBg(grade)}`}
+                  >
+                    <span className="text-gray-300 font-medium">{pair.lineValue.toFixed(1)}</span>
+                    {grade != null && (
+                      <span className={`font-semibold ${gradeColor(grade)}`}>{grade.toFixed(0)}</span>
+                    )}
+                    {hr != null && (
+                      <span className="text-gray-500">{fmtPct(hr)}</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -452,9 +512,23 @@ function MarketSection({ group }: { group: MarketGroup }) {
   );
 }
 
-function TodayPropsSection({ playerId, gradeDate }: { playerId: string; gradeDate: string }) {
-  const [grades, setGrades] = useState<TodayGradeRow[]>([]);
-  const [loading, setLoading] = useState(true);
+// ---------------------------------------------------------------------------
+// Today's Props section — horizontal strip + expandable panel
+// ---------------------------------------------------------------------------
+
+function TodayPropsSection({
+  playerId,
+  gradeDate,
+  summaries,
+}: {
+  playerId: string;
+  gradeDate: string;
+  summaries: GameSummary[];
+}) {
+  const [grades, setGrades]         = useState<TodayGradeRow[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [activeBase, setActiveBase] = useState<string | null>(null);
+  const [dotWindow, setDotWindow]   = useState<DotWindow>('L10');
 
   useEffect(() => {
     setLoading(true);
@@ -472,21 +546,78 @@ function TodayPropsSection({ playerId, gradeDate }: { playerId: string; gradeDat
 
   const groups = useMemo(() => buildMarketGroups(grades), [grades]);
 
+  useEffect(() => {
+    if (groups.length > 0 && activeBase === null) {
+      setActiveBase(groups[0].baseKey);
+    }
+  }, [groups, activeBase]);
+
   if (loading) return (
     <div className="px-4 py-3 border-b border-gray-800 text-xs text-gray-600">Loading props...</div>
   );
   if (groups.length === 0) return null;
 
+  const activeGroup = groups.find((g) => g.baseKey === activeBase) ?? null;
+
   return (
     <div className="border-b border-gray-800">
-      <div className="px-4 pt-2 pb-1 flex items-center">
+      <div className="px-4 pt-2 pb-1 flex items-center gap-3">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today's Props</span>
+        <div className="flex gap-1 ml-auto">
+          {(['L10', 'L30', 'L50', 'All'] as DotWindow[]).map((w) => (
+            <button
+              key={w}
+              onClick={() => setDotWindow(w)}
+              className={[
+                'px-1.5 py-0.5 text-xs rounded transition-colors',
+                dotWindow === w ? 'bg-gray-600 text-white' : 'text-gray-600 hover:text-gray-400',
+              ].join(' ')}
+            >
+              {w}
+            </button>
+          ))}
+        </div>
       </div>
-      <div>
-        {groups.map((group) => (
-          <MarketSection key={group.baseKey} group={group} />
-        ))}
+
+      <div className="flex overflow-x-auto border-t border-gray-800 divide-x divide-gray-800">
+        {groups.map((group) => {
+          const posted   = group.standardLines[0];
+          const grade    = posted?.over?.compositeGrade ?? null;
+          const isActive = group.baseKey === activeBase;
+          return (
+            <button
+              key={group.baseKey}
+              onClick={() => setActiveBase(isActive ? null : group.baseKey)}
+              className={[
+                'flex flex-col items-center px-4 py-2 shrink-0 transition-colors text-xs',
+                isActive ? 'bg-gray-800' : 'hover:bg-gray-900',
+              ].join(' ')}
+            >
+              <span className="font-semibold text-gray-300 leading-none mb-0.5">{group.label}</span>
+              {posted && (
+                <span className="tabular-nums text-gray-500 leading-none mb-0.5">
+                  {posted.lineValue.toFixed(1)}
+                </span>
+              )}
+              {grade != null ? (
+                <span className={`font-semibold tabular-nums leading-none ${gradeColor(grade)}`}>
+                  {grade.toFixed(0)}
+                </span>
+              ) : (
+                <span className="text-gray-700 leading-none">--</span>
+              )}
+            </button>
+          );
+        })}
       </div>
+
+      {activeGroup && (
+        <MarketPanel
+          group={activeGroup}
+          summaries={summaries}
+          dotWindow={dotWindow}
+        />
+      )}
     </div>
   );
 }
@@ -542,7 +673,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
   const [showAllStats, setShowAllStats] = useState(false);
 
-  // Full game = no period filter active
   const isFullGame = selectedPeriods.size === 0;
 
   useEffect(() => {
@@ -804,7 +934,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       )}
 
       {/* Today's props */}
-      <TodayPropsSection playerId={playerId} gradeDate={gradeDate} />
+      <TodayPropsSection
+        playerId={playerId}
+        gradeDate={gradeDate}
+        summaries={summaries}
+      />
 
       {/* Period filter */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
