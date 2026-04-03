@@ -25,6 +25,7 @@ interface GameLogRow {
   tov: number | null;
   min: number | null;
   fg3m: number | null;
+  fg3a: number | null;
   fgm: number | null;
   fga: number | null;
   ftm: number | null;
@@ -46,6 +47,7 @@ interface TodayGradeRow {
   playerName: string;
   marketKey: string;
   lineValue: number;
+  outcomeName: string;
   overPrice: number | null;
   hitRate60: number | null;
   hitRate20: number | null;
@@ -76,6 +78,7 @@ interface GameSummary {
   tov: number;
   min: number;
   fg3m: number;
+  fg3a: number;
   fgm: number;
   fga: number;
   ftm: number;
@@ -149,6 +152,13 @@ function gradeColor(grade: number | null): string {
   return 'text-gray-400';
 }
 
+function gradeBg(grade: number | null): string {
+  if (grade == null) return 'bg-gray-800';
+  if (grade >= 70) return 'bg-green-900/40';
+  if (grade >= 55) return 'bg-yellow-900/30';
+  return 'bg-gray-800';
+}
+
 function todayLocal(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -193,7 +203,7 @@ function buildGameSummaries(
   >>();
   for (const r of filtered) {
     if (r.dnp) continue;
-    const t = totals.get(r.gameId) ?? { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 };
+    const t = totals.get(r.gameId) ?? { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fg3a:0, fgm:0, fga:0, ftm:0, fta:0 };
     t.pts  += r.pts  ?? 0;
     t.reb  += r.reb  ?? 0;
     t.ast  += r.ast  ?? 0;
@@ -202,6 +212,7 @@ function buildGameSummaries(
     t.tov  += r.tov  ?? 0;
     t.min  += r.min  ?? 0;
     t.fg3m += r.fg3m ?? 0;
+    t.fg3a += r.fg3a ?? 0;
     t.fgm  += r.fgm  ?? 0;
     t.fga  += r.fga  ?? 0;
     t.ftm  += r.ftm  ?? 0;
@@ -209,7 +220,7 @@ function buildGameSummaries(
     totals.set(r.gameId, t);
   }
 
-  const ZERO = { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 };
+  const ZERO = { pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fg3a:0, fgm:0, fga:0, ftm:0, fta:0 };
   return gameOrder.map((gid) => ({
     gameId: gid,
     ...gameMeta.get(gid)!,
@@ -222,11 +233,11 @@ type SplitKey = 'season' | 'l10' | 'opp';
 interface SplitStats {
   gp: number;
   pts: number; reb: number; ast: number; stl: number; blk: number; tov: number;
-  min: number; fg3m: number; fgm: number; fga: number; ftm: number; fta: number;
+  min: number; fg3m: number; fg3a: number; fgm: number; fga: number; ftm: number; fta: number;
 }
 
 function computeSplit(summaries: GameSummary[], opp: string | null): Record<SplitKey, SplitStats> {
-  const zero = (): SplitStats => ({ gp:0, pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fgm:0, fga:0, ftm:0, fta:0 });
+  const zero = (): SplitStats => ({ gp:0, pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fg3a:0, fgm:0, fga:0, ftm:0, fta:0 });
   const acc  = { season: zero(), l10: zero(), opp: zero() };
 
   const played = summaries.filter((g) => !g.dnp);
@@ -236,7 +247,7 @@ function computeSplit(summaries: GameSummary[], opp: string | null): Record<Spli
   function add(target: SplitStats, g: GameSummary) {
     target.gp++;  target.pts += g.pts; target.reb += g.reb; target.ast += g.ast;
     target.stl += g.stl; target.blk += g.blk; target.tov += g.tov; target.min += g.min;
-    target.fg3m += g.fg3m; target.fgm += g.fgm; target.fga += g.fga;
+    target.fg3m += g.fg3m; target.fg3a += g.fg3a; target.fgm += g.fgm; target.fga += g.fga;
     target.ftm += g.ftm;  target.fta += g.fta;
   }
   played.forEach((g) => add(acc.season, g));
@@ -245,9 +256,9 @@ function computeSplit(summaries: GameSummary[], opp: string | null): Record<Spli
   return acc;
 }
 
-function avg(total: number, gp: number): string {
+function avg(total: number, gp: number, decimals = 1): string {
   if (gp === 0) return '-';
-  return (total / gp).toFixed(1);
+  return (total / gp).toFixed(decimals);
 }
 
 function fmtMin(min: number, gp: number): string {
@@ -280,69 +291,251 @@ const MARKET_STAT: Record<string, keyof GameSummary> = {
 };
 
 // ---------------------------------------------------------------------------
-// Prop cards section
+// Props section types
 // ---------------------------------------------------------------------------
+
+interface LinePair {
+  lineValue: number;
+  over: TodayGradeRow | null;
+  under: TodayGradeRow | null;
+}
 
 interface MarketGroup {
   baseKey: string;
   label: string;
-  lines: TodayGradeRow[];
+  standardLines: LinePair[];
+  altLines: LinePair[];
 }
 
 function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
-  const order: string[] = [];
-  const map = new Map<string, TodayGradeRow[]>();
+  const stdRows  = grades.filter((g) => !isAlternate(g.marketKey));
+  const altRows  = grades.filter((g) =>  isAlternate(g.marketKey));
 
-  for (const g of grades) {
-    if (g.overPrice == null) continue;
-    const base = baseMarket(g.marketKey);
-    if (!map.has(base)) { order.push(base); map.set(base, []); }
-    map.get(base)!.push(g);
+  function pairRows(rows: TodayGradeRow[]): Map<string, Map<number, LinePair>> {
+    const grouped = new Map<string, Map<number, LinePair>>();
+    for (const r of rows) {
+      const base = baseMarket(r.marketKey);
+      if (!grouped.has(base)) grouped.set(base, new Map());
+      const byLine = grouped.get(base)!;
+      const existing = byLine.get(r.lineValue) ?? { lineValue: r.lineValue, over: null, under: null };
+      if (r.outcomeName === 'Over') existing.over = r;
+      else existing.under = r;
+      byLine.set(r.lineValue, existing);
+    }
+    return grouped;
   }
 
-  return order.map((base) => ({
-    baseKey: base,
-    label: marketLabel(base),
-    lines: (map.get(base) ?? []).sort((a, b) => a.lineValue - b.lineValue),
-  }));
+  const stdPaired = pairRows(stdRows);
+  const altPaired = pairRows(altRows);
+
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const r of grades) {
+    const base = baseMarket(r.marketKey);
+    if (!seen.has(base)) { order.push(base); seen.add(base); }
+  }
+
+  return order.map((base) => {
+    const stdMap = stdPaired.get(base);
+    const altMap = altPaired.get(base);
+    const sortPairs = (m: Map<number, LinePair> | undefined): LinePair[] =>
+      m ? Array.from(m.values()).sort((a, b) => a.lineValue - b.lineValue) : [];
+    return {
+      baseKey: base,
+      label: marketLabel(base),
+      standardLines: sortPairs(stdMap),
+      altLines:      sortPairs(altMap),
+    };
+  }).filter((g) => g.standardLines.length > 0 || g.altLines.length > 0);
 }
 
-function PropCard({ row }: { row: TodayGradeRow }) {
-  const alt = isAlternate(row.marketKey);
+// ---------------------------------------------------------------------------
+// Dot plot
+// ---------------------------------------------------------------------------
+
+type DotWindow = 'L10' | 'L30' | 'L50' | 'All';
+
+function StatDotPlot({
+  summaries,
+  baseKey,
+  lineValue,
+  window: win,
+}: {
+  summaries: GameSummary[];
+  baseKey: string;
+  lineValue: number;
+  window: DotWindow;
+}) {
+  const statKey = MARKET_STAT[baseKey] as keyof GameSummary | undefined;
+  if (!statKey) return null;
+
+  // Played games only, summaries are newest-first; slice N most recent then reverse for oldest-left
+  const played = summaries.filter((g) => !g.dnp);
+  const count  = win === 'L10' ? 10 : win === 'L30' ? 30 : win === 'L50' ? 50 : played.length;
+  const slice  = played.slice(0, count).reverse();
+
+  if (slice.length === 0) return null;
+
+  const values = slice.map((g) => Number(g[statKey] ?? 0));
+  const minVal = Math.min(...values, lineValue);
+  const maxVal = Math.max(...values, lineValue);
+  const range  = maxVal - minVal || 1;
+
+  const W = 280;
+  const H = 64;
+  const PAD_X = 6;
+  const PAD_Y = 10;
+  const plotW = W - PAD_X * 2;
+  const plotH = H - PAD_Y * 2;
+
+  const xPos = (i: number) =>
+    PAD_X + (slice.length <= 1 ? plotW / 2 : (i / (slice.length - 1)) * plotW);
+  const yPos = (v: number) =>
+    PAD_Y + plotH - ((v - minVal) / range) * plotH;
+
+  const lineY = yPos(lineValue);
+
   return (
-    <div className={`rounded border px-3 py-2 min-w-[90px] ${
-      alt ? 'border-yellow-900 bg-yellow-950/20' : 'border-gray-700 bg-gray-900'
-    }`}>
-      <div className="text-base font-semibold text-gray-100 tabular-nums leading-none">
-        {row.lineValue.toFixed(1)}
-        {alt && <span className="text-yellow-600 text-xs ml-1">alt</span>}
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: H }}>
+      {/* Posted line */}
+      <line
+        x1={PAD_X} y1={lineY} x2={W - PAD_X} y2={lineY}
+        stroke="#4b5563" strokeWidth="1" strokeDasharray="3 3"
+      />
+      {/* Line value label */}
+      <text x={W - PAD_X - 2} y={lineY - 3} fill="#6b7280" fontSize="8" textAnchor="end">
+        {lineValue.toFixed(1)}
+      </text>
+      {/* Dots */}
+      {slice.map((g, i) => {
+        const v   = Number(g[statKey] ?? 0);
+        const cx  = xPos(i);
+        const cy  = yPos(v);
+        const hit = v > lineValue;
+        return (
+          <circle key={g.gameId} cx={cx} cy={cy} r={3.5}
+            fill={hit ? '#4ade80' : '#f87171'} opacity={0.85} />
+        );
+      })}
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Market panel (expanded content below the strip)
+// ---------------------------------------------------------------------------
+
+function MarketPanel({
+  group,
+  summaries,
+  dotWindow,
+}: {
+  group: MarketGroup;
+  summaries: GameSummary[];
+  dotWindow: DotWindow;
+}) {
+  const [altsOpen, setAltsOpen] = useState(false);
+
+  const posted    = group.standardLines[0];
+  const lineValue = posted?.lineValue ?? 0;
+
+  return (
+    <div className="border-t border-gray-800 px-4 pt-3 pb-3">
+      {/* Dot plot */}
+      <StatDotPlot
+        summaries={summaries}
+        baseKey={group.baseKey}
+        lineValue={lineValue}
+        window={dotWindow}
+      />
+
+      {/* Standard lines */}
+      <div className="mt-2 space-y-0.5">
+        {group.standardLines.map((pair) => {
+          const over  = pair.over;
+          const under = pair.under;
+          const grade = over?.compositeGrade ?? null;
+          const hr20  = over?.hitRate20 ?? null;
+          const hr60  = over?.hitRate60 ?? null;
+          return (
+            <div key={pair.lineValue} className="flex items-center gap-2 text-xs py-0.5">
+              <span className="tabular-nums font-semibold text-gray-200 w-9 shrink-0">
+                {pair.lineValue.toFixed(1)}
+              </span>
+              <span className="tabular-nums text-gray-400 shrink-0">
+                O {fmtOdds(over?.overPrice ?? null)}
+              </span>
+              <span className="tabular-nums text-gray-500 shrink-0">
+                U {fmtOdds(under?.overPrice ?? null)}
+              </span>
+              {grade != null && (
+                <span className={`font-semibold ml-auto tabular-nums ${gradeColor(grade)}`}>
+                  {grade.toFixed(0)}
+                </span>
+              )}
+              <span className="flex gap-1.5 text-gray-600 tabular-nums">
+                <span>{fmtPct(hr20)}</span>
+                <span>{fmtPct(hr60)}</span>
+              </span>
+            </div>
+          );
+        })}
       </div>
-      <div className="text-xs text-gray-400 tabular-nums mt-0.5">
-        {fmtOdds(row.overPrice)}
-      </div>
-      <div className="flex gap-2 mt-1.5 text-xs">
-        {row.compositeGrade != null && (
-          <span className={`font-medium ${gradeColor(row.compositeGrade)}`}>
-            C:{row.compositeGrade.toFixed(0)}
-          </span>
-        )}
-        {row.grade != null && (
-          <span className={gradeColor(row.grade)}>
-            HR:{row.grade.toFixed(0)}
-          </span>
-        )}
-      </div>
-      <div className="flex gap-2 mt-0.5 text-xs text-gray-600">
-        <span>{fmtPct(row.hitRate20)}</span>
-        <span>{fmtPct(row.hitRate60)}</span>
-      </div>
+
+      {/* Alt line chips */}
+      {group.altLines.length > 0 && (
+        <div className="mt-2">
+          <button
+            className="text-xs text-gray-600 hover:text-gray-400 mb-1"
+            onClick={() => setAltsOpen((o) => !o)}
+          >
+            {altsOpen ? '▾' : '▸'} Alt lines ({group.altLines.length})
+          </button>
+          {altsOpen && (
+            <div className="flex flex-wrap gap-1.5 mt-1">
+              {group.altLines.map((pair) => {
+                const grade = pair.over?.compositeGrade ?? null;
+                const hr    = pair.over?.hitRate20 ?? null;
+                return (
+                  <div
+                    key={pair.lineValue}
+                    className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs tabular-nums border border-gray-700 ${gradeBg(grade)}`}
+                  >
+                    <span className="text-gray-300 font-medium">{pair.lineValue.toFixed(1)}</span>
+                    {grade != null && (
+                      <span className={`font-semibold ${gradeColor(grade)}`}>{grade.toFixed(0)}</span>
+                    )}
+                    {hr != null && (
+                      <span className="text-gray-500">{fmtPct(hr)}</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function TodayPropsSection({ playerId, gradeDate }: { playerId: string; gradeDate: string }) {
-  const [grades, setGrades] = useState<TodayGradeRow[]>([]);
-  const [loading, setLoading] = useState(true);
+// ---------------------------------------------------------------------------
+// Today's Props section — horizontal strip + expandable panel
+// ---------------------------------------------------------------------------
+
+function TodayPropsSection({
+  playerId,
+  gradeDate,
+  summaries,
+}: {
+  playerId: string;
+  gradeDate: string;
+  summaries: GameSummary[];
+}) {
+  const [grades, setGrades]           = useState<TodayGradeRow[]>([]);
+  const [loading, setLoading]         = useState(true);
+  const [activeBase, setActiveBase]   = useState<string | null>(null);
+  const [dotWindow, setDotWindow]     = useState<DotWindow>('L10');
 
   useEffect(() => {
     setLoading(true);
@@ -360,29 +553,101 @@ function TodayPropsSection({ playerId, gradeDate }: { playerId: string; gradeDat
 
   const groups = useMemo(() => buildMarketGroups(grades), [grades]);
 
+  // Auto-select first market when groups first load
+  useEffect(() => {
+    if (groups.length > 0 && activeBase === null) {
+      setActiveBase(groups[0].baseKey);
+    }
+  }, [groups, activeBase]);
+
   if (loading) return (
     <div className="px-4 py-3 border-b border-gray-800 text-xs text-gray-600">Loading props...</div>
   );
   if (groups.length === 0) return null;
 
+  const activeGroup = groups.find((g) => g.baseKey === activeBase) ?? null;
+
   return (
     <div className="border-b border-gray-800">
-      <div className="px-4 pt-3 pb-1">
+      {/* Section header + dot window selector */}
+      <div className="px-4 pt-2 pb-1 flex items-center gap-3">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today's Props</span>
+        <div className="flex gap-1 ml-auto">
+          {(['L10', 'L30', 'L50', 'All'] as DotWindow[]).map((w) => (
+            <button
+              key={w}
+              onClick={() => setDotWindow(w)}
+              className={[
+                'px-1.5 py-0.5 text-xs rounded transition-colors',
+                dotWindow === w ? 'bg-gray-600 text-white' : 'text-gray-600 hover:text-gray-400',
+              ].join(' ')}
+            >
+              {w}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="px-4 pb-3 flex flex-col gap-3">
-        {groups.map((group) => (
-          <div key={group.baseKey}>
-            <div className="text-xs text-gray-500 font-medium mb-1.5">{group.label}</div>
-            <div className="flex flex-wrap gap-2">
-              {group.lines.map((row) => (
-                <PropCard key={row.gradeId} row={row} />
-              ))}
-            </div>
-          </div>
-        ))}
+
+      {/* Horizontal market strip — one cell per market */}
+      <div className="flex overflow-x-auto border-t border-gray-800 divide-x divide-gray-800">
+        {groups.map((group) => {
+          const posted   = group.standardLines[0];
+          const grade    = posted?.over?.compositeGrade ?? null;
+          const isActive = group.baseKey === activeBase;
+          return (
+            <button
+              key={group.baseKey}
+              onClick={() => setActiveBase(isActive ? null : group.baseKey)}
+              className={[
+                'flex flex-col items-center px-4 py-2 shrink-0 transition-colors text-xs',
+                isActive ? 'bg-gray-800' : 'hover:bg-gray-900',
+              ].join(' ')}
+            >
+              <span className="font-semibold text-gray-300 leading-none mb-0.5">{group.label}</span>
+              {posted && (
+                <span className="tabular-nums text-gray-500 leading-none mb-0.5">
+                  {posted.lineValue.toFixed(1)}
+                </span>
+              )}
+              {grade != null ? (
+                <span className={`font-semibold tabular-nums leading-none ${gradeColor(grade)}`}>
+                  {grade.toFixed(0)}
+                </span>
+              ) : (
+                <span className="text-gray-700 leading-none">--</span>
+              )}
+            </button>
+          );
+        })}
       </div>
+
+      {/* Expanded panel for the active market */}
+      {activeGroup && (
+        <MarketPanel
+          group={activeGroup}
+          summaries={summaries}
+          dotWindow={dotWindow}
+        />
+      )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stats toggle button
+// ---------------------------------------------------------------------------
+
+function StatsToggle({ showAll, onToggle }: { showAll: boolean; onToggle: () => void }) {
+  return (
+    <button
+      onClick={onToggle}
+      className={[
+        'px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap',
+        showAll ? 'bg-gray-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+      ].join(' ')}
+    >
+      {showAll ? 'Compact' : 'All Stats'}
+    </button>
   );
 }
 
@@ -417,6 +682,9 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [error, setError]           = useState<string | null>(null);
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
   const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
+  const [showAllStats, setShowAllStats] = useState(false);
+
+  const isFullGame = selectedPeriods.size === 0;
 
   useEffect(() => {
     setLoading(true);
@@ -500,7 +768,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     [log],
   );
 
-  const showPropColors = selectedPeriods.size === 0;
+  const showPropColors = isFullGame;
 
   const teamGameCount = useMemo(() => new Set(summaries.map((s) => s.gameId)).size, [summaries]);
   const playedCount   = useMemo(() => summaries.filter((s) => !s.dnp).length, [summaries]);
@@ -523,6 +791,17 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     return value > line ? 'text-green-400' : 'text-red-400';
   }
 
+  function getComboLineCls(gameId: string, value: number, markets: string[]): string {
+    if (!showPropColors) return 'text-gray-300';
+    const gameMap = gradeMap.get(gameId);
+    if (!gameMap) return 'text-gray-300';
+    for (const market of markets) {
+      const line = gameMap.get(market);
+      if (line != null) return value > line ? 'text-green-400' : 'text-red-400';
+    }
+    return 'text-gray-300';
+  }
+
   const displayName = playerInfo.playerName ?? `Player ${playerId}`;
 
   const todayMarket = useMemo(() => {
@@ -541,6 +820,58 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     { key: 'l10',    label: 'Last 10' },
     ...(oppParam ? [{ key: 'opp' as SplitKey, label: `vs ${oppParam}` }] : []),
   ];
+
+  const compactSplitHeaders = ['MIN', 'PTS', '3PT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA'];
+  const allStatsSplitHeaders = ['MIN', 'PTS', 'FG', '3PT', 'FT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'STL', 'BLK', 'TOV'];
+  const splitHeaders = showAllStats ? allStatsSplitHeaders : compactSplitHeaders;
+
+  function renderSplitCells(s: SplitStats) {
+    const pra = s.gp === 0 ? '-' : ((s.pts + s.reb + s.ast) / s.gp).toFixed(1);
+    const pr  = s.gp === 0 ? '-' : ((s.pts + s.reb) / s.gp).toFixed(1);
+    const pa  = s.gp === 0 ? '-' : ((s.pts + s.ast) / s.gp).toFixed(1);
+    const ra  = s.gp === 0 ? '-' : ((s.reb + s.ast) / s.gp).toFixed(1);
+    if (showAllStats) {
+      return (
+        <>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+            {s.gp === 0 ? '-' : `${(s.fgm/s.gp).toFixed(1)}-${(s.fga/s.gp).toFixed(1)}`}
+          </td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+            {s.gp === 0 ? '-' : `${(s.fg3m/s.gp).toFixed(1)}-${(s.fg3a/s.gp).toFixed(1)}`}
+          </td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+            {s.gp === 0 ? '-' : `${(s.ftm/s.gp).toFixed(1)}-${(s.fta/s.gp).toFixed(1)}`}
+          </td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pra}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pr}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pa}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{ra}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.stl, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.blk, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.tov, s.gp)}</td>
+        </>
+      );
+    }
+    return (
+      <>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+          {s.gp === 0 ? '-' : `${(s.fg3m/s.gp).toFixed(1)}-${(s.fg3a/s.gp).toFixed(1)}`}
+        </td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pra}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pr}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pa}</td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{ra}</td>
+      </>
+    );
+  }
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -580,16 +911,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
             <tr className="text-gray-500">
               <th className="text-left px-4 py-2 font-medium sticky left-0 bg-gray-950 z-10">Split</th>
               <th className="text-right px-2 py-2 font-medium whitespace-nowrap">GP</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">MIN</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">PTS</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">REB</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">AST</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">STL</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">BLK</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">TOV</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">FG%</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">3P%</th>
-              <th className="text-right px-2 py-2 font-medium whitespace-nowrap">FT%</th>
+              {splitHeaders.map((h) => (
+                <th key={h} className="text-right px-2 py-2 font-medium whitespace-nowrap">{h}</th>
+              ))}
+              <th className="text-right py-2 pl-2 pr-4">
+                <StatsToggle showAll={showAllStats} onToggle={() => setShowAllStats((v) => !v)} />
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -599,16 +926,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 <tr key={key} className="border-t border-gray-800">
                   <td className="px-4 py-2 text-gray-400 font-medium sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{label}</td>
                   <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{s.gp}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.stl, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.blk, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.tov, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fgm, s.fga, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.fg3m, s.fg3m > 0 ? s.fg3m / s.gp * s.gp : s.fga, s.gp)}</td>
-                  <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtShoot(s.ftm, s.fta, s.gp)}</td>
+                  {renderSplitCells(s)}
+                  <td />
                 </tr>
               );
             })}
@@ -626,7 +945,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       )}
 
       {/* Today's props */}
-      <TodayPropsSection playerId={playerId} gradeDate={gradeDate} />
+      <TodayPropsSection
+        playerId={playerId}
+        gradeDate={gradeDate}
+        summaries={summaries}
+      />
 
       {/* Period filter */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
@@ -658,28 +981,59 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         )}
       </div>
 
-      {/* Game log — sticky header + sticky player name column */}
+      {/* Game log */}
       <div className="flex-1 overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-20 bg-gray-950">
             <tr className="text-xs text-gray-500 border-b border-gray-800">
               <th className="text-left px-4 py-1.5 font-medium sticky left-0 bg-gray-950 z-30 whitespace-nowrap">Date</th>
               <th className="text-left px-2 py-1.5 font-medium whitespace-nowrap">Opp</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="S=Starter B=Bench">Str</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">MIN</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="* = Starter">MIN</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PTS</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">REB</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">AST</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">STL</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">BLK</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">TOV</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PM</th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FG</th>
-              <th className="text-right px-4 py-1.5 font-medium whitespace-nowrap">FT</th>
+              {showAllStats ? (
+                <>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FG</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FT</th>
+                </>
+              ) : (
+                <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
+              )}
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">
+                REB
+              </th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">
+                AST
+              </th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PRA</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PR</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PA</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">RA</th>
+              {showAllStats && (
+                <>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">STL</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">BLK</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">TOV</th>
+                </>
+              )}
+              <th className="text-right py-1.5 pl-2 pr-4" />
             </tr>
           </thead>
           <tbody>
             {summaries.map((g) => {
+              const fmtM = (min: number, started: boolean | null): string => {
+                const m = Math.floor(min);
+                const s = Math.round((min - m) * 60);
+                const t = `${m}:${s.toString().padStart(2, '0')}`;
+                return started === true ? `*${t}` : t;
+              };
+              const fmtS = (made: number, att: number) =>
+                att === 0 ? '-' : `${made}-${att}`;
+              const fmtPT = (actual: number, potential: number | null): string => {
+                if (potential == null) return String(actual);
+                return `${actual}-${Math.round(potential)}`;
+              };
+
               if (g.dnp) {
                 return (
                   <tr key={g.gameId} className="border-b border-gray-800 opacity-40">
@@ -687,53 +1041,68 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                     <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
                       {g.isHome ? '' : '@'}{g.opponentAbbr}
                     </td>
-                    <td colSpan={11} className="px-2 py-1.5 text-xs text-gray-600">DNP</td>
+                    <td className="px-2 py-1.5 text-right text-gray-600 text-xs whitespace-nowrap">DNP</td>
+                    <td colSpan={showAllStats ? 12 : 9} />
                   </tr>
                 );
               }
-              const ptsLine = getLineCls(g.gameId, 'player_points', g.pts);
-              const rebLine = getLineCls(g.gameId, 'player_rebounds', g.reb);
-              const astLine = getLineCls(g.gameId, 'player_assists', g.ast);
-              const stlLine = getLineCls(g.gameId, 'player_steals', g.stl);
-              const blkLine = getLineCls(g.gameId, 'player_blocks', g.blk);
-              const fg3Line = getLineCls(g.gameId, 'player_threes', g.fg3m);
-              const fmtM = (min: number) => {
-                const m = Math.floor(min);
-                const s = Math.round((min - m) * 60);
-                return `${m}:${s.toString().padStart(2, '0')}`;
-              };
-              const fmtS = (made: number, att: number) =>
-                att === 0 ? '-' : `${made}/${att}`;
-              const fmtPT = (actual: number, potential: number | null): string => {
-                if (potential == null) return String(actual);
-                return `${actual}/${Math.round(potential)}`;
-              };
-              const starterBadge = g.started === true
-                ? <span className="text-blue-500 font-medium">S</span>
-                : g.started === false
-                ? <span className="text-gray-600">B</span>
-                : null;
+
+              const ptsLine  = getLineCls(g.gameId, 'player_points', g.pts);
+              const rebLine  = getLineCls(g.gameId, 'player_rebounds', g.reb);
+              const astLine  = getLineCls(g.gameId, 'player_assists', g.ast);
+              const stlLine  = getLineCls(g.gameId, 'player_steals', g.stl);
+              const blkLine  = getLineCls(g.gameId, 'player_blocks', g.blk);
+              const fg3Line  = getLineCls(g.gameId, 'player_threes', g.fg3m);
+              const praLine  = getComboLineCls(g.gameId, g.pts + g.reb + g.ast, ['player_points_rebounds_assists', 'player_points_rebounds_assists_alternate']);
+              const prLine   = getComboLineCls(g.gameId, g.pts + g.reb, ['player_points_rebounds', 'player_points_rebounds_alternate']);
+              const paLine   = getComboLineCls(g.gameId, g.pts + g.ast, ['player_points_assists', 'player_points_assists_alternate']);
+              const raLine   = getComboLineCls(g.gameId, g.reb + g.ast, ['player_rebounds_assists', 'player_rebounds_assists_alternate']);
+
               return (
                 <tr key={g.gameId} className="border-b border-gray-800">
                   <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{g.gameDate.slice(5)}</td>
                   <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
                     {g.isHome ? '' : '@'}{g.opponentAbbr}
                   </td>
-                  <td className="px-2 py-1.5 text-right text-xs whitespace-nowrap">{starterBadge}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtM(g.min)}</td>
+                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">
+                    {fmtM(g.min, g.started)}
+                  </td>
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${ptsLine}`}>{g.pts}</td>
+                  {showAllStats ? (
+                    <>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.fgm, g.fga)}</td>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{fmtS(g.fg3m, g.fg3a)}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.ftm, g.fta)}</td>
+                    </>
+                  ) : (
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{fmtS(g.fg3m, g.fg3a)}</td>
+                  )}
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${rebLine} tabular-nums`}>
-                    {fmtPT(g.reb, selectedPeriods.size === 0 ? g.rebChances : null)}
+                    {isFullGame ? fmtPT(g.reb, g.rebChances) : g.reb}
                   </td>
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${astLine} tabular-nums`}>
-                    {fmtPT(g.ast, selectedPeriods.size === 0 ? g.potentialAst : null)}
+                    {isFullGame ? fmtPT(g.ast, g.potentialAst) : g.ast}
                   </td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${stlLine}`}>{g.stl}</td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${blkLine}`}>{g.blk}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line}`}>{g.fg3m}</td>
-                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtS(g.fgm, g.fga)}</td>
-                  <td className="px-4 py-1.5 text-right text-gray-300 whitespace-nowrap">{fmtS(g.ftm, g.fta)}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${praLine} tabular-nums`}>
+                    {g.pts + g.reb + g.ast}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${prLine} tabular-nums`}>
+                    {g.pts + g.reb}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${paLine} tabular-nums`}>
+                    {g.pts + g.ast}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${raLine} tabular-nums`}>
+                    {g.reb + g.ast}
+                  </td>
+                  {showAllStats && (
+                    <>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${stlLine}`}>{g.stl}</td>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${blkLine}`}>{g.blk}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
+                    </>
+                  )}
+                  <td />
                 </tr>
               );
             })}
