@@ -162,9 +162,11 @@ function posGroup(position: string | null): string | null {
   return null;
 }
 
-const ODDS_MIN = -1000;
-const ODDS_MAX = 200;
-const ODDS_DEFAULT = ODDS_MIN;
+// Slider range: full range the user can drag to
+const ODDS_MIN     = -1000;
+const ODDS_MAX     = 200;
+// Default starting value: filter out anything worse than -600
+const ODDS_DEFAULT = -600;
 
 // ---------------------------------------------------------------------------
 // Sort
@@ -347,7 +349,10 @@ export default function GradesPageInner() {
       const q = playerFilter.trim().toLowerCase();
       rows = rows.filter((r) => r.playerName.toLowerCase().includes(q));
     }
-    if (minOdds > ODDS_DEFAULT) {
+
+    // Apply odds floor whenever slider is not at the absolute minimum (-1000).
+    // Default is -600, so by default anything worse than -600 is filtered out.
+    if (minOdds > ODDS_MIN) {
       rows = rows.filter((r) => r.overPrice != null && r.overPrice >= minOdds);
     }
 
@@ -430,7 +435,8 @@ export default function GradesPageInner() {
       : <span className="text-blue-400 ml-0.5">&#8593;</span>;
   }
 
-  const oddsFilterActive = minOdds > ODDS_DEFAULT;
+  // Filter is active whenever the slider is not at the absolute floor
+  const oddsFilterActive = minOdds > ODDS_MIN;
 
   function defRankCell(row: GradeRow): { rank: number | null; label: string } {
     const pg = posGroup(row.position);
@@ -611,7 +617,7 @@ export default function GradesPageInner() {
           </span>
           {oddsFilterActive && (
             <button
-              onClick={() => setMinOdds(ODDS_DEFAULT)}
+              onClick={() => setMinOdds(ODDS_MIN)}
               className="text-xs text-gray-600 hover:text-gray-400"
             >
               Reset
