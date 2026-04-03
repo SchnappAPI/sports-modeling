@@ -103,7 +103,9 @@ export async function GET(req: NextRequest) {
          AVG(CAST(r.fg3m    AS FLOAT))              AS avg3pm,
          AVG(CAST(r.fg3a    AS FLOAT))              AS avg3pa,
          AVG(CAST(r.fgm     AS FLOAT))              AS avgFgm,
-         AVG(CAST(r.fga     AS FLOAT))              AS avgFga
+         AVG(CAST(r.fga     AS FLOAT))              AS avgFga,
+         AVG(CAST(r.ftm     AS FLOAT))              AS avgFtm,
+         AVG(CAST(r.fta     AS FLOAT))              AS avgFta
        FROM team_players tp
        LEFT JOIN recent r ON r.player_id = tp.player_id
        ${gameId ? `LEFT JOIN nba.daily_lineups dl ON dl.game_id = @gameId AND dl.player_name = tp.player_name` : ''}
