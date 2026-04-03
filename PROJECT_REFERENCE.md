@@ -19,25 +19,23 @@
 - Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
 - PWA active. Install via Safari Share → Add to Home Screen.
 - `sports-session-close` skill installed — use at end of every session to update docs and generate handoff primer.
-- Box Score tab: fixed — today's final games now populate `nba.games` (was `game_date < today`, now `<=`), unblocking same-day box score writes. Deploy pending nightly ETL run.
-- Box Score 3P column: fixed — was using `fga` as denominator instead of `fg3a`.
-- StatsTable inactive players: fixed — players with inactive `lineupStatus` now appear in separate dimmed Inactive section, not mixed into Bench.
-- `gate_check.py` recreated — `pregame-refresh.yml` was failing on every run due to missing file.
+- Compact/All Stats toggle live across player page (splits + game log), StatsTable, and BoxScoreTable. Compact shows MIN, PTS, 3PT, REB, AST, PRA, PR, PA, RA. All Stats adds FG, FT, STL, BLK, TOV.
+- VS Defense column order fixed: PTS, 3PM, REB, AST, STL, BLK, TOV (matches game log).
+- Today's Props section redesigned: Over/Under rows paired per line value, collapsible markets, horizontal alt lines.
 
 **Known issues:**
-- `etl/lineup_fix_fragment.py` is a stub file left from an accidental create during session — safe to delete.
-- Today's games (2026-04-03) still show Wembanyama as Bench because lineup data was already written before the ETL fix landed. Will correct automatically on next lineup-poll refresh for future games.
+- `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
 - PasscodeGate `BYPASS = true` — gate disabled for dev. Re-enable before sharing with users (`PasscodeGate.tsx`).
 - Odds/grading backfill gap — pre-April 2026 dates still being backfilled by nightly chain.
 - NFL workflow missing — `nfl_etl.py` exists, `nfl-etl.yml` does not.
 - NFL and MLB `run_mappings` not implemented in odds_etl.py — only NBA branch exists.
 - Auto-pause delay locked — free database offer prevents changing it. Keep-alive workflow mitigates.
 - PNG icons not generated — SVG covers all modern browsers; generate via `web/scripts/generate-icons.mjs` if needed.
+- VS Defense does not show combo market columns (PRA/PR/PA/RA) — requires extending `/api/contextual` query. Deferred.
+- Today's Props section layout not final — next session rebuilds it as a horizontal strip matching VS Defense, with dot plot distribution per market.
 
 **Next up:**
-- Verify box score tab shows data for today's games after nightly ETL (the `game_date <= today` fix).
-- Verify inactive players display correctly in StatsTable for tomorrow's games.
-- Step 14: Mobile-first UI redesign — bottom nav, card-based grades list, swipeable game view.
+- Redesign Today's Props in `PlayerPageInner.tsx`: horizontal header strip (one cell per market, label + posted line + composite grade, same layout as VS Defense). Expanded panel per market shows: (1) SVG dot plot of player game-by-game outcomes with L10/L30/L50/All selector and posted line marker; (2) standard line row (Over price, Under price, hit rates); (3) alt lines horizontally with hit rates even when no posted odds. Pass `summaries: GameSummary[]` into `TodayPropsSection` as a prop. `buildMarketGroups` and `LinePair` types already exist in the file.
 - Step 15: MLB ETL and web views.
 - Step 16: NFL ETL automation and web views.
 
@@ -190,6 +188,12 @@ All components inverted for Under rows (100 - value). Rising trend is bad for an
 
 ### CANONICAL UI LAYOUTS — do not revert without checking CHANGELOG.md
 
+**All stat tables — compact vs all-stats toggle:**
+- Compact (default): Player/Date/Opp, MIN, PTS, 3PT (3PM-3PA), REB, AST, PRA, PR, PA, RA
+- All Stats: adds FG (FGM-FGA), FT (FTM-FTA), STL, BLK, TOV
+- Toggle button: splits header (player page), filter bar (stats/boxscore)
+- Companion values (REB-RebChances, AST-PotAst): player game log only, full game only
+
 **Player game log (`PlayerPageInner.tsx`):**
 | Col | Value | Notes |
 |-----|-------|-------|
@@ -197,33 +201,32 @@ All components inverted for Under rows (100 - value). Rising trend is bad for an
 | Opp | `@abbr` or `abbr` | |
 | MIN | `*21:49` / `21:49` / `DNP` | `*` = starter |
 | PTS | integer | prop colored |
-| FG | `fgm-fga` | e.g. `7-14` — NOT % — DASH separator |
+| FG | `fgm-fga` | all-stats only — NOT % — DASH separator |
 | 3PT | `fg3m-fg3a` | e.g. `3-8` — NOT % — DASH separator |
-| REB | `reb-rebChances` | second value when available |
-| AST | `ast-potentialAst` | second value when available |
-| STL | integer | prop colored |
-| BLK | integer | prop colored |
-| TOV | integer | |
-| FT | `ftm-fta` | DASH separator |
-
-No Str column. `fg3a` flows: `nba.player_box_score_stats.fg3a` → `getPlayerGames` (includes `pbs.fg3a`) → `PlayerGameRow.fg3a` → `buildGameSummaries` accumulates `fg3a` → rendered via `fmtS(g.fg3m, g.fg3a)`.
+| REB | `reb-rebChances` | second value when full game only |
+| AST | `ast-potentialAst` | second value when full game only |
+| PRA | `pts+reb+ast` | prop colored |
+| PR | `pts+reb` | prop colored |
+| PA | `pts+ast` | prop colored |
+| RA | `reb+ast` | prop colored |
+| STL | integer | all-stats only, prop colored |
+| BLK | integer | all-stats only, prop colored |
+| TOV | integer | all-stats only |
+| FT | `ftm-fta` | all-stats only — DASH separator |
 
 **Stats table (`StatsTable.tsx`):**
-| Col | Value | Notes |
-|-----|-------|-------|
-| Player | link | |
-| GP | integer | |
-| MIN | `avgMin` | 1 decimal |
-| PTS | `avgPts` | 1 decimal |
-| FG | `avgFgm-avgFga` | e.g. `7.1-14.8` — NOT % — DASH separator |
-| 3PT | `avg3pm-avg3pa` | e.g. `2.1-5.6` — NOT % — DASH separator |
-| REB | `avgReb` | |
-| AST | `avgAst` | |
-| STL | `avgStl` | |
-| BLK | `avgBlk` | |
-| TOV | `avgTov` | |
+Compact: Player, GP, MIN, PTS, 3PT (avg3pm-avg3pa), REB, AST, PRA, PR, PA, RA. All Stats adds FG (avgFgm-avgFga), FT (avgFtm-avgFta), STL, BLK, TOV. Uses `fmtRatio()` for ratio columns, never `fmtPct()`.
 
-`fmtRatio()` helper used for FG and 3PT. `fmtPct()` is NOT used for these columns. API returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`. Starters first, bench collapsed (`benchOpen` state), inactive collapsed (`inactiveOpen` state, dimmed at `opacity-40`).
+**VS Defense (`MatchupDefense.tsx`):**
+Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
+
+**Today's Props (`PlayerPageInner.tsx` — TodayPropsSection):**
+- Over/Under rows paired into LinePair structs by (baseMarket, lineValue).
+- Each market is a collapsible section, expanded by default.
+- Standard lines: one row per line — Over price, Under price, composite grade, hit rates.
+- Alt lines: horizontal chips inside each market, collapsed by default.
+- `TodayGradeRow` has `outcomeName` field.
+- NEXT SESSION: rebuild as horizontal strip + dot plot. See Next Up above.
 
 **At a Glance (`GradesPageInner.tsx`):**
 - `r.overPrice != null` gates all display
@@ -233,7 +236,7 @@ No Str column. `fg3a` flows: `nba.player_box_score_stats.fg3a` → `getPlayerGam
 ### API Routes
 - `/api/ping` — public (anonymous). SELECT 1. Used by keep-alive.
 - `/api/grades?date=&gameId=` — reads `dg.outcome_name` + `dg.over_price` directly
-- `/api/team-averages` — returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa` in addition to standard stats
+- `/api/team-averages` — returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`, `avgFtm`, `avgFta` plus standard stats
 - `/api/contextual?oppTeamId=&position=` — defense ranks. Rank 1 = most allowed.
 - `/api/refresh-lines` POST — triggers `refresh-lines.yml` via GITHUB_PAT
 - `/api/refresh-status?runId=` — polls workflow run status
@@ -278,3 +281,6 @@ No Str column. `fg3a` flows: `nba.player_box_score_stats.fg3a` → `getPlayerGam
 | Cloudflare DNS-only, not proxied | Azure SWA requires direct DNS resolution for SSL issuance. |
 | `nba.games` uses `game_date <= today` | Changed from `< today` — today's finals must enter `nba.games` so FK allows same-day box score writes. |
 | Inactive detection uses `lineupStatus` keywords | `rosterStatus='Active'` alone cannot distinguish injured/inactive players from available bench players. |
+| Compact/all-stats toggle instead of always showing all columns | Reduces visual noise on mobile; PRA/PR/PA/RA are the most useful default prop research columns. |
+| Companion values (rebChances, potentialAst) on player page only | Team views don't have per-player PT stat data in team-averages API; not worth the join complexity. |
+| VS Defense combo columns deferred | Requires extending /api/contextual to compute sum-stat defense averages — non-trivial query change. |
