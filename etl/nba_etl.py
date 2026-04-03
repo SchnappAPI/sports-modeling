@@ -635,7 +635,9 @@ def load_schedule(engine, season):
             if row["game_id"] is None:
                 continue
             schedule_rows.append(row)
-            if game_date < today and safe_int(g.get("gameStatus")) == 3:
+            # Include today's final games — changed from game_date < today to
+            # game_date <= today so box scores can be written for same-day finals.
+            if game_date <= today and safe_int(g.get("gameStatus")) == 3:
                 games_rows.append(row)
 
     if schedule_rows:
