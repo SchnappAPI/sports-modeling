@@ -418,7 +418,7 @@ function StatDotPlot({
 }
 
 // ---------------------------------------------------------------------------
-// Market panel
+// Market panel — dot plot + alt lines with full detail (no std line rows)
 // ---------------------------------------------------------------------------
 
 function MarketPanel({
@@ -430,13 +430,12 @@ function MarketPanel({
   summaries: GameSummary[];
   dotWindow: DotWindow;
 }) {
-  const [altsOpen, setAltsOpen] = useState(false);
-
   const posted    = group.standardLines[0];
   const lineValue = posted?.lineValue ?? 0;
 
   return (
     <div className="border-t border-gray-800 px-4 pt-3 pb-3">
+      {/* Dot plot — always shown, keyed to the posted line */}
       <StatDotPlot
         summaries={summaries}
         baseKey={group.baseKey}
@@ -444,68 +443,40 @@ function MarketPanel({
         window={dotWindow}
       />
 
-      <div className="mt-2 space-y-0.5">
-        {group.standardLines.map((pair) => {
-          const over  = pair.over;
-          const under = pair.under;
-          const grade = over?.compositeGrade ?? null;
-          const hr20  = over?.hitRate20 ?? null;
-          const hr60  = over?.hitRate60 ?? null;
-          return (
-            <div key={pair.lineValue} className="flex items-center gap-2 text-xs py-0.5">
-              <span className="tabular-nums font-semibold text-gray-200 w-9 shrink-0">
-                {pair.lineValue.toFixed(1)}
-              </span>
-              <span className="tabular-nums text-gray-400 shrink-0">
-                O {fmtOdds(over?.overPrice ?? null)}
-              </span>
-              <span className="tabular-nums text-gray-500 shrink-0">
-                U {fmtOdds(under?.overPrice ?? null)}
-              </span>
-              {grade != null && (
-                <span className={`font-semibold ml-auto tabular-nums ${gradeColor(grade)}`}>
-                  {grade.toFixed(0)}
-                </span>
-              )}
-              <span className="flex gap-1.5 text-gray-600 tabular-nums">
-                <span>{fmtPct(hr20)}</span>
-                <span>{fmtPct(hr60)}</span>
-              </span>
-            </div>
-          );
-        })}
-      </div>
-
+      {/* Alt lines — full detail, always expanded, no toggle */}
       {group.altLines.length > 0 && (
-        <div className="mt-2">
-          <button
-            className="text-xs text-gray-600 hover:text-gray-400 mb-1"
-            onClick={() => setAltsOpen((o) => !o)}
-          >
-            {altsOpen ? '▾' : '▸'} Alt lines ({group.altLines.length})
-          </button>
-          {altsOpen && (
-            <div className="flex flex-wrap gap-1.5 mt-1">
-              {group.altLines.map((pair) => {
-                const grade = pair.over?.compositeGrade ?? null;
-                const hr    = pair.over?.hitRate20 ?? null;
-                return (
-                  <div
-                    key={pair.lineValue}
-                    className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs tabular-nums border border-gray-700 ${gradeBg(grade)}`}
-                  >
-                    <span className="text-gray-300 font-medium">{pair.lineValue.toFixed(1)}</span>
-                    {grade != null && (
-                      <span className={`font-semibold ${gradeColor(grade)}`}>{grade.toFixed(0)}</span>
-                    )}
-                    {hr != null && (
-                      <span className="text-gray-500">{fmtPct(hr)}</span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
+        <div className="mt-3 space-y-1">
+          <div className="text-xs text-gray-600 mb-1.5">Alt lines</div>
+          {group.altLines.map((pair) => {
+            const over  = pair.over;
+            const under = pair.under;
+            const grade = over?.compositeGrade ?? null;
+            const hr20  = over?.hitRate20 ?? null;
+            const hr60  = over?.hitRate60 ?? null;
+            return (
+              <div
+                key={pair.lineValue}
+                className={`flex items-center gap-2 px-2 py-1 rounded text-xs tabular-nums border border-gray-700/60 ${gradeBg(grade)}`}
+              >
+                <span className="font-semibold text-gray-200 w-8 shrink-0">
+                  {pair.lineValue.toFixed(1)}
+                </span>
+                <span className="text-gray-400 shrink-0">O {fmtOdds(over?.overPrice ?? null)}</span>
+                {under && (
+                  <span className="text-gray-500 shrink-0">U {fmtOdds(under.overPrice)}</span>
+                )}
+                {grade != null && (
+                  <span className={`font-semibold ml-auto ${gradeColor(grade)}`}>
+                    {grade.toFixed(0)}
+                  </span>
+                )}
+                <span className="flex gap-1.5 text-gray-600 shrink-0">
+                  <span>{fmtPct(hr20)}</span>
+                  <span>{fmtPct(hr60)}</span>
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -513,7 +484,7 @@ function MarketPanel({
 }
 
 // ---------------------------------------------------------------------------
-// Today's Props section — horizontal strip + expandable panel
+// Today's Props section — spread strip + expandable panel
 // ---------------------------------------------------------------------------
 
 function TodayPropsSection({
@@ -561,6 +532,7 @@ function TodayPropsSection({
 
   return (
     <div className="border-b border-gray-800">
+      {/* Header + dot window selector */}
       <div className="px-4 pt-2 pb-1 flex items-center gap-3">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today's Props</span>
         <div className="flex gap-1 ml-auto">
@@ -579,38 +551,46 @@ function TodayPropsSection({
         </div>
       </div>
 
-      <div className="flex overflow-x-auto border-t border-gray-800 divide-x divide-gray-800">
-        {groups.map((group) => {
-          const posted   = group.standardLines[0];
-          const grade    = posted?.over?.compositeGrade ?? null;
-          const isActive = group.baseKey === activeBase;
-          return (
-            <button
-              key={group.baseKey}
-              onClick={() => setActiveBase(isActive ? null : group.baseKey)}
-              className={[
-                'flex flex-col items-center px-4 py-2 shrink-0 transition-colors text-xs',
-                isActive ? 'bg-gray-800' : 'hover:bg-gray-900',
-              ].join(' ')}
-            >
-              <span className="font-semibold text-gray-300 leading-none mb-0.5">{group.label}</span>
-              {posted && (
-                <span className="tabular-nums text-gray-500 leading-none mb-0.5">
-                  {posted.lineValue.toFixed(1)}
-                </span>
-              )}
-              {grade != null ? (
-                <span className={`font-semibold tabular-nums leading-none ${gradeColor(grade)}`}>
-                  {grade.toFixed(0)}
-                </span>
-              ) : (
-                <span className="text-gray-700 leading-none">--</span>
-              )}
-            </button>
-          );
-        })}
+      {/*
+        Strip: overflow-x-auto so it scrolls when cramped, but each cell uses
+        flex-1 + min-w so they fill available space and spread evenly when
+        there is room — matching VS Defense layout behaviour.
+      */}
+      <div className="overflow-x-auto border-t border-gray-800">
+        <div className="flex w-full min-w-max divide-x divide-gray-800">
+          {groups.map((group) => {
+            const posted   = group.standardLines[0];
+            const grade    = posted?.over?.compositeGrade ?? null;
+            const isActive = group.baseKey === activeBase;
+            return (
+              <button
+                key={group.baseKey}
+                onClick={() => setActiveBase(isActive ? null : group.baseKey)}
+                className={[
+                  'flex flex-col items-center flex-1 min-w-[56px] py-2 transition-colors text-xs',
+                  isActive ? 'bg-gray-800' : 'hover:bg-gray-900',
+                ].join(' ')}
+              >
+                <span className="font-semibold text-gray-300 leading-none mb-0.5">{group.label}</span>
+                {posted && (
+                  <span className="tabular-nums text-gray-500 leading-none mb-0.5">
+                    {posted.lineValue.toFixed(1)}
+                  </span>
+                )}
+                {grade != null ? (
+                  <span className={`font-semibold tabular-nums leading-none ${gradeColor(grade)}`}>
+                    {grade.toFixed(0)}
+                  </span>
+                ) : (
+                  <span className="text-gray-700 leading-none">--</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
+      {/* Expanded panel for the active market */}
       {activeGroup && (
         <MarketPanel
           group={activeGroup}
