@@ -7,16 +7,13 @@ export async function GET(req: NextRequest) {
   const awayTeamId = req.nextUrl.searchParams.get('awayTeamId');
   const context    = req.nextUrl.searchParams.get('context') ?? '20';
   const periodsRaw = req.nextUrl.searchParams.get('periods') ?? '';
-  const oppRaw     = req.nextUrl.searchParams.get('opp') ?? '';  // comma-sep "AWAY_OPP,HOME_OPP"
-  const gameId     = req.nextUrl.searchParams.get('gameId') ?? '';  // for starter status
+  const oppRaw     = req.nextUrl.searchParams.get('opp') ?? '';
+  const gameId     = req.nextUrl.searchParams.get('gameId') ?? '';
 
   if (!homeTeamId || !awayTeamId) {
     return NextResponse.json({ error: 'homeTeamId and awayTeamId required' }, { status: 400 });
   }
 
-  // context='opp' means filter to games vs today's opponent.
-  // In that case the caller passes opp=AWAY_OPP,HOME_OPP and we treat lastN=9999
-  // but add a WHERE on matchup.
   const isOppMode = context === 'opp';
   const lastN = isOppMode ? 9999 : context === 'all' ? 9999 : Math.max(1, parseInt(context, 10) || 20);
 
@@ -29,10 +26,6 @@ export async function GET(req: NextRequest) {
     ? `AND pbs.period IN (${periods.map((_, i) => `@period${i}`).join(', ')})`
     : '';
 
-  // opp mode: opp param is "AWAY_OPP,HOME_OPP"
-  // away players' games vs home opponent, home players' games vs away opponent.
-  // We pass both and filter per-player in SQL using team_id.
-  // Simpler: pass two matchup patterns and join via CASE on team_id.
   const [awayOpp, homeOpp] = oppRaw ? oppRaw.split(',') : ['', ''];
   const oppClause = isOppMode && awayOpp && homeOpp
     ? `AND (
@@ -75,6 +68,7 @@ export async function GET(req: NextRequest) {
            SUM(pbs.tov)     AS tov,
            SUM(pbs.minutes) AS minutes,
            SUM(pbs.fg3m)    AS fg3m,
+           SUM(pbs.fg3a)    AS fg3a,
            SUM(pbs.fgm)     AS fgm,
            SUM(pbs.fga)     AS fga,
            SUM(pbs.ftm)     AS ftm,
@@ -106,7 +100,10 @@ export async function GET(req: NextRequest) {
          AVG(CAST(r.blk     AS FLOAT))              AS avgBlk,
          AVG(CAST(r.tov     AS FLOAT))              AS avgTov,
          AVG(CAST(r.minutes AS FLOAT))              AS avgMin,
-         AVG(CAST(r.fg3m    AS FLOAT))              AS avg3pm
+         AVG(CAST(r.fg3m    AS FLOAT))              AS avg3pm,
+         AVG(CAST(r.fg3a    AS FLOAT))              AS avg3pa,
+         AVG(CAST(r.fgm     AS FLOAT))              AS avgFgm,
+         AVG(CAST(r.fga     AS FLOAT))              AS avgFga
        FROM team_players tp
        LEFT JOIN recent r ON r.player_id = tp.player_id
        ${gameId ? `LEFT JOIN nba.daily_lineups dl ON dl.game_id = @gameId AND dl.player_name = tp.player_name` : ''}

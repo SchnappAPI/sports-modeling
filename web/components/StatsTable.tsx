@@ -19,6 +19,9 @@ interface PlayerAvg {
   avgTov: number | null;
   avgMin: number | null;
   avg3pm: number | null;
+  avg3pa: number | null;
+  avgFgm: number | null;
+  avgFga: number | null;
 }
 
 interface Props {
@@ -33,6 +36,11 @@ interface Props {
 function fmt(val: number | null | undefined, decimals = 1): string {
   if (val == null) return '-';
   return val.toFixed(decimals);
+}
+
+function fmtPct(made: number | null, att: number | null): string {
+  if (made == null || att == null || att === 0) return '-';
+  return `${((made / att) * 100).toFixed(0)}%`;
 }
 
 const PERIOD_OPTIONS = [
@@ -86,12 +94,13 @@ function TeamStatsTable({
       <td className="py-1.5 px-2 text-right text-gray-500 text-xs">{p.games}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgMin)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtPct(p.avgFgm, p.avgFga)}</td>
+      <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtPct(p.avg3pm, p.avg3pa)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgAst)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgStl)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgBlk)}</td>
       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgTov)}</td>
-      <td className="py-1.5 pl-2 text-right text-gray-300">{fmt(p.avg3pm)}</td>
     </tr>
   );
 
@@ -105,12 +114,13 @@ function TeamStatsTable({
             <th className="text-right py-1.5 px-2 font-medium">GP</th>
             <th className="text-right py-1.5 px-2 font-medium">MIN</th>
             <th className="text-right py-1.5 px-2 font-medium">PTS</th>
+            <th className="text-right py-1.5 px-2 font-medium">FG%</th>
+            <th className="text-right py-1.5 px-2 font-medium">3P%</th>
             <th className="text-right py-1.5 px-2 font-medium">REB</th>
             <th className="text-right py-1.5 px-2 font-medium">AST</th>
             <th className="text-right py-1.5 px-2 font-medium">STL</th>
             <th className="text-right py-1.5 px-2 font-medium">BLK</th>
-            <th className="text-right py-1.5 px-2 font-medium">TOV</th>
-            <th className="text-right py-1.5 pl-2 font-medium">3PM</th>
+            <th className="text-right py-1.5 pl-2 font-medium">TOV</th>
           </tr>
         </thead>
         <tbody>
@@ -124,7 +134,7 @@ function TeamStatsTable({
                     onClick={() => setBenchOpen((o) => !o)}
                   >
                     <td
-                      colSpan={10}
+                      colSpan={11}
                       className="py-1.5 text-xs text-gray-500 font-semibold uppercase tracking-wider"
                     >
                       <span className="mr-1.5 text-gray-600">{benchOpen ? '▾' : '▸'}</span>
