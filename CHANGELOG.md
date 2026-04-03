@@ -11,6 +11,9 @@
 
 ## 2026-04-03
 
+### Infra | deploy retry
+- Triggered redeploy to recover from Azure SWA transient deployment cancellation. No code changes.
+
 ### UI | StatsTable.tsx + PlayerPageInner.tsx — separator change
 - Changed separator in all made-attempted ratio display from `/` to `-`.
 - StatsTable: `fmtRatio()` now returns `7.1-14.8` instead of `7.1/14.8`.
