@@ -8,7 +8,8 @@ interface RosterRow {
   playerName: string;
   teamAbbr: string;
   position: string | null;
-  isStarter: boolean;
+  // 'Starter' | 'Bench' | 'Inactive'
+  starterStatus: string | null;
   lineupStatus: string | null;  // 'Confirmed' | 'Projected' | null
 }
 
@@ -41,10 +42,14 @@ export default function RosterTable({ gameId, selectedDate }: Props) {
 
   const teams = Array.from(new Set(roster.map((r) => r.teamAbbr)));
 
-  function teamIsProjected(abbr: string): boolean {
-    return roster
-      .filter((r) => r.teamAbbr === abbr)
-      .some((r) => r.lineupStatus === 'Projected');
+  function teamBadge(abbr: string): { label: string; cls: string } | null {
+    const players = roster.filter((r) => r.teamAbbr === abbr);
+    const hasConfirmed = players.some((p) => p.lineupStatus === 'Confirmed');
+    const hasProjected = players.some((p) => p.lineupStatus === 'Projected');
+    if (hasConfirmed) return { label: 'Confirmed', cls: 'text-green-700 border-green-900' };
+    if (hasProjected) return { label: 'Projected', cls: 'text-yellow-600 border-yellow-800' };
+    // lineupStatus is null for all players — lineup not yet confirmed
+    return { label: 'Expected', cls: 'text-gray-600 border-gray-700' };
   }
 
   function playerHref(playerId: number): string {
@@ -58,10 +63,39 @@ export default function RosterTable({ gameId, selectedDate }: Props) {
   return (
     <div className="grid grid-cols-2 gap-4">
       {teams.map((abbr) => {
-        const players   = roster.filter((r) => r.teamAbbr === abbr);
-        const starters  = players.filter((p) => p.isStarter);
-        const bench     = players.filter((p) => !p.isStarter);
-        const projected = teamIsProjected(abbr);
+        const players  = roster.filter((r) => r.teamAbbr === abbr);
+        const starters = players.filter((p) => p.starterStatus === 'Starter');
+        const bench    = players.filter((p) => p.starterStatus === 'Bench');
+        const inactive = players.filter((p) => p.starterStatus === 'Inactive');
+        const badge    = teamBadge(abbr);
+
+        const renderPlayer = (p: RosterRow, isStarter: boolean, dimmed = false) => (
+          <tr key={p.playerName} className={['border-b border-gray-800', dimmed ? 'opacity-40' : ''].join(' ')}>
+            <td className="py-1.5 pr-2">
+              {p.playerId != null ? (
+                <Link
+                  href={playerHref(p.playerId)}
+                  className={[
+                    'transition-colors hover:text-blue-400',
+                    dimmed ? 'text-gray-500' : isStarter ? 'text-gray-100' : 'text-gray-300',
+                  ].join(' ')}
+                >
+                  {p.playerName}
+                </Link>
+              ) : (
+                <span className={dimmed ? 'text-gray-500' : isStarter ? 'text-gray-100' : 'text-gray-300'}>
+                  {p.playerName}
+                </span>
+              )}
+            </td>
+            <td className="py-1.5 pr-2 text-gray-500 text-xs">{p.position ?? ''}</td>
+            <td className="py-1.5 text-right">
+              {isStarter && (
+                <span className="text-xs bg-blue-900 text-blue-300 px-1 rounded">S</span>
+              )}
+            </td>
+          </tr>
+        );
 
         return (
           <div key={abbr}>
@@ -69,57 +103,27 @@ export default function RosterTable({ gameId, selectedDate }: Props) {
               <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
                 {abbr}
               </span>
-              {projected ? (
-                <span className="text-xs text-yellow-600 border border-yellow-800 rounded px-1 py-0.5 leading-none">
-                  Projected
-                </span>
-              ) : (
-                <span className="text-xs text-green-700 border border-green-900 rounded px-1 py-0.5 leading-none">
-                  Confirmed
+              {badge && (
+                <span className={`text-xs border rounded px-1 py-0.5 leading-none ${badge.cls}`}>
+                  {badge.label}
                 </span>
               )}
             </div>
 
             <table className="w-full text-sm">
               <tbody>
-                {starters.map((p) => (
-                  <tr key={p.playerName} className="border-b border-gray-800">
-                    <td className="py-1.5 pr-2">
-                      {p.playerId != null ? (
-                        <Link
-                          href={playerHref(p.playerId)}
-                          className="text-gray-100 hover:text-blue-400 transition-colors"
-                        >
-                          {p.playerName}
-                        </Link>
-                      ) : (
-                        <span className="text-gray-100">{p.playerName}</span>
-                      )}
-                    </td>
-                    <td className="py-1.5 pr-2 text-gray-500 text-xs">{p.position ?? ''}</td>
-                    <td className="py-1.5 text-right">
-                      <span className="text-xs bg-blue-900 text-blue-300 px-1 rounded">S</span>
-                    </td>
-                  </tr>
-                ))}
-                {bench.map((p) => (
-                  <tr key={p.playerName} className="border-b border-gray-800">
-                    <td className="py-1.5 pr-2">
-                      {p.playerId != null ? (
-                        <Link
-                          href={playerHref(p.playerId)}
-                          className="text-gray-300 hover:text-blue-400 transition-colors"
-                        >
-                          {p.playerName}
-                        </Link>
-                      ) : (
-                        <span className="text-gray-300">{p.playerName}</span>
-                      )}
-                    </td>
-                    <td className="py-1.5 pr-2 text-gray-500 text-xs">{p.position ?? ''}</td>
-                    <td className="py-1.5"></td>
-                  </tr>
-                ))}
+                {starters.map((p) => renderPlayer(p, true))}
+                {bench.map((p) => renderPlayer(p, false))}
+                {inactive.length > 0 && (
+                  <>
+                    <tr>
+                      <td colSpan={3} className="pt-2 pb-0.5 text-xs text-gray-600 font-semibold uppercase tracking-wider">
+                        Out / Inactive
+                      </td>
+                    </tr>
+                    {inactive.map((p) => renderPlayer(p, false, true))}
+                  </>
+                )}
               </tbody>
             </table>
           </div>

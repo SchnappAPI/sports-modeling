@@ -105,7 +105,8 @@ export interface RosterRow {
   playerName: string;
   teamAbbr: string;
   position: string | null;
-  isStarter: boolean;
+  // 'Starter' | 'Bench' | 'Inactive' — replaces the old boolean isStarter
+  starterStatus: string | null;
   lineupStatus: string | null;  // 'Confirmed' | 'Projected' | null
 }
 
@@ -120,13 +121,18 @@ export async function getRoster(gameId: string): Promise<RosterRow[]> {
          dl.player_name                                 AS playerName,
          dl.team_tricode                                AS teamAbbr,
          dl.position                                    AS position,
-         CASE WHEN dl.starter_status = 'Starter' THEN 1 ELSE 0 END AS isStarter,
+         dl.starter_status                              AS starterStatus,
          dl.lineup_status                               AS lineupStatus
        FROM nba.daily_lineups dl
        LEFT JOIN nba.players p ON p.player_name = dl.player_name
        WHERE dl.game_id = @gameId
        ORDER BY dl.team_tricode,
-                CASE WHEN dl.starter_status = 'Starter' THEN 0 ELSE 1 END,
+                CASE dl.starter_status
+                  WHEN 'Starter'  THEN 0
+                  WHEN 'Bench'    THEN 1
+                  WHEN 'Inactive' THEN 2
+                  ELSE 3
+                END,
                 dl.player_name`
     );
   return result.recordset;
