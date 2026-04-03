@@ -18,6 +18,7 @@
 - Grading: all components live, Over + Under grades written daily.
 - Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
 - PWA active. Install via Safari Share → Add to Home Screen.
+- `sports-session-close` skill installed — use at end of every session to update docs and generate handoff primer.
 
 **Known issues:**
 - Box score tab and live stats tab not loading — runtime error not yet diagnosed. Need browser error text to fix.
@@ -29,10 +30,10 @@
 - PNG icons not generated — SVG covers all modern browsers; generate via `web/scripts/generate-icons.mjs` if needed.
 
 **Next up:**
+- Diagnose box score / live stats breakage (need browser error text first).
 - Step 14: Mobile-first UI redesign — bottom nav, card-based grades list, swipeable game view.
 - Step 15: MLB ETL and web views.
 - Step 16: NFL ETL automation and web views.
-- Diagnose box score / live stats breakage (need browser error text first).
 
 ---
 
@@ -188,14 +189,14 @@ All components inverted for Under rows (100 - value). Rising trend is bad for an
 | Opp | `@abbr` or `abbr` | |
 | MIN | `*21:49` / `21:49` / `DNP` | `*` = starter |
 | PTS | integer | prop colored |
-| FG | `fgm/fga` | e.g. `7/14` — NOT % |
-| 3PT | `fg3m/fg3a` | e.g. `3/8` — NOT % |
-| REB | `reb/rebChances` | second value when available |
-| AST | `ast/potentialAst` | second value when available |
+| FG | `fgm-fga` | e.g. `7-14` — NOT % — DASH separator |
+| 3PT | `fg3m-fg3a` | e.g. `3-8` — NOT % — DASH separator |
+| REB | `reb-rebChances` | second value when available |
+| AST | `ast-potentialAst` | second value when available |
 | STL | integer | prop colored |
 | BLK | integer | prop colored |
 | TOV | integer | |
-| FT | `ftm/fta` | |
+| FT | `ftm-fta` | DASH separator |
 
 No Str column. `fg3a` flows: `nba.player_box_score_stats.fg3a` → `getPlayerGames` (includes `pbs.fg3a`) → `PlayerGameRow.fg3a` → `buildGameSummaries` accumulates `fg3a` → rendered via `fmtS(g.fg3m, g.fg3a)`.
 
@@ -206,8 +207,8 @@ No Str column. `fg3a` flows: `nba.player_box_score_stats.fg3a` → `getPlayerGam
 | GP | integer | |
 | MIN | `avgMin` | 1 decimal |
 | PTS | `avgPts` | 1 decimal |
-| FG | `avgFgm/avgFga` | e.g. `7.1/14.8` — NOT % |
-| 3PT | `avg3pm/avg3pa` | e.g. `2.1/5.6` — NOT % |
+| FG | `avgFgm-avgFga` | e.g. `7.1-14.8` — NOT % — DASH separator |
+| 3PT | `avg3pm-avg3pa` | e.g. `2.1-5.6` — NOT % — DASH separator |
 | REB | `avgReb` | |
 | AST | `avgAst` | |
 | STL | `avgStl` | |
@@ -263,7 +264,7 @@ No Str column. `fg3a` flows: `nba.player_box_score_stats.fg3a` → `getPlayerGam
 | `getGrades` reads `dg.over_price` directly | Old `best_price` CTE join attached Over prices to Under rows, showing them in Over tab. |
 | `outcome_name` in daily_grades UNIQUE key (v3) | Allows Over + Under rows for same player/market/line. |
 | Str column removed from game log | Only showed DNP; starter status now in MIN column with `*` prefix. |
-| FG/3PT as made/att ratios, not % | More useful for prop research than shooting percentage. Applies to both game log and stats table. |
+| FG/3PT as made/att ratios with dash separator, not % | More useful for prop research. Dash chosen over slash. Applies to both game log and stats table. |
 | `precompute_line_grades` iterates by player-market pair | Eliminates ~10x redundant DataFrame reads. |
 | Under component grades inverted | Rising trend/momentum/good matchup is bad for an under bet. |
 | Cloudflare DNS-only, not proxied | Azure SWA requires direct DNS resolution for SSL issuance. |

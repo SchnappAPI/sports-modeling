@@ -9,7 +9,12 @@
 
 ---
 
-## 2026-04-03
+## 2026-04-03 (session close)
+
+### Docs | sports-session-close SKILL.md
+- Created `sports-session-close` skill file. Installed at `/mnt/skills/user/sports-session-close/SKILL.md`.
+- Trigger phrases: "update everything", "close out the session", "I'm starting a new chat", "wrap this up", "update the docs".
+- Runs 5 steps: audit session, append CHANGELOG, update PROJECT_REFERENCE Current State, update memory, generate handoff primer.
 
 ### Infra | deploy retry
 - Triggered redeploy to recover from Azure SWA transient deployment cancellation. No code changes.
@@ -19,6 +24,7 @@
 - StatsTable: `fmtRatio()` now returns `7.1-14.8` instead of `7.1/14.8`.
 - PlayerPageInner: `fmtS()` now returns `7-14` instead of `7/14`. `fmtPT()` now returns `5-9` instead of `5/9`.
 - Applies to FG, 3PT, FT columns in game log, and FG, 3PT columns in stats table.
+- Do not revert to slash separator.
 
 ### Docs | PROJECT_REFERENCE.md + CHANGELOG.md
 - Restructured PROJECT_REFERENCE.md: current state at top, trimmed stable lookup sections, added canonical UI layout tables, added two-file session protocol.
@@ -26,10 +32,10 @@
 - Updated memory to reflect two-file session protocol.
 
 ### UI | StatsTable.tsx
-- FG column: changed from `FG%` (percentage) to `FG` showing `avgFgm/avgFga` ratio (e.g. `7.1-14.8`).
-- 3PT column: changed from `3P%` (percentage) to `3PT` showing `avg3pm/avg3pa` ratio (e.g. `2.1-5.6`).
+- FG column: changed from `FG%` (percentage) to `FG` showing `avgFgm-avgFga` ratio (e.g. `7.1-14.8`).
+- 3PT column: changed from `3P%` (percentage) to `3PT` showing `avg3pm-avg3pa` ratio (e.g. `2.1-5.6`).
 - Uses `fmtRatio()` helper. `fmtPct()` is NOT used for these columns. Headers are `FG` and `3PT`.
-- This was a deliberate change from percentage display. Do not revert to percentage.
+- Do not revert to percentage display.
 
 ### API | queries.ts — getGrades
 - Removed `best_price` CTE join to `odds.upcoming_player_props` and `odds.player_props`.
