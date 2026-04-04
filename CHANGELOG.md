@@ -9,6 +9,37 @@
 
 ---
 
+## 2026-04-04 (session 2)
+
+### Infra | .github/workflows/nba-game-day.yml — NEW consolidated intra-day workflow
+- Created `nba-game-day.yml`. Runs every 5 minutes UTC 16:00-06:00 (noon-2AM ET).
+- Replaces the **scheduled** runs of `pregame-refresh.yml`, `nba-live.yml`, and `lineup-poll.yml`. Those three workflows are now dispatch-only (renamed with "RETIRED" in their names) and kept for manual one-off runs.
+- Step sequence per cycle:
+  1. `game_day_gate.py` — outputs `has_pregame`, `has_live`, `has_final`, `any_active`, `final_date`, `run_mod` (run_number % 3).
+  2. `nba_live.py` — runs when any pre-game or live game exists. Always syncs schedule status/scores; conditionally upserts live box score rows.
+  3. `odds_etl upcoming + grade_props intraday` — runs every third cycle (~15 min) when games are active. Throttled via `run_mod == 0`.
+  4. `lineup_poll --hours-ahead 6` — runs every cycle when games are active.
+  5. Backfill block — runs when `has_final=true`: `odds_etl backfill`, `odds_etl mappings`, `grade_props backfill --date <final_date>`. Ensures historical lines and grades are persisted for completed games.
+- Do not re-add schedules to pregame-refresh.yml, nba-live.yml, or lineup-poll.yml — nba-game-day.yml owns all scheduled intra-day runs.
+
+### ETL | etl/nba_live.py — split into two unconditional + gated functions
+- Root cause of live box score not showing: `nba_live.py` previously gated on `game_status = 2` **before** calling ScoreboardV3. If the DB still had `status=1` (pre-game), ScoreboardV3 was never called, so status never flipped, so box scores never ran. Chicken-and-egg.
+- Fix: refactored into two functions. `update_schedule(engine)` always calls ScoreboardV3 and updates all today's games. `update_box_scores(engine)` gates on `status=2` after the schedule has been updated. `main()` calls both in sequence.
+- Do not revert to the old single-gate approach — schedule status must update unconditionally.
+
+### ETL | etl/game_day_gate.py — NEW gate script for nba-game-day.yml
+- Created `etl/game_day_gate.py`. Replaces `etl/gate_check.py` for the new consolidated workflow.
+- Uses Eastern time (UTC-4) for today's date, matching `grade_props.py`'s `today_et()`.
+- Outputs five GitHub Actions variables: `has_pregame`, `has_live`, `has_final`, `any_active`, `final_date`.
+- `has_final` is true when any today's game has `game_status=3` AND no `common.daily_grades` rows exist for that date (needs backfill).
+- `etl/gate_check.py` is still used by the legacy pregame-refresh.yml dispatch path; do not delete it.
+
+### UI | web/components/PasscodeGate.tsx — BYPASS re-added
+- Auth gate previously had no BYPASS constant (it was removed in a prior refactor).
+- Added `const BYPASS = true` with guard in `verify()` and initial state. Set to `false` to re-enable passcode requirement.
+
+---
+
 ## 2026-04-04
 
 ### Grading | grading/grade_props.py — grade_date UTC midnight mismatch fix
