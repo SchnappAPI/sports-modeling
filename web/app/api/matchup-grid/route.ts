@@ -5,6 +5,21 @@ import mssql from 'mssql';
 const POS_GROUPS = ['G', 'F', 'C'] as const;
 type PosGroup = typeof POS_GROUPS[number];
 
+// Map full position strings (PG, SG, SF, PF, C, G, F) to canonical group.
+function posToGroup(pos: string | null): PosGroup | null {
+  if (!pos) return null;
+  const p = pos.toUpperCase().trim();
+  if (p === 'PG' || p === 'SG' || p === 'G') return 'G';
+  if (p === 'SF' || p === 'PF' || p === 'F') return 'F';
+  if (p === 'C') return 'C';
+  // Handle compound positions like 'G-F', 'F-C' — use first component
+  const first = p.split('-')[0].trim();
+  if (first === 'PG' || first === 'SG' || first === 'G') return 'G';
+  if (first === 'SF' || first === 'PF' || first === 'F') return 'F';
+  if (first === 'C') return 'C';
+  return null;
+}
+
 interface StatLine {
   avg: number;
   rank: number;
@@ -76,7 +91,6 @@ export async function GET(req: NextRequest) {
 
     const { homeTeamId, awayTeamId, homeAbbr, awayAbbr } = gameRes.recordset[0];
 
-    // Fetch all team+position defense stats in one query, filter client-side
     const defRes = await pool.request()
       .input('homeTeamId', mssql.BigInt, homeTeamId)
       .input('awayTeamId', mssql.BigInt, awayTeamId)
@@ -239,14 +253,16 @@ export async function GET(req: NextRequest) {
       return { teamId, teamAbbr: abbr, positions };
     }
 
+    // Build lineup keyed by teamTricode -> posGroup -> players[]
+    // Uses posToGroup() to correctly map PG/SG -> G, SF/PF -> F, C -> C
     const lineupByTeam: Record<string, Record<string, LineupPlayer[]>> = {};
     for (const row of lineupRes.recordset) {
       const tc  = row.teamTricode;
-      const pos = row.position ? row.position[0].toUpperCase() : null;
-      if (!pos || !POS_GROUPS.includes(pos as PosGroup)) continue;
+      const pg  = posToGroup(row.position);
+      if (!pg) continue;
       if (!lineupByTeam[tc]) lineupByTeam[tc] = {};
-      if (!lineupByTeam[tc][pos]) lineupByTeam[tc][pos] = [];
-      lineupByTeam[tc][pos].push({
+      if (!lineupByTeam[tc][pg]) lineupByTeam[tc][pg] = [];
+      lineupByTeam[tc][pg].push({
         playerId:      row.playerId,
         playerName:    row.playerName,
         position:      row.position,
