@@ -5,9 +5,10 @@ import mssql from 'mssql';
 const POS_GROUPS = ['G', 'F', 'C'] as const;
 type PosGroup = typeof POS_GROUPS[number];
 
-// Map full position strings (PG, SG, SF, PF, C, G, F) to canonical group.
-function posToGroup(pos: string | null): PosGroup | null {
-  if (!pos) return null;
+// Map full position strings to canonical group.
+// Falls back to 'G' for null or unrecognized values so no active player is silently dropped.
+function posToGroup(pos: string | null): PosGroup {
+  if (!pos) return 'G';
   const p = pos.toUpperCase().trim();
   if (p === 'PG' || p === 'SG' || p === 'G') return 'G';
   if (p === 'SF' || p === 'PF' || p === 'F') return 'F';
@@ -17,7 +18,7 @@ function posToGroup(pos: string | null): PosGroup | null {
   if (first === 'PG' || first === 'SG' || first === 'G') return 'G';
   if (first === 'SF' || first === 'PF' || first === 'F') return 'F';
   if (first === 'C') return 'C';
-  return null;
+  return 'G'; // fallback — better to show under G than to drop silently
 }
 
 interface StatLine {
@@ -254,12 +255,11 @@ export async function GET(req: NextRequest) {
     }
 
     // Build lineup keyed by teamTricode -> posGroup -> players[]
-    // Uses posToGroup() to correctly map PG/SG -> G, SF/PF -> F, C -> C
+    // posToGroup() never returns null — unknown positions fall back to 'G'
     const lineupByTeam: Record<string, Record<string, LineupPlayer[]>> = {};
     for (const row of lineupRes.recordset) {
-      const tc  = row.teamTricode;
-      const pg  = posToGroup(row.position);
-      if (!pg) continue;
+      const tc = row.teamTricode;
+      const pg = posToGroup(row.position);
       if (!lineupByTeam[tc]) lineupByTeam[tc] = {};
       if (!lineupByTeam[tc][pg]) lineupByTeam[tc][pg] = [];
       lineupByTeam[tc][pg].push({
