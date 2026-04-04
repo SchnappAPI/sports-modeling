@@ -677,6 +677,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
   const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
   const [showAllStats, setShowAllStats] = useState(false);
+  const [vsOppOnly, setVsOppOnly]   = useState(false);
 
   const isFullGame = selectedPeriods.size === 0;
 
@@ -688,6 +689,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     setPlayerInfo({ oppTeamId: null, position: null, playerName: null, teamId: null });
     setSelectedPeriods(new Set());
     setTeamPlayers([]);
+    setVsOppOnly(false);
 
     Promise.all([
       fetch(`/api/player?playerId=${playerId}&lastN=9999&sport=nba`)
@@ -750,6 +752,15 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const summaries = useMemo(
     () => buildGameSummaries(log, selectedPeriods),
     [log, selectedPeriods],
+  );
+
+  // Game log view — optionally filtered to vs-opp games only.
+  // Splits table is unaffected (it already shows a dedicated vs-opp row).
+  const displayedSummaries = useMemo(
+    () => vsOppOnly && oppParam
+      ? summaries.filter((g) => g.opponentAbbr === oppParam)
+      : summaries,
+    [summaries, vsOppOnly, oppParam],
   );
 
   const splits = useMemo(
@@ -941,7 +952,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         summaries={summaries}
       />
 
-      {/* Period filter — All Stats toggle lives here alongside quarter buttons */}
+      {/* Period filter — All Stats toggle and vs Opp button live here */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
         <span className="text-xs text-gray-600">All</span>
         {availablePeriods.map((p) => (
@@ -969,7 +980,20 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         {!showPropColors && grades.length > 0 && (
           <span className="text-xs text-gray-600 ml-2">Prop coloring off (full game only)</span>
         )}
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          {oppParam && (
+            <button
+              onClick={() => setVsOppOnly((v) => !v)}
+              className={[
+                'px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap',
+                vsOppOnly
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700',
+              ].join(' ')}
+            >
+              vs {oppParam}
+            </button>
+          )}
           <StatsToggle showAll={showAllStats} onToggle={() => setShowAllStats((v) => !v)} />
         </div>
       </div>
@@ -1012,7 +1036,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
             </tr>
           </thead>
           <tbody>
-            {summaries.map((g) => {
+            {displayedSummaries.map((g) => {
               const fmtM = (min: number, started: boolean | null): string => {
                 const m = Math.floor(min);
                 const s = Math.round((min - m) * 60);
