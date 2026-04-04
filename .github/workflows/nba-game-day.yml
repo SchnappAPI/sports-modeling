@@ -1,9 +1,25 @@
 name: NBA Game Day
 
+# Consolidated intra-day workflow. Runs every 5 minutes during game hours.
+#
+# Every cycle (~5 min):
+#   1. Gate script   -- checks DB for pre-game/live games AND whether
+#                       14+ minutes have elapsed since last grade (replaces
+#                       the fragile run_number % 3 throttle)
+#   2. nba_live.py   -- syncs schedule status/scores, upserts live box scores
+#
+# When gate says run_odds_grading=true (~every 15 min):
+#   3. odds_etl upcoming  -- refresh today's FanDuel lines
+#   4. grade_props intraday -- re-grade moved standard lines
+#   5. lineup_poll        -- fetch projected/confirmed lineups
+#
+# Backfill for newly-final games is handled by nba-backfill.yml
+# which is dispatched separately to avoid competing with live updates.
+
 on:
   schedule:
-    - cron: '*/5 16-23 * * *'
-    - cron: '*/5 0-6  * * *'
+    - cron: '*/5 16-23 * * *'   # UTC 16:00-23:55 (noon-7:55 PM ET)
+    - cron: '*/5 0-6  * * *'    # UTC 00:00-06:00 (8 PM-2 AM ET)
   workflow_dispatch:
     inputs:
       skip_gate:
@@ -18,6 +34,7 @@ env:
   AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
   ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
   NBA_PROXY_URL:      ${{ secrets.NBA_PROXY_URL }}
+  GITHUB_PAT:         ${{ secrets.GITHUB_PAT }}
 
 jobs:
   game-day:
@@ -32,10 +49,7 @@ jobs:
 
       - name: Game day gate
         id: gate
-        run: |
-          python etl/game_day_gate.py
-          MOD=$(( ${{ github.run_number }} % 3 ))
-          echo "run_mod=$MOD" >> $GITHUB_OUTPUT
+        run: python etl/game_day_gate.py
 
       - name: Schedule status + live box score
         if: |
@@ -44,33 +58,29 @@ jobs:
           github.event.inputs.skip_gate == 'true'
         run: python etl/nba_live.py
 
-      - name: Odds upcoming + intraday grading
+      - name: Odds upcoming + intraday grading + lineup poll
         if: |
           (
             steps.gate.outputs.any_active == 'true' ||
             github.event.inputs.skip_gate == 'true'
           ) && (
             github.event_name == 'workflow_dispatch' ||
-            steps.gate.outputs.run_mod == '0'
+            steps.gate.outputs.run_odds_grading == 'true'
           )
         run: |
           python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
           python grading/grade_props.py --mode intraday
+          python etl/lineup_poll.py --hours-ahead 6
 
-      - name: Lineup poll
-        if: |
-          steps.gate.outputs.any_active == 'true' ||
-          github.event.inputs.skip_gate == 'true'
-        run: python etl/lineup_poll.py --hours-ahead 6
-
-      - name: Backfill odds + grades for newly-final games
-        if: |
-          steps.gate.outputs.has_final == 'true' ||
-          github.event.inputs.skip_gate == 'true'
+      - name: Dispatch backfill for newly-final games
+        if: steps.gate.outputs.has_final == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
         run: |
           DATE="${{ steps.gate.outputs.final_date }}"
           if [ -n "$DATE" ]; then
-            python etl/odds_etl.py --mode backfill --sport nba --games 5
-            python etl/odds_etl.py --mode mappings --sport nba
-            python grading/grade_props.py --mode backfill --date "$DATE"
+            gh workflow run nba-backfill.yml \
+              --repo "${{ github.repository }}" \
+              --ref main \
+              --field date="$DATE"
           fi

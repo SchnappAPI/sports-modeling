@@ -1,8 +1,18 @@
 name: NBA Grading
 
+# Two triggers:
+#   1. workflow_run: fires automatically after odds-etl.yml completes
+#      successfully on its nightly schedule. This replaces the fragile
+#      hardcoded 30-minute delay (odds at 10:00, grading at 10:30).
+#      Grading now starts immediately after odds finishes, regardless
+#      of how long odds takes.
+#   2. workflow_dispatch: manual runs and backfill.
+
 on:
-  schedule:
-    - cron: '30 10 * * *'
+  workflow_run:
+    workflows: ["Odds ETL"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       mode:
@@ -30,6 +40,10 @@ env:
 
 jobs:
   grade:
+    # For workflow_run trigger: only run if odds ETL succeeded
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: [self-hosted, schnapp-runner]
     timeout-minutes: 350
     outputs:
@@ -53,9 +67,7 @@ jobs:
 
           if [ "$MODE" != "backfill" ]; then
             ARGS="--mode upcoming"
-            if [ -n "$DATE_INPUT" ]; then
-              ARGS="$ARGS --date $DATE_INPUT"
-            fi
+            [ -n "$DATE_INPUT" ] && ARGS="$ARGS --date $DATE_INPUT"
             python grading/grade_props.py $ARGS
             echo "done=true" >> $GITHUB_OUTPUT
             exit 0
@@ -64,28 +76,17 @@ jobs:
           START_SECONDS=$SECONDS
           TIME_LIMIT_SECONDS=$(( TIME_LIMIT_MINUTES * 60 ))
           DONE="false"
-
           echo "Backfill mode. Batch=$BATCH  Limit=${TIME_LIMIT_MINUTES}min"
 
           while true; do
             ELAPSED=$(( SECONDS - START_SECONDS ))
             REMAINING=$(( TIME_LIMIT_SECONDS - ELAPSED ))
-
-            if [ $REMAINING -le 60 ]; then
-              echo "Approaching time limit. Exiting cleanly."
-              break
-            fi
+            [ $REMAINING -le 60 ] && { echo "Approaching time limit. Exiting."; break; }
 
             ARGS="--mode backfill --batch $BATCH"
-            if [ -n "$DATE_INPUT" ]; then
-              ARGS="$ARGS --date $DATE_INPUT"
-            fi
+            [ -n "$DATE_INPUT" ] && ARGS="$ARGS --date $DATE_INPUT"
 
-            OUTPUT=$(python grading/grade_props.py $ARGS 2>&1) || {
-              echo "$OUTPUT"
-              exit 1
-            }
-
+            OUTPUT=$(python grading/grade_props.py $ARGS 2>&1) || { echo "$OUTPUT"; exit 1; }
             echo "$OUTPUT"
 
             if echo "$OUTPUT" | grep -q "Backfill: nothing to do."; then
@@ -102,7 +103,7 @@ jobs:
     runs-on: [self-hosted, schnapp-runner]
     if: always() && github.event.inputs.mode == 'backfill'
     steps:
-      - name: Re-dispatch if backfill is incomplete
+      - name: Re-dispatch if backfill incomplete
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DONE:               ${{ needs.grade.outputs.done }}
@@ -110,8 +111,8 @@ jobs:
           TIME_LIMIT_MINUTES: ${{ github.event.inputs.time_limit_minutes || '300' }}
           DATE_INPUT:         ${{ github.event.inputs.date              || '' }}
         run: |
-          if [ "${{ needs.grade.result }}" = "cancelled" ]; then exit 0; fi
-          if [ "$DONE" = "true" ]; then exit 0; fi
+          [ "${{ needs.grade.result }}" = "cancelled" ] && exit 0
+          [ "$DONE" = "true" ] && exit 0
           gh workflow run grading.yml \
             --repo "${{ github.repository }}" \
             --ref "${{ github.ref_name }}" \

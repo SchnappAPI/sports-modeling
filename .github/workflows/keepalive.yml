@@ -1,18 +1,20 @@
 name: DB Keep-Alive
 
+# RETIRED: schedule removed. DB keep-alive is now handled by Uptime Robot
+# hitting https://schnapp.bet/api/ping every 30 minutes, which is faster,
+# free, and does not consume GitHub Actions runner minutes.
+# This workflow is kept for manual dispatch only as a diagnostic tool.
+
 on:
-  schedule:
-    # Every 45 minutes from 10:00 to 05:00 UTC (covers 5am-midnight CT)
-    - cron: '0,45 10-23 * * *'
-    - cron: '0,45 0-5 * * *'
+  workflow_dispatch:
 
 jobs:
   ping:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, schnapp-runner]
     steps:
       - name: Ping web app to wake database
         run: |
           curl -sf -o /dev/null \
-            "https://red-smoke-0bbe1fb10.2.azurestaticapps.net/api/ping" \
+            "https://schnapp.bet/api/ping" \
             && echo "Ping succeeded" \
             || echo "Ping failed (non-fatal)"

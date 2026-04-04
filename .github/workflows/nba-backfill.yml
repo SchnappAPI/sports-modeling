@@ -1,0 +1,42 @@
+name: NBA Backfill
+
+# Triggered automatically by nba-game-day.yml when a game flips to Final
+# with no existing grade rows. Also available for manual dispatch.
+# Runs independently so it does not compete with live score updates.
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "ET game date to backfill (YYYY-MM-DD)"
+        required: false
+        default: ""
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+  ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
+
+jobs:
+  backfill:
+    runs-on: [self-hosted, schnapp-runner]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Backfill odds + mappings + grades
+        run: |
+          DATE="${{ github.event.inputs.date }}"
+          python etl/odds_etl.py --mode backfill --sport nba --games 5
+          python etl/odds_etl.py --mode mappings --sport nba
+          if [ -n "$DATE" ]; then
+            python grading/grade_props.py --mode backfill --date "$DATE"
+          else
+            python grading/grade_props.py --mode backfill --batch 5
+          fi
