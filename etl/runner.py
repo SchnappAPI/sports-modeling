@@ -12,6 +12,8 @@ CDN endpoint: https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_i
 Top-level key: "game" (not "boxScoreTraditional")
 statistics: single dict per player (cumulative), not a list
 
+Response includes: gameStatusText, homeScore, awayScore, homeTeamAbbr, awayTeamAbbr, players[]
+
 Start manually:  source ~/venv/bin/activate && python etl/runner.py
 Managed by:      systemd (schnapp-flask.service)
 Port:            5000
@@ -89,8 +91,11 @@ def boxscore():
     if not game:
         return jsonify({"error": "Unexpected CDN response shape"}), 502
 
+    home_team = game.get("homeTeam", {})
+    away_team = game.get("awayTeam", {})
+
     players = []
-    for team in [game.get("homeTeam"), game.get("awayTeam")]:
+    for team in [home_team, away_team]:
         if not team:
             continue
         team_id   = int(team.get("teamId", 0))
@@ -124,6 +129,10 @@ def boxscore():
     return jsonify({
         "gameId":         game_id,
         "gameStatusText": str(game.get("gameStatusText", "")),
+        "homeTeamAbbr":   str(home_team.get("teamTricode", "")),
+        "awayTeamAbbr":   str(away_team.get("teamTricode", "")),
+        "homeScore":      int(home_team.get("score", 0) or 0),
+        "awayScore":      int(away_team.get("score", 0) or 0),
         "players":        players,
     })
 
