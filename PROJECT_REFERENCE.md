@@ -11,7 +11,7 @@
 
 ---
 
-## Current State (updated 2026-04-03)
+## Current State (updated 2026-04-04)
 
 **What is working:**
 - NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, pre-game refresh, Refresh Lines all running.
@@ -24,6 +24,9 @@
 - Today's Props: horizontal strip of market cells, tappable to expand dot plot + alt lines panel. Full-width SVG dot plot (preserveAspectRatio=none). Alt lines show two-row detail (odds + hit rates). Default min odds filter on At a Glance set to -600.
 - Roster tab: badge logic fixed (Confirmed/Projected/Expected). Inactive players shown in separate dimmed section.
 - StatsTable: 3PT column split into 3PM and 3PA (separate columns in All Stats, 3PM only in compact).
+- **Self-hosted runner live:** `schnapp-runner` Azure VM (West US 2, B2s_v2) running as permanent GitHub Actions runner. All active workflows use it. ETL runs in ~25 seconds vs 2-4 minutes previously.
+- **Uptime Robot active:** pings `https://schnapp.bet/api/ping` every 30 minutes. Replaces keepalive.yml schedule.
+- **All workflow improvements shipped:** DB-timestamp gate (replaces run_number % 3), grading triggers on odds completion (not hardcoded delay), backfill isolated to nba-backfill.yml, requirements.txt pinned.
 
 **Known issues:**
 - `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
@@ -31,19 +34,22 @@
 - Odds/grading backfill gap — pre-April 2026 dates still being backfilled by nightly chain.
 - NFL workflow missing — `nfl_etl.py` exists, `nfl-etl.yml` does not.
 - NFL and MLB `run_mappings` not implemented in odds_etl.py — only NBA branch exists.
-- Auto-pause delay locked — free database offer prevents changing it. Keep-alive workflow mitigates.
+- Auto-pause delay locked — free database offer prevents changing it. Uptime Robot mitigates.
 - PNG icons not generated — SVG covers all modern browsers; generate via `web/scripts/generate-icons.mjs` if needed.
 - VS Defense does not show combo market columns (PRA/PR/PA/RA) — requires extending `/api/contextual` query. Deferred.
 - Not all players' props load on player page — if a player has no rows in `common.daily_grades` for today, section correctly returns null. Investigate if a specific player should have grades but doesn't.
 - Game log prop coloring may use wrong line if an alt line appears in `gradeMap` before the standard line — `gradeMap` takes the first `marketKey` hit per game per market. Investigate with Naz Reid 4-02 example (3PT showed 4-9 red — suspect alt line with value >4 in the map).
 - `dev` branch has a stale merge conflict on `PlayerPageInner.tsx`. Close PR #29 without merging.
 - Today's Props dot plot revisit deferred — Austin wants to explore a bell-curve distribution plot as an alternative.
+- VM resize pending — currently B2s_v2 (~$60/month) on free trial credits. Downsize to B1s_v2 (~$15-20/month) after trial credits expire.
 
 **Next up:**
 - PlayerPageInner.tsx: (1) Move All Stats toggle to the period filter bar. (2) Add vs Opp filter button to period filter bar. (3) Fix game log prop coloring bug — gradeMap should prefer standard line over alt line. (4) Make date/opp cells in game log link to that game's box score. (5) Fix Today's Props strip header cell when `standardLines` is empty — promote lowest alt line as display line instead of showing nothing. (6) Alt lines in panel: side-by-side chips in a fixed-height scrollable row, not stacked.
 - New page: VS Defense dashboard at `/nba/defense` — sortable table of all 30 teams × position × stat defense ranks. Clicking a row opens filtered player list. New API endpoint needed.
 - Step 15: MLB ETL and web views.
 - Step 16: NFL ETL automation and web views.
+- Re-enable PasscodeGate (`BYPASS = false`) before sharing app with users.
+- Downsize schnapp-runner VM to B1s_v2 after free trial credits expire.
 
 ---
 
@@ -57,14 +63,29 @@
 - Connection: SQLAlchemy + pyodbc, ODBC Driver 18. `fast_executemany=True` except grading engine uses `False` (prevents NVARCHAR(MAX) truncation).
 - Retry: 3 attempts, 45s wait
 - MSSQL MCP (`mssql-mcp:ExecuteSql`): available on VM only. ThreatLocker blocks it on corporate machine.
-- Keep-alive: `keepalive.yml` pings `/api/ping` every 45 min UTC 10:00–05:00
+- Keep-alive: Uptime Robot pings `https://schnapp.bet/api/ping` every 30 min. `keepalive.yml` is now dispatch-only.
 
-### GitHub Actions
+### GitHub Actions / Runner
 - Repo: `SchnappAPI/sports-modeling` (private)
-- All automated Python runs here. Cannot run locally (ThreatLocker) or scheduled from VM (auto-logout).
-- Runners: ephemeral ubuntu-latest. ODBC Driver 18 + pip deps installed fresh each run.
-- Secrets: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD`, `NBA_PROXY_URL`, `ODDS_API_KEY`, `AZURE_STATIC_WEB_APPS_API_TOKEN_RED_SMOKE_0BBE1FB10`
+- **Self-hosted runner:** `schnapp-runner` Azure VM (West US 2, Standard B2s_v2, Ubuntu 24.04). IP: `20.109.181.21`. Admin: `schnapp-admin` / `Sports#2026VM`.
+- Runner service: systemd, starts on boot, always online. Python venv at `~/venv` with pinned deps pre-installed. ODBC Driver 18 pre-installed.
+- All active workflows use `runs-on: [self-hosted, schnapp-runner]`. No ODBC or pip install steps in any workflow.
+- After trial: downsize VM to B1s_v2 (~$15-20/month). Resize via Azure Portal, no data loss.
+- Secrets: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD`, `NBA_PROXY_URL`, `ODDS_API_KEY`, `AZURE_STATIC_WEB_APPS_API_TOKEN_RED_SMOKE_0BBE1FB10`, `GITHUB_PAT`
 - Always fetch file SHA before `create_or_update_file`. Use `push_files` for multi-file atomic commits.
+
+### Active Workflows
+| Workflow | Trigger | Purpose |
+|----------|---------|--------|
+| `nba-game-day.yml` | Every 5 min UTC 16-23 + 0-6 | Live scores, odds refresh, grading, lineup poll |
+| `nba-etl.yml` | Daily UTC 09:00 | Box scores, PT stats, schedule, rosters |
+| `odds-etl.yml` | Daily UTC 10:00 | Today's FanDuel lines |
+| `grading.yml` | After odds-etl succeeds (workflow_run) | Grade today's props |
+| `nba-backfill.yml` | Dispatched by nba-game-day when game goes Final | Odds + grade backfill for completed games |
+| `refresh-lines.yml` | POST /api/refresh-lines from web app | Manual odds + grade refresh |
+
+### Retired Workflows (dispatch-only)
+`pregame-refresh.yml`, `nba-live.yml`, `lineup-poll.yml` — kept for manual one-off runs only. Do not re-add schedules.
 
 ### Azure Static Web Apps
 - Resource: `sports-modeling-web` / URL: `https://red-smoke-0bbe1fb10.2.azurestaticapps.net`
@@ -145,8 +166,8 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 - Players: `playerindex` via proxy
 
 ### NBA Live ETL
-- `etl/nba_live.py` — gate: `game_status = 2`. ScoreboardV3 → scores, BoxScoreTraditionalV3 → stats.
-- Workflow: `nba-live.yml` — every 5 min UTC 17:00–06:00
+- `etl/nba_live.py` — two-phase: `update_schedule()` always runs (ScoreboardV3), `update_box_scores()` gates on status=2.
+- Workflow: `nba-game-day.yml` — every 5 min UTC 16:00–06:00
 
 ### Odds ETL
 - Modes: `discover`, `probe`, `backfill`, `mappings`, `upcoming`
@@ -154,13 +175,8 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 
 ### Lineup Poll
 - `etl/lineup_poll.py` — standalone, does NOT import nba_etl.py (top-level argparse would trigger)
-- Workflow: `lineup-poll.yml` — every 15 min UTC 16:00–03:59
+- Runs inside `nba-game-day.yml` odds+grading step every ~15 min when games are active
 - `starter_status` values: 'Starter' (has position field), 'Inactive' (lineupStatus contains out/inactive/not with team/gtd), 'Bench' (Active roster, no position, not inactive)
-
-### Pre-Game Refresh
-- `pregame-refresh.yml` — every 30 min UTC 14:00–03:30
-- Gate: `etl/gate_check.py` queries `nba.schedule` for today's games with `game_status IN (1,2)`. Prints `true`/`false`.
-- When gate passes: odds_etl upcoming → grade_props intraday.
 
 ### Refresh Lines
 - `refresh-lines.yml` — triggered by POST to `/api/refresh-lines` via GITHUB_PAT in SWA app settings.
@@ -239,7 +255,7 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 - Over/Under toggle filters on `r.outcomeName`.
 
 ### API Routes
-- `/api/ping` — public (anonymous). SELECT 1. Used by keep-alive.
+- `/api/ping` — public (anonymous). SELECT 1. Used by Uptime Robot for DB keep-alive.
 - `/api/grades?date=&gameId=` — reads `dg.outcome_name` + `dg.over_price` directly
 - `/api/team-averages` — returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`, `avgFtm`, `avgFta` plus standard stats
 - `/api/contextual?oppTeamId=&position=` — defense ranks. Rank 1 = most allowed.
@@ -292,3 +308,10 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | At a Glance default min odds -600 | Filters out extreme chalk lines (-800, -1000, -5000) that have no betting value. Slider reaches -1000. |
 | RosterTable badge: Confirmed only when lineupStatus=Confirmed | Old logic showed Confirmed whenever lineup wasn't Projected, including null (not-yet-confirmed). |
 | StatsTable 3PM/3PA split into separate columns | Made-att ratio in compact was not useful; plain averages in separate columns are more readable. |
+| Self-hosted runner on Azure VM | Eliminates 25-40s ODBC install overhead per run. ETL drops from 2-4 min to ~25 seconds. No local machine dependency. Low-latency to Azure SQL. |
+| Uptime Robot replaces keepalive.yml | Free, no runner minutes consumed, simpler than a workflow for an HTTP ping. |
+| DB-timestamp gate replaces run_number % 3 | Drift-proof: checks actual time since last grade instead of a counter that shifts with manual dispatches. |
+| grading.yml uses workflow_run trigger | Grading starts immediately after odds finishes, not after a fixed 30-min buffer that can be wrong in both directions. |
+| Backfill isolated to nba-backfill.yml | Prevents expensive backfill competing with live score bandwidth in the same 12-min job window. |
+| requirements.txt pinned to exact versions | Prevents silent breakage from upstream package releases. |
+| VM B2s_v2 initially, downsize to B1s_v2 after trial | Free trial credits cover B2s_v2; B1s_v2 (~$15-20/month) is sufficient for I/O-bound ETL workloads. |

@@ -9,6 +9,64 @@
 
 ---
 
+## 2026-04-04 (session 3)
+
+### Infra | Azure VM — self-hosted GitHub Actions runner provisioned
+- Created `schnapp-runner` Azure VM: Standard B2s_v2 (2 vCPU, 8 GB RAM), Ubuntu 24.04, West US 2, resource group `sports-modeling`.
+- Public IP: `20.109.181.21`. Admin user: `schnapp-admin`.
+- Installed permanently: ODBC Driver 18, Python 3.11, venv at `~/venv` with all pinned deps.
+- GitHub Actions runner registered as systemd service — starts automatically on reboot, survives indefinitely without any local machine dependency.
+- Runner label: `schnapp-runner`. Status: Idle/Online confirmed in GitHub Settings > Runners.
+- Motivation: eliminate 25-40s ODBC install overhead on every run, reduce ETL from 2-4 min to ~25 seconds, remove dependency on local machine being on/connected.
+
+### Infra | .github/workflows — all active workflows switched to self-hosted runner
+- Changed `runs-on: ubuntu-latest` to `runs-on: [self-hosted, schnapp-runner]` in: `nba-etl.yml`, `grading.yml`, `odds-etl.yml`, `nba-game-day.yml`, `refresh-lines.yml`.
+- Removed ODBC Driver 18 install step and pip install step from all five workflows.
+- Added `echo "$HOME/venv/bin" >> $GITHUB_PATH` step to activate the pre-installed venv.
+- Result: NBA ETL confirmed running in 25 seconds vs 2-4 minutes previously.
+
+### Infra | etl/requirements.txt — pinned all package versions
+- Pinned: `sqlalchemy==2.0.49`, `pyodbc==5.3.0`, `pandas==3.0.2`, `numpy==2.4.4`, `requests==2.33.1`, `nba_api==1.11.4`.
+- Prevents silent breakage from upstream package releases.
+
+### Infra | etl/game_day_gate.py — replaced run_number % 3 with DB-timestamp gate
+- Added `run_odds_grading` output: `true` if >= 14 minutes have elapsed since the last grade row was written to `common.daily_grades` for today.
+- Replaces the fragile `run_number % 3` throttle which drifted whenever manual dispatches incremented the counter by a non-multiple of 3.
+- New approach is drift-proof and self-healing — the gate checks actual DB state, not a counter.
+- `nba-game-day.yml` now uses `steps.gate.outputs.run_odds_grading == 'true'` instead of `run_mod == '0'`.
+- The `run_mod` output and `MOD=$((...))` line are fully removed from the workflow.
+
+### Infra | .github/workflows/nba-game-day.yml — backfill moved to separate dispatch
+- Backfill step (odds backfill + mappings + grade backfill for newly-final games) is no longer inline in `nba-game-day.yml`.
+- Instead dispatches `nba-backfill.yml` via `gh workflow run` when `has_final=true`.
+- Rationale: backfill is expensive and only needs to run once per game per night. Running it inline competed with live score update bandwidth during the same 12-minute job window.
+- Requires `GITHUB_PAT` secret with `workflow` scope in SWA app settings (already present).
+
+### Infra | .github/workflows/nba-backfill.yml — NEW dedicated backfill workflow
+- Created `nba-backfill.yml`. Runs on `[self-hosted, schnapp-runner]`.
+- Triggered by `nba-game-day.yml` dispatch or manual `workflow_dispatch` with optional `date` input.
+- Runs: `odds_etl backfill --games 5`, `odds_etl mappings`, `grade_props backfill --date <date>`.
+- 30-minute timeout. Independent from live game-day cycle.
+
+### Infra | .github/workflows/grading.yml — workflow_run trigger replaces hardcoded 30-min delay
+- Added `workflow_run` trigger: fires automatically when `Odds ETL` completes with `conclusion == 'success'`.
+- Removed the hardcoded timing dependency (odds at 10:00 UTC, grading at 10:30 UTC).
+- Grading now starts immediately after odds finishes regardless of how long odds takes.
+- If odds fails, grading does not fire (correct behavior — no point grading stale lines).
+- Manual `workflow_dispatch` still works for backfill and one-off runs.
+
+### Infra | .github/workflows/keepalive.yml — schedule removed, replaced by Uptime Robot
+- Removed all `schedule` triggers from `keepalive.yml`. Now dispatch-only diagnostic tool.
+- DB keep-alive replaced by Uptime Robot (free) hitting `https://schnapp.bet/api/ping` every 30 minutes.
+- Eliminates ~48 unnecessary GitHub Actions runner-minutes per day.
+- Do not re-add schedule to keepalive.yml — Uptime Robot owns this function now.
+
+### UI | web/components/PasscodeGate.tsx — BYPASS constant restored
+- Re-added `const BYPASS = true` with guard in `verify()` and initial state defaulting to `'authed'` when true.
+- The previous version had silently dropped the BYPASS constant in a refactor. Set to `false` to re-enable the passcode gate before sharing with users.
+
+---
+
 ## 2026-04-04 (session 2)
 
 ### Infra | .github/workflows/nba-game-day.yml — NEW consolidated intra-day workflow
