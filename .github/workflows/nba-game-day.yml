@@ -1,0 +1,122 @@
+name: NBA Game Day
+
+# Consolidated intra-day workflow. Runs every 5 minutes during game hours.
+# Replaces: nba-live.yml, pregame-refresh.yml, lineup-poll.yml (intra-day).
+#
+# Every cycle (5 min):
+#   1. game_day_gate.py  -- query schedule, output has_pregame / has_live /
+#                           has_final / any_active flags
+#   2. nba_live.py       -- ALWAYS: update schedule status+scores via ScoreboardV3
+#                           GATED:  update box scores for in-progress games
+#
+# Every third cycle (~15 min), when any game is pre-game or live:
+#   3. odds_etl upcoming -- refresh FanDuel lines for today
+#   4. grade_props intraday -- re-grade any moved standard lines
+#   5. lineup_poll      -- fetch lineups
+#
+# When a game goes final and no grades exist for that date:
+#   6. odds_etl backfill (for that game date) + grade_props backfill
+#
+# Disabled: pregame-refresh.yml, nba-live.yml schedules (kept dispatch-only).
+# Kept:     odds-etl.yml nightly upcoming + grading.yml nightly backfill.
+
+on:
+  schedule:
+    # Every 5 minutes, noon ET (16:00 UTC) through 2:00 AM ET (06:00 UTC)
+    - cron: '*/5 16-23 * * *'
+    - cron: '*/5 0-6  * * *'
+  workflow_dispatch:
+    inputs:
+      skip_gate:
+        description: "Skip gate checks and run all steps"
+        required: false
+        default: "false"
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+  ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
+  NBA_PROXY_URL:      ${{ secrets.NBA_PROXY_URL }}
+
+jobs:
+  game-day:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install ODBC Driver 18
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y curl gnupg apt-transport-https
+          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
+            | gpg --dearmor --batch --yes --no-tty \
+            | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
+          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list
+          sudo apt-get update -q
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
+
+      - name: Install Python dependencies
+        run: pip install -r etl/requirements.txt
+
+      # -----------------------------------------------------------------------
+      # Gate: determine what's happening today
+      # -----------------------------------------------------------------------
+      - name: Game day gate
+        id: gate
+        run: python etl/game_day_gate.py
+
+      # -----------------------------------------------------------------------
+      # Step 1: Update schedule status + live box scores (always)
+      # nba_live.py: unconditionally calls ScoreboardV3 to sync status/scores,
+      # then gates internally on game_status=2 for box score upserts.
+      # -----------------------------------------------------------------------
+      - name: Schedule status + live box score
+        if: steps.gate.outputs.has_pregame == 'true' || steps.gate.outputs.has_live == 'true' || github.event.inputs.skip_gate == 'true'
+        run: python etl/nba_live.py
+
+      # -----------------------------------------------------------------------
+      # Step 2: Odds refresh + intraday grading (~every 15 min)
+      # Only when pre-game or live games exist.
+      # GitHub cron fires every 5 min; GITHUB_RUN_NUMBER mod 3 approximates
+      # every-15-min without a separate workflow.
+      # -----------------------------------------------------------------------
+      - name: Odds upcoming + intraday grading
+        if: |
+          (steps.gate.outputs.any_active == 'true' || github.event.inputs.skip_gate == 'true') &&
+          (github.event_name == 'workflow_dispatch' || fromJSON(env.RUN_MOD) == 0)
+        env:
+          RUN_MOD: ${{ github.run_number % 3 }}
+        run: |
+          python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
+          python grading/grade_props.py --mode intraday
+
+      # -----------------------------------------------------------------------
+      # Step 3: Lineup poll (when any game is pre-game or live)
+      # -----------------------------------------------------------------------
+      - name: Lineup poll
+        if: steps.gate.outputs.any_active == 'true' || github.event.inputs.skip_gate == 'true'
+        run: python etl/lineup_poll.py --hours-ahead 6
+
+      # -----------------------------------------------------------------------
+      # Step 4: Backfill odds + grades for newly-final games
+      # Runs when gate detects status=3 games with no grade rows yet.
+      # -----------------------------------------------------------------------
+      - name: Backfill odds for newly-final games
+        if: steps.gate.outputs.has_final == 'true' || github.event.inputs.skip_gate == 'true'
+        run: |
+          DATE="${{ steps.gate.outputs.final_date }}"
+          if [ -n "$DATE" ]; then
+            python etl/odds_etl.py --mode backfill --sport nba --games 5
+            python etl/odds_etl.py --mode mappings --sport nba
+            python grading/grade_props.py --mode backfill --date "$DATE"
+          fi

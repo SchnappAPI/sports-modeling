@@ -1,26 +1,21 @@
 """
 nba_live.py
 
-Intra-day live box score updater for the sports modeling database.
-Runs every 5 minutes during game hours via nba-live.yml.
+Intra-day NBA updater. Called by nba-game-day.yml on every cycle.
 
-Design
-------
-Gate:   Queries nba.schedule for games with game_status = 2 (in progress).
-        Exits immediately if none found.
-Fetch:  Calls BoxScoreTraditionalV3 for each in-progress game via proxy.
-        This endpoint returns current cumulative stats for all periods
-        that have completed or are in progress.
-Write:  Upserts into nba.player_box_score_stats using the same schema
-        as the nightly ETL. Existing rows are overwritten in place.
-        The nightly ETL will do a final clean write once games complete.
+Two responsibilities:
+  1. update_schedule()  -- Always runs. Calls ScoreboardV3 to sync
+                           game_status / scores for ALL today's games.
+                           This is what flips status 1->2->3 in the DB.
 
-Note on periods
----------------
-BoxScoreTraditionalV3 returns one row per player per period played so far.
-Period labels in the response are integers (1, 2, 3, 4, 5+).
-We map: 1->1Q, 2->2Q, 3->3Q, 4->4Q, 5+->OT.
-Only these five labels are stored; any OT period collapses into OT.
+  2. update_box_scores() -- Gates on game_status=2 (in-progress).
+                            Calls BoxScoreTraditionalV3 for each live game
+                            and upserts per-period stats.
+
+The schedule update MUST run unconditionally so that:
+  - Pre-game status (1) flips to live (2) when tip-off happens.
+  - Live (2) flips to final (3) when the game ends.
+  - The nba-game-day.yml workflow can gate subsequent steps on these values.
 
 Proxy
 -----
@@ -30,8 +25,8 @@ Secret: NBA_PROXY_URL.
 
 import os
 import sys
+import re
 import time
-import math
 import logging
 from datetime import date
 
@@ -39,7 +34,6 @@ import pandas as pd
 import requests
 from sqlalchemy import text
 
-# Re-use shared helpers from nba_etl.py
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from etl.nba_etl import (
@@ -67,25 +61,7 @@ PERIOD_MAP = {1: "1Q", 2: "2Q", 3: "3Q", 4: "4Q"}
 
 
 # ---------------------------------------------------------------------------
-# Gate: find in-progress games
-# ---------------------------------------------------------------------------
-
-def get_live_game_ids(engine):
-    """Return list of game_ids currently in progress (game_status = 2)."""
-    today = date.today()
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT game_id FROM nba.schedule "
-                "WHERE game_date = :today AND game_status = 2"
-            ),
-            {"today": today},
-        ).fetchall()
-    return [str(r[0]) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Fetch BoxScoreTraditionalV3
+# HTTP helper
 # ---------------------------------------------------------------------------
 
 def _request(url, params, label):
@@ -111,19 +87,96 @@ def _request(url, params, label):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Step 1: Update schedule status and scores (always runs)
+# ---------------------------------------------------------------------------
+
+def update_schedule(engine):
+    """
+    Call ScoreboardV3 for today and update game_status, game_status_text,
+    home_score, and away_score for every game in nba.schedule.
+    Runs unconditionally — this is what drives status transitions.
+    """
+    today  = date.today()
+    url    = "https://stats.nba.com/stats/scoreboardv3"
+    params = {"GameDate": today.strftime("%m/%d/%Y"), "LeagueID": "00"}
+    data   = _request(url, params, f"ScoreboardV3 {today}")
+    if data is None:
+        log.warning("ScoreboardV3 call failed — schedule not updated this cycle.")
+        return 0
+
+    try:
+        games = data["scoreboard"]["games"]
+    except (KeyError, TypeError) as exc:
+        log.warning(f"ScoreboardV3 unexpected shape: {exc}")
+        return 0
+
+    updated = 0
+    with engine.begin() as conn:
+        for g in games:
+            gid  = safe_str(g.get("gameId"))
+            if not gid:
+                continue
+            home = g.get("homeTeam", {})
+            away = g.get("awayTeam", {})
+            conn.execute(
+                text(
+                    "UPDATE nba.schedule "
+                    "SET home_score = :hs, away_score = :as, "
+                    "    game_status = :gs, game_status_text = :gst "
+                    "WHERE game_id = :gid"
+                ),
+                {
+                    "hs":  safe_int(home.get("score")),
+                    "as":  safe_int(away.get("score")),
+                    "gs":  safe_int(g.get("gameStatus")),
+                    "gst": safe_str(g.get("gameStatusText")),
+                    "gid": gid,
+                },
+            )
+            updated += 1
+    log.info(f"Schedule updated for {updated} game(s).")
+    return updated
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Live box score (gates on game_status = 2)
+# ---------------------------------------------------------------------------
+
+def get_live_game_ids(engine):
+    today = date.today()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT game_id FROM nba.schedule "
+                "WHERE game_date = :today AND game_status = 2"
+            ),
+            {"today": today},
+        ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def _parse_minutes(clock_str):
+    if not clock_str:
+        return None
+    m = re.match(r"PT(\d+)M([\d.]+)S", clock_str)
+    if not m:
+        return None
+    try:
+        return round(int(m.group(1)) + float(m.group(2)) / 60, 4)
+    except (ValueError, TypeError):
+        return None
+
+
 def fetch_live_box_score(game_id):
-    """
-    Fetch BoxScoreTraditionalV3 for a single game_id.
-    Returns a list of row dicts ready for upsert, or empty list.
-    """
-    url = "https://stats.nba.com/stats/boxscoretraditionalv3"
+    url    = "https://stats.nba.com/stats/boxscoretraditionalv3"
     params = {
-        "GameID":       game_id,
-        "StartPeriod":  0,
-        "EndPeriod":    0,
-        "StartRange":   0,
-        "EndRange":     0,
-        "RangeType":    0,
+        "GameID":      game_id,
+        "StartPeriod": 0,
+        "EndPeriod":   0,
+        "StartRange":  0,
+        "EndRange":    0,
+        "RangeType":   0,
     }
     data = _request(url, params, f"BoxScoreTraditionalV3 {game_id}")
     if data is None:
@@ -142,19 +195,16 @@ def fetch_live_box_score(game_id):
     for team_obj in (home_team, away_team):
         team_id      = safe_int(team_obj.get("teamId"))
         team_tricode = safe_str(team_obj.get("teamTricode"))
-
         for player_obj in team_obj.get("players", []):
             pid   = safe_int(player_obj.get("personId"))
             pname = safe_str(player_obj.get("name"))
             if pid is None:
                 continue
-
             for period_stats in player_obj.get("statistics", []):
                 period_num = safe_int(period_stats.get("period"))
                 if period_num is None:
                     continue
                 period_label = PERIOD_MAP.get(period_num, "OT")
-
                 s = period_stats
                 rows.append({
                     "game_id":        game_id,
@@ -196,88 +246,14 @@ def fetch_live_box_score(game_id):
     return rows
 
 
-def _parse_minutes(clock_str):
-    if not clock_str:
-        return None
-    import re
-    m = re.match(r'PT(\d+)M([\d.]+)S', clock_str)
-    if not m:
-        return None
-    try:
-        minutes = int(m.group(1))
-        seconds = float(m.group(2))
-        return round(minutes + seconds / 60, 4)
-    except (ValueError, TypeError):
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Update nba.schedule scores via ScoreboardV3
-# ---------------------------------------------------------------------------
-
-def update_live_schedule(engine, game_id):
-    url    = "https://stats.nba.com/stats/scoreboardv3"
-    params = {"GameDate": date.today().strftime("%m/%d/%Y"), "LeagueID": "00"}
-    data   = _request(url, params, f"ScoreboardV3 {date.today()}")
-    if data is None:
-        return
-
-    try:
-        games = data["scoreboard"]["games"]
-    except (KeyError, TypeError):
-        return
-
-    rows = []
-    for g in games:
-        gid = safe_str(g.get("gameId"))
-        if gid is None:
-            continue
-        home = g.get("homeTeam", {})
-        away = g.get("awayTeam", {})
-        rows.append({
-            "game_id":          gid,
-            "game_status":      safe_int(g.get("gameStatus")),
-            "game_status_text": safe_str(g.get("gameStatusText")),
-            "home_score":       safe_int(home.get("score")),
-            "away_score":       safe_int(away.get("score")),
-        })
-
-    if not rows:
-        return
-
-    with engine.begin() as conn:
-        for row in rows:
-            conn.execute(
-                text(
-                    "UPDATE nba.schedule "
-                    "SET home_score = :hs, away_score = :as, "
-                    "    game_status = :gs, game_status_text = :gst "
-                    "WHERE game_id = :gid"
-                ),
-                {"hs": row["home_score"], "as": row["away_score"],
-                 "gs": row["game_status"], "gst": row["game_status_text"],
-                 "gid": row["game_id"]},
-            )
-    log.info(f"  Schedule scores updated for {len(rows)} game(s).")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main():
-    engine = get_engine()
-
+def update_box_scores(engine):
     live_ids = get_live_game_ids(engine)
     if not live_ids:
-        log.info("Gate: no in-progress games. Nothing to do.")
-        return
+        log.info("No in-progress games — box score update skipped.")
+        return 0
 
-    log.info(f"Gate: {len(live_ids)} in-progress game(s): {live_ids}")
-
-    update_live_schedule(engine, live_ids[0])
-
-    total_rows = 0
+    log.info(f"{len(live_ids)} in-progress game(s): {live_ids}")
+    total = 0
     for game_id in live_ids:
         rows = fetch_live_box_score(game_id)
         if not rows:
@@ -289,9 +265,23 @@ def main():
             ["game_id", "player_id", "period"],
         )
         log.info(f"  {game_id}: {len(rows)} rows upserted.")
-        total_rows += len(rows)
+        total += len(rows)
+    return total
 
-    log.info(f"Live update complete. {total_rows} total rows upserted.")
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    engine = get_engine()
+
+    # Step 1: always update schedule status/scores
+    update_schedule(engine)
+
+    # Step 2: update live box scores if any games are in progress
+    total = update_box_scores(engine)
+    log.info(f"Live update complete. {total} box score rows upserted.")
 
 
 if __name__ == "__main__":

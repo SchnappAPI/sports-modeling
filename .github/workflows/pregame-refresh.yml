@@ -1,19 +1,9 @@
-name: Pre-Game Refresh
+name: Pre-Game Refresh (RETIRED)
 
-# Runs every 30 minutes from 10:00 AM ET (UTC 14:00) through 11:00 PM ET (UTC 03:00).
-# Chains odds ETL (upcoming) then grading in intraday mode.
-#
-# Intraday grading only re-grades standard lines where the posted line has
-# moved since the last grade. Alternate lines are never re-graded intraday.
-#
-# Game gate: etl/gate_check.py queries nba.schedule for any non-final game
-# starting within 3 hours. If none qualify, both ETL steps are skipped.
-# This avoids burning Odds API quota on days with no upcoming games.
+# Retired 2026-04-04. Replaced by nba-game-day.yml.
+# Kept as dispatch-only for manual one-off runs.
 
 on:
-  schedule:
-    - cron: '0,30 14-23 * * *'   # UTC 14:00-23:30 (10:00 AM-7:30 PM ET)
-    - cron: '0,30 0-3  * * *'    # UTC 00:00-03:30 (8:00-11:30 PM ET)
   workflow_dispatch:
     inputs:
       skip_gate:
@@ -33,11 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install ODBC Driver 18
         run: |
           sudo apt-get update -q
@@ -49,27 +37,21 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update -q
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
       - name: Install Python dependencies
         run: pip install -r etl/requirements.txt
-
       - name: Check game window gate
         id: gate
         run: |
           SKIP="${{ github.event.inputs.skip_gate }}"
           if [ "$SKIP" = "true" ]; then
-            echo "Gate bypassed via workflow_dispatch."
             echo "run=true" >> $GITHUB_OUTPUT
             exit 0
           fi
           RESULT=$(python etl/gate_check.py)
-          echo "Gate result: $RESULT"
           echo "run=$RESULT" >> $GITHUB_OUTPUT
-
       - name: Run odds ETL (upcoming)
         if: steps.gate.outputs.run == 'true'
         run: python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
-
-      - name: Run grading (intraday -- moved standard lines only)
+      - name: Run grading (intraday)
         if: steps.gate.outputs.run == 'true'
         run: python grading/grade_props.py --mode intraday

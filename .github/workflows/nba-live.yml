@@ -1,17 +1,13 @@
-name: NBA Live Box Score
+name: NBA Live Box Score (RETIRED)
+
+# Retired 2026-04-04. Replaced by nba-game-day.yml.
+# Kept as dispatch-only for manual one-off runs.
 
 on:
-  schedule:
-    # Every 2 minutes UTC 17:00-06:00 (noon-1am ET, covers all tip times).
-    # GHA cron minimum resolution is 5 minutes — use */2 which GHA rounds up
-    # to every 5 min in practice, but declare intent clearly for future reference.
-    # Two entries to span midnight UTC.
-    - cron: '*/2 17-23 * * *'
-    - cron: '*/2 0-6 * * *'
   workflow_dispatch:
     inputs:
       force:
-        description: 'Skip gate check (run even with no live games)'
+        description: 'Skip gate check'
         required: false
         default: 'false'
 
@@ -19,15 +15,12 @@ jobs:
   live-update:
     runs-on: ubuntu-latest
     timeout-minutes: 8
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-
       - name: Install Microsoft ODBC Driver 18
         run: |
           curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
@@ -35,10 +28,8 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/mssql-release.list
           sudo apt-get update -qq
           ACCEPT_EULA=Y sudo apt-get install -y -qq msodbcsql18 unixodbc-dev
-
       - name: Install Python dependencies
         run: pip install -r etl/requirements.txt
-
       - name: Run live box score update
         env:
           AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
