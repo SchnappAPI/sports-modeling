@@ -6,21 +6,22 @@ Runs every 15 minutes during the game window via lineup-poll.yml.
 
 Two-stage lineup strategy
 --------------------------
-Stage 1 (Confirmed): Fetch the NBA's official daily lineups JSON.
+Stage 1 (Confirmed / Projected from official JSON): Fetch the NBA's official
+  daily lineups JSON.
   URL: stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
-  This file is published 30-60 minutes before tip with confirmed starters.
-  Players written with lineup_status = 'Confirmed'.
+  This file is published hours before tip with projected starters, and is
+  updated with truly confirmed starters 30-60 minutes before tip.
+
+  To avoid showing "Confirmed" prematurely, rows from this JSON are written
+  as lineup_status = 'Confirmed' only when the game tips within
+  CONFIRMED_WINDOW_MINUTES. Games in the JSON whose tip is further out are
+  written as 'Projected'. In both cases Stage 2 is skipped for those games
+  (no need to call boxscorepreviewv3 when the official JSON has data).
 
 Stage 2 (Projected): For any qualifying game that returned NO rows from
-  stage 1, call boxscorepreviewv3 per game and parse the predicted lineup.
+  the official JSON at all, call boxscorepreviewv3 per game.
   Players written with lineup_status = 'Projected'.
-  This gives the Roster tab useful data hours before confirmed lineups drop.
-
-Confirmed always beats projected: the upsert PK is (game_id, team_tricode,
-player_name). Once confirmed rows are written in stage 1, a subsequent stage 2
-call for the same game_id will be skipped entirely (game excluded from stage 2
-because it had rows in stage 1). So projected rows are never written for a
-game that already has confirmed data.
+  This gives the Roster tab useful data hours before the official JSON drops.
 
 Secrets required
   NBA_PROXY_URL, AZURE_SQL_SERVER, AZURE_SQL_DATABASE,
@@ -69,6 +70,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 PROXY_URL = __import__('os').environ.get("NBA_PROXY_URL")
+
+# Only write 'Confirmed' when tip is this many minutes away or less.
+CONFIRMED_WINDOW_MINUTES = 90
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +133,7 @@ def get_todays_nonfinal_games(engine, hours_ahead):
     qualified = []
     for r in rows:
         start_utc = parse_game_start_utc(r.get("game_status_text"))
+        r["start_utc"] = start_utc  # carry forward for Stage 1 labeling
         if start_utc is None:
             log.info(f"  Game {r['game_id']}: start time unparseable, including conservatively.")
             qualified.append(r)
@@ -171,23 +176,27 @@ def _direct_get(url, label, timeout=30):
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: Confirmed lineups from official daily lineups JSON
+# Stage 1: Official daily lineups JSON
 # ---------------------------------------------------------------------------
-def fetch_confirmed_lineups(game_date):
+def fetch_official_lineups(game_date):
     """
     Fetch the NBA's official daily lineups JSON for game_date.
-    Returns list of row dicts with lineup_status = 'Confirmed'.
+    Returns list of row dicts. lineup_status is set to 'Confirmed' or
+    'Projected' by the caller based on time-to-tip.
     """
     date_key = game_date.strftime("%Y%m%d")
     url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_key}.json"
     data     = _direct_get(url, f"daily_lineups {date_key}")
     if data is None:
-        return []
-    rows = []
+        return {}
+
+    # Return rows keyed by game_id so the caller can decide per-game status.
+    by_game = {}
     for g in data.get("games", []):
         game_id = safe_str(g.get("gameId"))
         if game_id is None:
             continue
+        rows = []
         for side, home_away in (("homeTeam", "Home"), ("awayTeam", "Away")):
             team    = g.get(side, {})
             tricode = safe_str(team.get("teamAbbreviation"))
@@ -202,11 +211,14 @@ def fetch_confirmed_lineups(game_date):
                     "team_tricode":   tricode,
                     "player_name":    safe_str(p.get("playerName")),
                     "position":       pos,
-                    "lineup_status":  "Confirmed",
                     "roster_status":  roster,
                     "starter_status": starter,
+                    # lineup_status filled in by caller
+                    "lineup_status":  None,
                 })
-    return rows
+        if rows:
+            by_game[game_id] = rows
+    return by_game
 
 
 # ---------------------------------------------------------------------------
@@ -216,10 +228,6 @@ def fetch_projected_lineups(game_id, game_date):
     """
     Fetch boxscorepreviewv3 for a single game and extract the predicted lineup.
     Returns list of row dicts with lineup_status = 'Projected'.
-
-    boxscorepreviewv3 returns a 'homeTeam'/'awayTeam' structure with
-    'players' arrays. The 'position' field indicates a predicted starter;
-    players with no position are predicted bench.
     """
     url  = "https://stats.nba.com/stats/boxscorepreviewv3"
     data = _direct_get(url, f"boxscorepreviewv3 {game_id}", timeout=60)
@@ -240,11 +248,9 @@ def fetch_projected_lineups(game_id, game_date):
         for p in team_obj.get("players", []):
             name    = safe_str(p.get("name"))
             pos     = safe_str(p.get("position"))
-            status  = safe_str(p.get("status"))  # 'Active', 'Inactive', etc.
+            status  = safe_str(p.get("status"))
             if name is None:
                 continue
-            # Players with a position in the preview are predicted starters;
-            # active players without a position are projected bench.
             if status and status.lower() not in ("active", "actv", ""):
                 starter = "Inactive"
             elif pos:
@@ -288,55 +294,64 @@ def main():
         log.info(f"No non-final games starting within {args.hours_ahead}h. Nothing to do.")
         return
 
-    game_ids_to_update = {r["game_id"] for r in qualified_games}
+    # Build a map from game_id to start_utc for labeling decisions.
+    game_start_map = {r["game_id"]: r.get("start_utc") for r in qualified_games}
+    game_ids_to_update = set(game_start_map.keys())
     log.info(f"{len(game_ids_to_update)} game(s) qualify for lineup refresh.")
 
-    today = date.today()
+    today   = date.today()
+    now_utc = datetime.now(timezone.utc)
+    confirmed_threshold = timedelta(minutes=CONFIRMED_WINDOW_MINUTES)
 
     # ------------------------------------------------------------------
-    # Stage 1: Confirmed lineups from the official daily lineups JSON.
-    # One HTTP call returns all games for the day.
+    # Stage 1: Official daily lineups JSON.
+    # Rows are written as 'Confirmed' only when tip is within
+    # CONFIRMED_WINDOW_MINUTES. Otherwise 'Projected'.
+    # Stage 2 is skipped for any game that appears in this JSON.
     # ------------------------------------------------------------------
-    log.info("Stage 1: fetching confirmed lineups...")
-    all_confirmed = fetch_confirmed_lineups(today)
-    confirmed_by_game = {}
-    for row in all_confirmed:
-        gid = row["game_id"]
-        if gid in game_ids_to_update:
-            confirmed_by_game.setdefault(gid, []).append(row)
+    log.info("Stage 1: fetching official lineups JSON...")
+    official_by_game = fetch_official_lineups(today)
 
-    confirmed_rows = []
-    confirmed_game_ids = set()
-    for gid, rows in confirmed_by_game.items():
-        if rows:
-            confirmed_rows.extend(rows)
-            confirmed_game_ids.add(gid)
+    stage1_rows = []
+    stage1_game_ids = set()  # games covered by the official JSON (skip Stage 2)
 
-    if confirmed_rows:
-        # Delete then upsert so scratches are cleared.
+    for gid, rows in official_by_game.items():
+        if gid not in game_ids_to_update:
+            continue
+        start_utc = game_start_map.get(gid)
+        # Determine label: Confirmed if within window or start time unknown, Projected otherwise.
+        if start_utc is None or (start_utc - now_utc) <= confirmed_threshold:
+            label = "Confirmed"
+        else:
+            label = "Projected"
+        for r in rows:
+            r["lineup_status"] = label
+        stage1_rows.extend(rows)
+        stage1_game_ids.add(gid)
+        log.info(f"  {gid}: {len(rows)} rows from official JSON, labeled '{label}'.")
+
+    if stage1_rows:
         with engine.begin() as conn:
-            for gid in confirmed_game_ids:
+            for gid in stage1_game_ids:
                 conn.execute(
                     text("DELETE FROM nba.daily_lineups WHERE game_id = :gid"),
                     {"gid": gid}
                 )
         upsert(
-            pd.DataFrame(confirmed_rows),
+            pd.DataFrame(stage1_rows),
             engine, "nba", "daily_lineups",
             ["game_id", "team_tricode", "player_name"]
         )
-        log.info(f"  Stage 1 complete: {len(confirmed_rows)} confirmed rows for "
-                 f"{len(confirmed_game_ids)} game(s).")
+        log.info(f"  Stage 1 complete: {len(stage1_rows)} rows for {len(stage1_game_ids)} game(s).")
     else:
-        log.info("  Stage 1: confirmed lineup JSON returned no rows for qualifying games yet.")
+        log.info("  Stage 1: official JSON returned no rows for qualifying games.")
 
     # ------------------------------------------------------------------
-    # Stage 2: Projected lineups for games with no confirmed data.
-    # Calls boxscorepreviewv3 once per game.
+    # Stage 2: Projected lineups for games with no official JSON data.
     # ------------------------------------------------------------------
-    needs_projected = game_ids_to_update - confirmed_game_ids
+    needs_projected = game_ids_to_update - stage1_game_ids
     if not needs_projected:
-        log.info("Stage 2: all qualifying games have confirmed lineups. Skipping projected fetch.")
+        log.info("Stage 2: all qualifying games have official JSON data. Skipping.")
         return
 
     log.info(f"Stage 2: fetching projected lineups for {len(needs_projected)} game(s): {needs_projected}")
@@ -351,9 +366,6 @@ def main():
         time.sleep(API_DELAY)
 
     if projected_rows:
-        # For projected, only delete existing projected rows (not confirmed).
-        # This preserves any confirmed data for other games that might be in
-        # the table from prior runs.
         with engine.begin() as conn:
             for gid in needs_projected:
                 conn.execute(
