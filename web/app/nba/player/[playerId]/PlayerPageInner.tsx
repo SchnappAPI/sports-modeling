@@ -180,6 +180,20 @@ function todayLocal(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Volume color helper
+// Compares a game attempt value against the player's season average.
+// High (>20% above avg): teal. Low (>20% below avg): orange. Middle: gray.
+// ---------------------------------------------------------------------------
+
+function volumeCls(value: number, seasonAvg: number): string {
+  if (seasonAvg === 0) return 'text-gray-300';
+  const ratio = value / seasonAvg;
+  if (ratio > 1.2) return 'text-teal-400';
+  if (ratio < 0.8) return 'text-orange-400';
+  return 'text-gray-300';
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -737,6 +751,20 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     [log, selectedPeriods],
   );
 
+  // Season averages for attempt volume coloring — always computed from the full
+  // unfiltered summaries (no period or opp filter) so the baseline stays stable.
+  const seasonAvgAttempts = useMemo(() => {
+    const fullSummaries = buildGameSummaries(log, new Set<QuarterKey>());
+    const played = fullSummaries.filter((g) => !g.dnp);
+    const gp = played.length;
+    if (gp === 0) return { fga: 0, fg3a: 0, fta: 0 };
+    return {
+      fga:  played.reduce((s, g) => s + g.fga,  0) / gp,
+      fg3a: played.reduce((s, g) => s + g.fg3a, 0) / gp,
+      fta:  played.reduce((s, g) => s + g.fta,  0) / gp,
+    };
+  }, [log]);
+
   const displayedSummaries = useMemo(
     () => vsOppOnly && oppParam
       ? summaries.filter((g) => g.opponentAbbr === oppParam)
@@ -1026,10 +1054,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               };
 
               const gameHref = `/nba?gameId=${g.gameId}&tab=boxscore&date=${g.gameDate.slice(0, 10)}`;
-
-              // compact all-stats DNP colSpan: Date already a col, then Opp MIN PTS + shooting + REB AST PRA PR PA RA [STL BLK TOV]
-              // compact data cols after Date: Opp MIN PTS 3PM REB AST PRA PR PA RA = 10
-              // all-stats data cols after Date: Opp MIN PTS FGM FGA 3PM 3PA FTM FTA REB AST PRA PR PA RA STL BLK TOV = 18
               const dnpColSpan = showAllStats ? 18 : 10;
 
               if (g.dnp) {
@@ -1060,6 +1084,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const paLine   = getComboLineCls(g.gameId, g.pts + g.ast, ['player_points_assists', 'player_points_assists_alternate']);
               const raLine   = getComboLineCls(g.gameId, g.reb + g.ast, ['player_rebounds_assists', 'player_rebounds_assists_alternate']);
 
+              // Volume coloring for attempt columns — relative to season avg
+              const fgaVolCls  = volumeCls(g.fga,  seasonAvgAttempts.fga);
+              const fg3aVolCls = volumeCls(g.fg3a, seasonAvgAttempts.fg3a);
+              const ftaVolCls  = volumeCls(g.fta,  seasonAvgAttempts.fta);
+
               const rowCls = g.started === true
                 ? 'border-b border-gray-800 border-l-2 border-l-blue-800'
                 : 'border-b border-gray-800';
@@ -1081,11 +1110,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   {showAllStats ? (
                     <>
                       <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fgm}</td>
-                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fga}</td>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap tabular-nums ${fgaVolCls}`}>{g.fga}</td>
                       <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
-                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fg3a}</td>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap tabular-nums ${fg3aVolCls}`}>{g.fg3a}</td>
                       <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.ftm}</td>
-                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fta}</td>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap tabular-nums ${ftaVolCls}`}>{g.fta}</td>
                     </>
                   ) : (
                     <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
