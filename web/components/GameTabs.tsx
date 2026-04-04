@@ -5,6 +5,7 @@ import RosterTable from './RosterTable';
 import StatsTable from './StatsTable';
 import BoxScoreTable from './BoxScoreTable';
 import LiveBoxScore from './LiveBoxScore';
+import MatchupGrid from './MatchupGrid';
 
 interface Props {
   gameId: string;
@@ -16,18 +17,18 @@ interface Props {
   gameStatus: number | null;
 }
 
-// Live tab only appears when game is in progress.
-type Tab = 'roster' | 'stats' | 'boxscore' | 'live';
+type Tab = 'roster' | 'stats' | 'boxscore' | 'live' | 'matchups';
 
 function getTabs(isLive: boolean): Tab[] {
   return isLive
-    ? ['live', 'roster', 'stats', 'boxscore']
-    : ['roster', 'stats', 'boxscore'];
+    ? ['live', 'roster', 'matchups', 'stats', 'boxscore']
+    : ['roster', 'matchups', 'stats', 'boxscore'];
 }
 
 const TAB_LABELS: Record<Tab, string> = {
   live:     'Live',
   roster:   'Roster',
+  matchups: 'Matchups',
   stats:    'Stats',
   boxscore: 'Box Score',
 };
@@ -81,6 +82,14 @@ export default function GameTabs({
       )}
       {activeTab === 'roster' && (
         <RosterTable gameId={gameId} selectedDate={selectedDate} />
+      )}
+      {activeTab === 'matchups' && (
+        <MatchupGrid
+          gameId={gameId}
+          homeTeamAbbr={homeTeamAbbr}
+          awayTeamAbbr={awayTeamAbbr}
+          selectedDate={selectedDate}
+        />
       )}
       {activeTab === 'stats' && (
         <StatsTable
