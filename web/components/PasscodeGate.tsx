@@ -7,6 +7,9 @@ const TOKEN_KEY      = 'schnapp_auth_token';
 const MODE_KEY       = 'schnapp_auth_mode';
 const DEMO_DATES_KEY = 'schnapp_demo_dates';
 
+// BYPASS: set to true to skip auth entirely. Set back to false to re-enable.
+const BYPASS = true;
+
 function readCachedDemoDates(): DemoDates {
   try {
     const raw = localStorage.getItem(DEMO_DATES_KEY);
@@ -17,7 +20,7 @@ function readCachedDemoDates(): DemoDates {
 }
 
 export default function PasscodeGate({ children }: { children: React.ReactNode }) {
-  const [status, setStatus]         = useState<'loading' | 'authed' | 'gate'>('loading');
+  const [status, setStatus]         = useState<'loading' | 'authed' | 'gate'>(BYPASS ? 'authed' : 'loading');
   const [mode, setMode]             = useState<'live' | 'demo'>('live');
   const [demoDates, setDemoDates]   = useState<DemoDates>({});
   const [code, setCode]             = useState('');
@@ -25,6 +28,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
   const [submitting, setSubmitting] = useState(false);
 
   const verify = useCallback(async () => {
+    if (BYPASS) return;
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) { setStatus('gate'); return; }
     try {
