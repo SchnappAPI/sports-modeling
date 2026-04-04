@@ -23,12 +23,18 @@ interface LivePlayer {
   fga: number;
   ftm: number;
   fta: number;
+  starter: boolean;
+  oncourt: boolean;
   starterStatus: string | null;
 }
 
 interface LiveData {
   gameId: string;
   gameStatusText: string;
+  homeTeamAbbr: string;
+  awayTeamAbbr: string;
+  homeScore: number;
+  awayScore: number;
   players: LivePlayer[];
 }
 
@@ -43,6 +49,47 @@ function fmtShoot(made: number, att: number): string {
   return att === 0 ? '-' : `${made}-${att}`;
 }
 
+function ScoreHeader({ data }: { data: LiveData }) {
+  const awayLeads = data.awayScore > data.homeScore;
+  const homeLeads = data.homeScore > data.awayScore;
+
+  return (
+    <div className="flex items-center justify-center gap-6 py-3 mb-4 border border-gray-800 rounded-lg bg-gray-900">
+      {/* Away team */}
+      <div className="text-center min-w-[60px]">
+        <div className="text-xs text-gray-500 font-semibold uppercase tracking-wider mb-0.5">
+          {data.awayTeamAbbr}
+        </div>
+        <div className={`text-3xl font-bold tabular-nums ${awayLeads ? 'text-gray-100' : 'text-gray-400'}`}>
+          {data.awayScore}
+        </div>
+      </div>
+
+      {/* Clock / period */}
+      <div className="text-center">
+        <div className="flex items-center gap-1.5 justify-center mb-1">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+          </span>
+          <span className="text-xs font-semibold text-red-400 uppercase tracking-wider">Live</span>
+        </div>
+        <div className="text-sm font-semibold text-gray-300">{data.gameStatusText}</div>
+      </div>
+
+      {/* Home team */}
+      <div className="text-center min-w-[60px]">
+        <div className="text-xs text-gray-500 font-semibold uppercase tracking-wider mb-0.5">
+          {data.homeTeamAbbr}
+        </div>
+        <div className={`text-3xl font-bold tabular-nums ${homeLeads ? 'text-gray-100' : 'text-gray-400'}`}>
+          {data.homeScore}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TeamTable({
   players,
   teamAbbr,
@@ -54,26 +101,28 @@ function TeamTable({
   gameId: string;
   selectedDate: string;
 }) {
-  const hasLineup = players.some((p) => p.starterStatus != null);
+  const hasLineup = players.some((p) => p.starter !== undefined);
 
   const starters = hasLineup
-    ? players.filter((p) => p.starterStatus === 'Starter')
+    ? players.filter((p) => p.starter)
     : [];
   const bench = hasLineup
-    ? players.filter((p) => p.starterStatus !== 'Starter')
+    ? players.filter((p) => !p.starter)
     : [...players].sort((a, b) => b.min - a.min);
 
   const renderRow = (p: LivePlayer) => {
     const href = `/nba/player/${p.playerId}?gameId=${gameId}&tab=boxscore&date=${selectedDate}`;
-    const isStarter = p.starterStatus === 'Starter';
     return (
       <tr key={p.playerId} className={`border-b border-gray-800 ${p.min === 0 ? 'opacity-40' : ''}`}>
         <td className="py-1 pr-3 whitespace-nowrap">
           <Link
             href={href}
-            className={`hover:text-blue-400 transition-colors ${isStarter ? 'text-gray-100 font-medium' : 'text-gray-300'}`}
+            className={`hover:text-blue-400 transition-colors ${p.starter ? 'text-gray-100 font-medium' : 'text-gray-300'}`}
           >
             {p.playerName}
+            {p.oncourt && (
+              <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-green-500 align-middle" title="On court" />
+            )}
           </Link>
         </td>
         <td className="py-1 px-2 text-right text-gray-300">{fmtMin(p.min)}</td>
@@ -185,16 +234,12 @@ export default function LiveBoxScore({
 
   return (
     <div>
-      <div className="flex items-center gap-2 mb-3">
-        <span className="relative flex h-2 w-2">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
-        </span>
-        <span className="text-xs font-semibold text-red-400 uppercase tracking-wider">Live</span>
-        {data?.gameStatusText && (
-          <span className="text-xs text-gray-400">{data.gameStatusText}</span>
-        )}
-        <span className="text-xs text-gray-600 ml-1">Updated {refreshStr} · auto-refreshes every 30s</span>
+      {/* Score header — shown as soon as we have data */}
+      {data && <ScoreHeader data={data} />}
+
+      {/* Refresh timestamp */}
+      <div className="text-xs text-gray-600 mb-3">
+        Updated {refreshStr} &middot; auto-refreshes every 30s
       </div>
 
       {loading && <div className="text-sm text-gray-500">Loading...</div>}
