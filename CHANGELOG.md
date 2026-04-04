@@ -9,6 +9,61 @@
 
 ---
 
+## 2026-04-04 (session 5)
+
+### ETL | etl/lineup_poll.py — two-stage full roster fetch + timeout fixes
+- Stage 1 fetches official NBA daily lineups JSON (starters only, 5 per team). Stage 2 always calls boxscorepreviewv3 for every qualifying game to get the full roster including bench and inactive players.
+- Stage 1 starters take priority over Stage 2 in the merge: if a player appears in both, the official JSON's starter_status and lineup_status overwrite Stage 2.
+- PREVIEW_TIMEOUT reduced to 20s (was 60s), BETWEEN_GAMES_DELAY to 0.5s (was API_DELAY 1.5s), no retry logic on preview path — prevents the 5-minute timeout that caused the lineup poll step to be cancelled.
+- `_direct_get` replaced with a single-attempt `_get()` function for the lineup poll context to avoid 30s retry waits.
+- Root cause of starters-only problem: the official JSON only contains the projected starting five, not the full roster. The old Stage 2 skip-if-Stage1-has-data logic left bench and inactive players unwritten.
+- Do not revert to skipping Stage 2 when Stage 1 has data.
+
+### ETL | etl/game_day_gate.py — SQL error 130 fix + zoneinfo
+- Fixed SQL error 130 (subquery not allowed inside SUM CASE) by moving NOT EXISTS logic into a `game_flags` CTE before aggregating.
+- Replaced hardcoded `timedelta(hours=-4)` with `ZoneInfo("America/New_York")` for correct EDT/EST auto-handling.
+- Same zoneinfo fix applied to lineup_poll.py.
+- Odds/grading interval: 14 min pre-game, 30 min when any game is live.
+
+### ETL | etl/lineup_cleanup.py — one-shot cleanup script
+- Created to delete starters-only rows (April 1–4) written before the full-roster fix. Deleted 709 rows across 27 games. Keep for reference.
+
+### Infra | .github/workflows/refresh-data.yml — timeout raised to 12 min
+- Was 5 minutes. The lineup poll step now calls boxscorepreviewv3 for all qualifying games, adding ~30-60 seconds. 5 minutes was too tight.
+
+### UI | web/app/nba/player/[playerId]/PlayerPageInner.tsx — prop strip line fix + game/team selector + lineup badge
+- `postedLine()` helper added: selects the standard line whose overPrice is closest to -110 instead of always picking `standardLines[0]` (which was the lowest alt line value, e.g. 0.5).
+- Game/team selector added to player page header: compact game dropdown (all today's games) + two team pill buttons (away/home). Tapping a team pill fetches `/api/team-players` and navigates to that team's first player. Carries current gameId/tab/date params.
+- `LineupStatusBadge` added: shows Starter/Bench/Inactive with Confirmed/Projected in parentheses when navigating from a game. Uses `gameLineupStatus` and `gameStarterStatus` from `/api/player` endpoint.
+- Today's games fetched on mount via `/api/games?sport=nba&date=today` for the selector.
+
+### API | web/app/api/player/route.ts — gameId param for lineup status
+- Accepts optional `gameId` query param. When present, queries `nba.daily_lineups` for the player's `lineup_status` and `starter_status` for that specific game.
+- Returns `gameLineupStatus` and `gameStarterStatus` in the response.
+
+### UI | web/components/GameTabs.tsx — Matchups tab added
+- Added `matchups` tab between Roster and Stats (or between Live and Roster when live).
+- Renders `MatchupGrid` component.
+
+### UI | web/components/MatchupGrid.tsx — NEW defense grid component
+- Shows two team defense panels side by side. Each panel has rows for G/F/C position groups and columns for PTS/REB/AST/3PM/STL/BLK/TOV.
+- Each cell shows season average allowed and rank out of 30. Green = soft (rank 1-10), red = tough (21-30).
+- Tap a position row to expand it and show today's active players at that position with links to their player page.
+- Players facing each defense are shown under that defense's panel (DEN players shown under SAS defense, etc.).
+- CRITICAL BUG NOTE: `push_files` corrupted Unicode arrow characters (▲ ▼) and em dash (—) in the initial commit. Fixed by rewriting with `\u25b2`, `\u25bc`, and `&mdash;` escape sequences in a follow-up `create_or_update_file` commit. Rule: `push_files` is only safe for strictly ASCII TypeScript/TSX. Any TSX with non-ASCII characters must use `create_or_update_file`.
+
+### API | web/app/api/matchup-grid/route.ts — NEW defense grid endpoint
+- Returns matchup defense stats for both teams in a game, all three position groups, plus today's lineup keyed by teamTricode → posGroup → players[].
+- Uses a single large SQL query (all-teams ranked CTE) to avoid 6 separate calls.
+- BUG FIXED: initial `posToGroup` used `row.position[0]` (first character), mapping PG→P, SG→S, SF→S, PF→P — none matching G or F. Fixed with explicit `posToGroup()` function: PG/SG/G→G, SF/PF/F→F, C→C. Also handles compound positions like G-F.
+- Initial version interpolated `${homeTeamId}` directly into SQL string. Fixed to use `mssql.BigInt` parameterized inputs.
+
+### Infra | Critical lesson — push_files corrupts non-ASCII Unicode in TSX
+- `push_files` is known to corrupt Python files (literal `\n`). Confirmed this session it also corrupts non-ASCII Unicode characters (arrows, em dashes) in TypeScript/TSX files, producing a client-side JavaScript crash on load.
+- Rule extended: `push_files` is only safe for strictly ASCII content (JSON, YAML, ASCII-only TypeScript). Any file with Unicode characters must use `create_or_update_file`.
+
+---
+
 ## 2026-04-04 (session 4)
 
 ### UI | web/components/RefreshDataButton.tsx — NEW admin passcode refresh button
