@@ -9,6 +9,32 @@
 
 ---
 
+## 2026-04-04 (session 6)
+
+### API | web/app/api/live-boxscore/route.ts — rewritten to read from DB
+- Removed direct stats.nba.com call. Azure SWA IPs are blocked by stats.nba.com (same as GitHub Actions IPs), causing all live fetch attempts to fail silently or with 403/429.
+- Now reads from `nba.player_box_score_stats` (written by `nba_live.py` every 5 minutes via nba-game-day.yml). Sums all non-OT periods per player per game to produce game totals.
+- Also joins `nba.daily_lineups` for `starterStatus` so the Live tab can show Starters/Bench sections.
+- Returns `gameStatusText` from `nba.schedule` rather than the NBA API.
+- Error message is now informative: 404 returns "No box score data in database yet. The live ETL runs every 5 minutes." rather than a generic HTTP error.
+- Do not revert to stats.nba.com direct fetch — that path will always fail from Azure SWA.
+
+### UI | web/components/LiveBoxScore.tsx — fg3a fix + starter/bench sections + error detail
+- Fixed 3P column: was `fmtShoot(p.fg3m, p.fga)` (using field goal attempts as denominator). Fixed to `fmtShoot(p.fg3m, p.fg3a)`.
+- Added `starterStatus` to `LivePlayer` interface to match new DB-backed route response.
+- Added Starters/Bench section headers (same pattern as BoxScoreTable). Falls back to minutes-sorted flat list when no lineup data available.
+- Changed separator in `fmtShoot` from `/` to `-` to match canonical dash separator.
+- Error display now shows the message text from the API response body rather than just the HTTP status code.
+
+### API | web/app/api/matchup-grid/route.ts — posToGroup null fallback
+- Changed `posToGroup()` return type from `PosGroup | null` to `PosGroup`.
+- Null or unrecognized position values now return `'G'` instead of `null`.
+- Previously, any bench player in `nba.daily_lineups` with a null `position` was silently dropped from the lineup section entirely. They now appear under G.
+- The `if (!pg) continue` guard in the lineup-building loop is removed — no player is skipped.
+- Decision: G is the safest fallback because guards are the most common roster position and the typical player with a null position in the lineups table is a bench guard.
+
+---
+
 ## 2026-04-04 (session 5)
 
 ### ETL | etl/lineup_poll.py — two-stage full roster fetch + timeout fixes
