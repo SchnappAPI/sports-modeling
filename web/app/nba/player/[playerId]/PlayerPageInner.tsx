@@ -908,9 +908,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               {splitHeaders.map((h) => (
                 <th key={h} className="text-right px-2 py-2 font-medium whitespace-nowrap">{h}</th>
               ))}
-              <th className="text-right py-2 pl-2 pr-4">
-                <StatsToggle showAll={showAllStats} onToggle={() => setShowAllStats((v) => !v)} />
-              </th>
             </tr>
           </thead>
           <tbody>
@@ -921,7 +918,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   <td className="px-4 py-2 text-gray-400 font-medium sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{label}</td>
                   <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{s.gp}</td>
                   {renderSplitCells(s)}
-                  <td />
                 </tr>
               );
             })}
@@ -945,7 +941,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         summaries={summaries}
       />
 
-      {/* Period filter */}
+      {/* Period filter — All Stats toggle lives here alongside quarter buttons */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
         <span className="text-xs text-gray-600">All</span>
         {availablePeriods.map((p) => (
@@ -973,6 +969,9 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         {!showPropColors && grades.length > 0 && (
           <span className="text-xs text-gray-600 ml-2">Prop coloring off (full game only)</span>
         )}
+        <div className="ml-auto">
+          <StatsToggle showAll={showAllStats} onToggle={() => setShowAllStats((v) => !v)} />
+        </div>
       </div>
 
       {/* Game log */}
@@ -1010,7 +1009,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">TOV</th>
                 </>
               )}
-              <th className="text-right py-1.5 pl-2 pr-4" />
             </tr>
           </thead>
           <tbody>
@@ -1096,7 +1094,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                       <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
                     </>
                   )}
-                  <td />
                 </tr>
               );
             })}
