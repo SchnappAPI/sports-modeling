@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
+import RefreshDataButton from '@/components/RefreshDataButton';
 
 interface GradeRow {
   gradeId: number;
@@ -38,10 +39,6 @@ interface DefenseCache {
   [key: string]: Record<string, number> | 'loading' | 'error';
 }
 
-// ---------------------------------------------------------------------------
-// Market helpers
-// ---------------------------------------------------------------------------
-
 const MARKET_ABBR: Record<string, string> = {
   player_points:                           'PTS',
   player_points_alternate:                 'PTS',
@@ -67,71 +64,52 @@ const MARKET_ABBR: Record<string, string> = {
   player_rebounds_assists_alternate:       'RA',
 };
 
-function baseMarket(key: string): string {
-  return key.replace(/_alternate$/, '');
-}
-
-function isAlternate(key: string): boolean {
-  return key.endsWith('_alternate');
-}
-
+function baseMarket(key: string): string { return key.replace(/_alternate$/, ''); }
+function isAlternate(key: string): boolean { return key.endsWith('_alternate'); }
 function marketAbbr(key: string): string {
   return MARKET_ABBR[key] ?? key.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
-
 function marketDropdownLabel(baseKey: string): string {
   return MARKET_ABBR[baseKey] ?? baseKey.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
-
 function impliedProb(price: number | null): string {
   if (price == null) return '-';
-  const prob = price < 0
-    ? Math.abs(price) / (Math.abs(price) + 100)
-    : 100 / (price + 100);
+  const prob = price < 0 ? Math.abs(price) / (Math.abs(price) + 100) : 100 / (price + 100);
   return `${(prob * 100).toFixed(0)}%`;
 }
-
 function gradeColor(grade: number | null): string {
   if (grade == null) return 'text-gray-500';
   if (grade >= 70) return 'text-green-400';
   if (grade >= 55) return 'text-yellow-400';
   return 'text-gray-400';
 }
-
 function fmt(val: number | null, decimals = 1): string {
   if (val == null) return '-';
   return val.toFixed(decimals);
 }
-
 function fmtPct(val: number | null): string {
   if (val == null) return '-';
   return `${(val * 100).toFixed(0)}%`;
 }
-
 function fmtOdds(price: number | null): string {
   if (price == null) return '-';
   return price >= 0 ? `+${price}` : `${price}`;
 }
-
 function oddsColor(price: number | null): string {
   if (price == null) return 'text-gray-600';
   if (price > 0) return 'text-gray-400';
   if (price >= -115) return 'text-gray-500';
   return 'text-gray-400';
 }
-
 function todayLocal(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
-
 function ordinal(n: number): string {
   if (n === 11 || n === 12 || n === 13) return `${n}th`;
   const s = ['th', 'st', 'nd', 'rd'];
-  const v = n % 10;
-  return `${n}${s[v] || 'th'}`;
+  return `${n}${s[n % 10] || 'th'}`;
 }
-
 function rankColor(rank: number): string {
   if (rank <= 10) return 'text-green-400';
   if (rank <= 20) return 'text-yellow-400';
@@ -139,19 +117,13 @@ function rankColor(rank: number): string {
 }
 
 const MARKET_TO_STAT_KEY: Record<string, string> = {
-  player_points:             'pts',
-  player_points_alternate:   'pts',
-  player_rebounds:           'reb',
-  player_rebounds_alternate: 'reb',
-  player_assists:            'ast',
-  player_assists_alternate:  'ast',
-  player_steals:             'stl',
-  player_steals_alternate:   'stl',
-  player_blocks:             'blk',
-  player_blocks_alternate:   'blk',
-  player_threes:             'fg3m',
-  player_threes_alternate:   'fg3m',
-  player_turnovers:          'tov',
+  player_points: 'pts', player_points_alternate: 'pts',
+  player_rebounds: 'reb', player_rebounds_alternate: 'reb',
+  player_assists: 'ast', player_assists_alternate: 'ast',
+  player_steals: 'stl', player_steals_alternate: 'stl',
+  player_blocks: 'blk', player_blocks_alternate: 'blk',
+  player_threes: 'fg3m', player_threes_alternate: 'fg3m',
+  player_turnovers: 'tov',
 };
 
 function posGroup(position: string | null): string | null {
@@ -162,28 +134,20 @@ function posGroup(position: string | null): string | null {
   return null;
 }
 
-// Slider range: full range the user can drag to
 const ODDS_MIN     = -1000;
 const ODDS_MAX     = 200;
-// Default starting value: filter out anything worse than -600
 const ODDS_DEFAULT = -600;
 
-// ---------------------------------------------------------------------------
-// Sort
-// ---------------------------------------------------------------------------
 type SortKey =
   | 'playerName' | 'marketKey' | 'lineValue' | 'overPrice'
   | 'grade' | 'compositeGrade' | 'hitRate20' | 'hitRate60'
   | 'hitRateOpp' | 'sampleSize20' | 'sampleSize60' | 'def';
-
 type SortDir = 'asc' | 'desc';
 
 const SORT_NULLS_LAST_DESC: SortKey[] = [
   'grade', 'compositeGrade', 'hitRate20', 'hitRate60',
   'hitRateOpp', 'sampleSize20', 'sampleSize60', 'overPrice', 'def',
 ];
-
-type RefreshState = 'idle' | 'dispatching' | 'running' | 'reloading' | 'done' | 'error';
 
 export default function GradesPageInner() {
   const searchParams = useSearchParams();
@@ -198,10 +162,6 @@ export default function GradesPageInner() {
   const [sortKey, setSortKey]               = useState<SortKey>('compositeGrade');
   const [sortDir, setSortDir]               = useState<SortDir>('desc');
   const [outcomeFilter, setOutcomeFilter]   = useState<'Over' | 'Under'>('Over');
-
-  const [refreshState, setRefreshState] = useState<RefreshState>('idle');
-  const [refreshError, setRefreshError] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const gradeDate = searchParams.get('date') ?? todayLocal();
   const backHref  = '/nba';
@@ -225,7 +185,6 @@ export default function GradesPageInner() {
     loadGrades();
   }, [loadGrades]);
 
-  // Defense data fetching
   useEffect(() => {
     if (grades.length === 0) return;
     const pairs = new Set<string>();
@@ -248,63 +207,14 @@ export default function GradesPageInner() {
           }
           setDefenseCache((prev) => ({ ...prev, [key]: ranks }));
         })
-        .catch(() => {
-          setDefenseCache((prev) => ({ ...prev, [key]: 'error' }));
-        });
+        .catch(() => setDefenseCache((prev) => ({ ...prev, [key]: 'error' })));
     }
   }, [grades]);
 
-  async function handleRefresh() {
-    if (refreshState !== 'idle' && refreshState !== 'done' && refreshState !== 'error') return;
-    setRefreshState('dispatching');
-    setRefreshError(null);
-    try {
-      const res = await fetch('/api/refresh-lines', { method: 'POST' });
-      if (!res.ok) throw new Error(`Dispatch failed: HTTP ${res.status}`);
-      const { runId } = await res.json();
-      if (!runId) {
-        setRefreshState('running');
-        setTimeout(() => {
-          setRefreshState('reloading');
-          loadGrades();
-          setDefenseCache({});
-          setTimeout(() => setRefreshState('done'), 2000);
-        }, 90000);
-        return;
-      }
-      setRefreshState('running');
-      let attempts = 0;
-      pollRef.current = setInterval(async () => {
-        attempts++;
-        try {
-          const sr = await fetch(`/api/refresh-status?runId=${runId}`);
-          if (!sr.ok) return;
-          const { status, conclusion } = await sr.json();
-          if (status === 'completed') {
-            if (pollRef.current) clearInterval(pollRef.current);
-            if (conclusion === 'success') {
-              setRefreshState('reloading');
-              loadGrades();
-              setDefenseCache({});
-              setTimeout(() => setRefreshState('done'), 2000);
-            } else {
-              setRefreshState('error');
-              setRefreshError('Workflow completed but did not succeed.');
-            }
-          } else if (attempts >= 30) {
-            if (pollRef.current) clearInterval(pollRef.current);
-            setRefreshState('error');
-            setRefreshError('Timed out waiting for refresh to complete.');
-          }
-        } catch { /* transient poll error */ }
-      }, 10000);
-    } catch (e) {
-      setRefreshState('error');
-      setRefreshError(e instanceof Error ? e.message : String(e));
-    }
+  function handleRefreshComplete() {
+    loadGrades();
+    setDefenseCache({});
   }
-
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   const gameOptions = useMemo(() => {
     const seen = new Map<string, string>();
@@ -329,16 +239,12 @@ export default function GradesPageInner() {
     return opts.sort();
   }, [grades]);
 
-  // Count overs and unders available for display in toggle
-  const overCount = useMemo(() => grades.filter((r) => (r.outcomeName ?? 'Over') === 'Over' && r.overPrice != null).length, [grades]);
+  const overCount  = useMemo(() => grades.filter((r) => (r.outcomeName ?? 'Over') === 'Over' && r.overPrice != null).length, [grades]);
   const underCount = useMemo(() => grades.filter((r) => r.outcomeName === 'Under' && r.overPrice != null).length, [grades]);
 
   const filtered = useMemo(() => {
     let rows = grades.filter((r) => r.overPrice != null);
-
-    // Direction filter — default Over, togglable to Under
     rows = rows.filter((r) => (r.outcomeName ?? 'Over') === outcomeFilter);
-
     if (selectedGameId) rows = rows.filter((r) => r.gameId === selectedGameId);
     if (selectedMarket) {
       rows = rows.filter((r) =>
@@ -349,28 +255,19 @@ export default function GradesPageInner() {
       const q = playerFilter.trim().toLowerCase();
       rows = rows.filter((r) => r.playerName.toLowerCase().includes(q));
     }
-
-    // Apply odds floor whenever slider is not at the absolute minimum (-1000).
-    // Default is -600, so by default anything worse than -600 is filtered out.
     if (minOdds > ODDS_MIN) {
       rows = rows.filter((r) => r.overPrice != null && r.overPrice >= minOdds);
     }
-
-    // Suppress alternate rows when a standard row exists for the same
-    // player, base market, and line value. Only relevant for Over direction.
     if (outcomeFilter === 'Over') {
       const standardKeys = new Set<string>();
       for (const r of rows) {
-        if (!isAlternate(r.marketKey)) {
-          standardKeys.add(`${r.playerId}:${r.marketKey}:${r.lineValue}`);
-        }
+        if (!isAlternate(r.marketKey)) standardKeys.add(`${r.playerId}:${r.marketKey}:${r.lineValue}`);
       }
       rows = rows.filter((r) => {
         if (!isAlternate(r.marketKey)) return true;
         return !standardKeys.has(`${r.playerId}:${baseMarket(r.marketKey)}:${r.lineValue}`);
       });
     }
-
     return rows;
   }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds, outcomeFilter]);
 
@@ -381,20 +278,17 @@ export default function GradesPageInner() {
     if (!entry || entry === 'loading' || entry === 'error') return null;
     const statKey = MARKET_TO_STAT_KEY[row.marketKey];
     if (!statKey) return null;
-    const rank = (entry as Record<string, number>)[statKey];
-    return rank ?? null;
+    return (entry as Record<string, number>)[statKey] ?? null;
   }
 
   const sorted = useMemo(() => {
     const rows = [...filtered];
     const dir = sortDir === 'desc' ? -1 : 1;
     const nullsLast = SORT_NULLS_LAST_DESC.includes(sortKey);
-
     rows.sort((a, b) => {
       let va: number | string | null = null;
       let vb: number | string | null = null;
-
-      if (sortKey === 'playerName')     { va = a.playerName; vb = b.playerName; }
+      if (sortKey === 'playerName')          { va = a.playerName; vb = b.playerName; }
       else if (sortKey === 'marketKey')      { va = marketAbbr(a.marketKey); vb = marketAbbr(b.marketKey); }
       else if (sortKey === 'lineValue')      { va = a.lineValue; vb = b.lineValue; }
       else if (sortKey === 'overPrice')      { va = a.overPrice; vb = b.overPrice; }
@@ -406,13 +300,10 @@ export default function GradesPageInner() {
       else if (sortKey === 'sampleSize20')   { va = a.sampleSize20; vb = b.sampleSize20; }
       else if (sortKey === 'sampleSize60')   { va = a.sampleSize60; vb = b.sampleSize60; }
       else if (sortKey === 'def')            { va = getDefRank(a); vb = getDefRank(b); }
-
-      const aN = va == null;
-      const bN = vb == null;
+      const aN = va == null, bN = vb == null;
       if (aN && bN) return 0;
       if (aN) return nullsLast ? 1 : -1 * dir;
       if (bN) return nullsLast ? -1 : 1 * dir;
-
       if (typeof va === 'string' && typeof vb === 'string') return dir * va.localeCompare(vb);
       return dir * ((va as number) - (vb as number));
     });
@@ -420,12 +311,8 @@ export default function GradesPageInner() {
   }, [filtered, sortKey, sortDir, defenseCache]);
 
   function handleSort(key: SortKey) {
-    if (sortKey === key) {
-      setSortDir((d) => d === 'desc' ? 'asc' : 'desc');
-    } else {
-      setSortKey(key);
-      setSortDir(SORT_NULLS_LAST_DESC.includes(key) ? 'desc' : 'asc');
-    }
+    if (sortKey === key) setSortDir((d) => d === 'desc' ? 'asc' : 'desc');
+    else { setSortKey(key); setSortDir(SORT_NULLS_LAST_DESC.includes(key) ? 'desc' : 'asc'); }
   }
 
   function sortIndicator(key: SortKey) {
@@ -435,13 +322,12 @@ export default function GradesPageInner() {
       : <span className="text-blue-400 ml-0.5">&#8593;</span>;
   }
 
-  // Filter is active whenever the slider is not at the absolute floor
   const oddsFilterActive = minOdds > ODDS_MIN;
 
   function defRankCell(row: GradeRow): { rank: number | null; label: string } {
     const pg = posGroup(row.position);
     if (!row.oppTeamId || !pg) return { rank: null, label: '-' };
-    const key = `${row.oppTeamId}:${pg}`;
+    const key   = `${row.oppTeamId}:${pg}`;
     const entry = defenseCache[key];
     if (!entry || entry === 'loading') return { rank: null, label: '...' };
     if (entry === 'error') return { rank: null, label: '-' };
@@ -460,24 +346,13 @@ export default function GradesPageInner() {
     return `/nba/player/${row.playerId}${qs ? `?${qs}` : ''}`;
   }
 
-  const isRefreshing = refreshState === 'dispatching' || refreshState === 'running' || refreshState === 'reloading';
+  const oppLabel = useMemo(() => {
+    const abbrs = new Set(sorted.map((r) => r.oppTeamAbbr).filter(Boolean));
+    if (abbrs.size === 1) return `vs ${Array.from(abbrs)[0]}`;
+    return 'vs Opp';
+  }, [sorted]);
 
-  function refreshLabel(): string {
-    if (refreshState === 'dispatching') return 'Starting...';
-    if (refreshState === 'running')     return 'Refreshing...';
-    if (refreshState === 'reloading')   return 'Loading...';
-    if (refreshState === 'done')        return 'Updated';
-    if (refreshState === 'error')       return 'Retry';
-    return 'Refresh Lines';
-  }
-
-  function refreshBtnClass(): string {
-    const base = 'text-xs px-3 py-1 rounded border transition-colors font-medium';
-    if (isRefreshing)             return `${base} border-gray-700 text-gray-600 cursor-not-allowed`;
-    if (refreshState === 'done')  return `${base} border-green-800 text-green-600`;
-    if (refreshState === 'error') return `${base} border-red-800 text-red-500 hover:border-red-600`;
-    return `${base} border-gray-600 text-gray-400 hover:border-gray-400 hover:text-gray-200`;
-  }
+  const priceColLabel = outcomeFilter === 'Under' ? 'U Odds' : 'Odds';
 
   function SortTh({ col, label, title, right }: { col: SortKey; label: string; title?: string; right?: boolean }) {
     return (
@@ -491,18 +366,8 @@ export default function GradesPageInner() {
     );
   }
 
-  const oppLabel = useMemo(() => {
-    const abbrs = new Set(sorted.map((r) => r.oppTeamAbbr).filter(Boolean));
-    if (abbrs.size === 1) return `vs ${Array.from(abbrs)[0]}`;
-    return 'vs Opp';
-  }, [sorted]);
-
-  // Label for the price column — "Odds" for overs, "U Odds" for unders
-  const priceColLabel = outcomeFilter === 'Under' ? 'U Odds' : 'Odds';
-
   return (
     <div className="flex flex-col min-h-screen">
-      {/* Header */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap">
         <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">
           &#8592; Games
@@ -512,15 +377,12 @@ export default function GradesPageInner() {
         </span>
         <span className="text-xs text-gray-600">{gradeDate}</span>
 
-        {/* Over / Under toggle */}
         {!loading && !error && grades.length > 0 && (
           <div className="flex rounded border border-gray-700 overflow-hidden text-xs font-medium">
             <button
               onClick={() => setOutcomeFilter('Over')}
               className={`px-3 py-1 transition-colors ${
-                outcomeFilter === 'Over'
-                  ? 'bg-gray-700 text-gray-100'
-                  : 'text-gray-500 hover:text-gray-300'
+                outcomeFilter === 'Over' ? 'bg-gray-700 text-gray-100' : 'text-gray-500 hover:text-gray-300'
               }`}
             >
               Over{overCount > 0 ? ` (${overCount})` : ''}
@@ -528,9 +390,7 @@ export default function GradesPageInner() {
             <button
               onClick={() => setOutcomeFilter('Under')}
               className={`px-3 py-1 transition-colors border-l border-gray-700 ${
-                outcomeFilter === 'Under'
-                  ? 'bg-gray-700 text-gray-100'
-                  : 'text-gray-500 hover:text-gray-300'
+                outcomeFilter === 'Under' ? 'bg-gray-700 text-gray-100' : 'text-gray-500 hover:text-gray-300'
               }`}
             >
               Under{underCount > 0 ? ` (${underCount})` : ''}
@@ -573,16 +433,7 @@ export default function GradesPageInner() {
         )}
 
         {!loading && !error && (
-          <button
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-            className={refreshBtnClass()}
-          >
-            {isRefreshing && (
-              <span className="inline-block w-2 h-2 rounded-full bg-current animate-pulse mr-1.5 align-middle" />
-            )}
-            {refreshLabel()}
-          </button>
+          <RefreshDataButton onComplete={handleRefreshComplete} />
         )}
 
         {!loading && !error && (
@@ -592,12 +443,6 @@ export default function GradesPageInner() {
           </span>
         )}
       </div>
-
-      {refreshState === 'error' && refreshError && (
-        <div className="px-4 py-2 text-xs text-red-400 border-b border-gray-800">
-          {refreshError}
-        </div>
-      )}
 
       {/* Odds floor slider */}
       {!loading && !error && grades.length > 0 && (
@@ -616,10 +461,7 @@ export default function GradesPageInner() {
             {minOdds >= 0 ? `+${minOdds}` : `${minOdds}`}
           </span>
           {oddsFilterActive && (
-            <button
-              onClick={() => setMinOdds(ODDS_MIN)}
-              className="text-xs text-gray-600 hover:text-gray-400"
-            >
+            <button onClick={() => setMinOdds(ODDS_MIN)} className="text-xs text-gray-600 hover:text-gray-400">
               Reset
             </button>
           )}
@@ -645,53 +487,40 @@ export default function GradesPageInner() {
                   <SortTh col="lineValue" label="Line" right />
                   <SortTh col="overPrice" label={priceColLabel} right />
                   <th className="text-right py-1.5 px-2 font-medium text-gray-500 text-xs" title="Implied probability from odds">Imp%</th>
-                  <SortTh col="compositeGrade" label="Comp" title="Composite grade — equal-weighted average of all signal components" right />
+                  <SortTh col="compositeGrade" label="Comp" title="Composite grade" right />
                   <SortTh col="grade" label="HR%" title="Hit rate grade (weighted 20/60 day)" right />
                   <SortTh col="hitRate20" label="L20%" right />
                   <SortTh col="hitRate60" label="L60%" right />
                   <SortTh col="hitRateOpp" label={oppLabel} title="Hit rate vs today's opponent (60-day window)" right />
                   <SortTh col="sampleSize20" label="N20" right />
                   <SortTh col="sampleSize60" label="N60" right />
-                  <SortTh col="def" label="Def" title="Opponent defense rank for this stat at this position. 1st = most allowed." right />
+                  <SortTh col="def" label="Def" title="Opponent defense rank. 1st = most allowed." right />
                 </tr>
               </thead>
               <tbody>
                 {sorted.map((row) => {
                   const def = defRankCell(row);
                   const alt = isAlternate(row.marketKey);
-                  const oppPct = fmtPct(row.hitRateOpp);
+                  const oppPct   = fmtPct(row.hitRateOpp);
                   const oppTitle = row.sampleSizeOpp
                     ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'}`
                     : undefined;
                   return (
                     <tr key={row.gradeId} className="border-b border-gray-800">
                       <td className="py-1.5 pr-3">
-                        <Link
-                          href={playerHref(row)}
-                          className="text-gray-100 hover:text-blue-400 transition-colors"
-                        >
+                        <Link href={playerHref(row)} className="text-gray-100 hover:text-blue-400 transition-colors">
                           {row.playerName}
                         </Link>
                       </td>
-                      <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">
-                        {marketAbbr(row.marketKey)}
-                      </td>
+                      <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">{marketAbbr(row.marketKey)}</td>
                       <td className="py-1.5 px-1 text-center text-xs">
                         {alt ? <span className="text-yellow-600">*</span> : ''}
                       </td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.lineValue)}</td>
-                      <td className={`py-1.5 px-2 text-right tabular-nums ${oddsColor(row.overPrice)}`}>
-                        {fmtOdds(row.overPrice)}
-                      </td>
-                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">
-                        {impliedProb(row.overPrice)}
-                      </td>
-                      <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.compositeGrade)}`}>
-                        {fmt(row.compositeGrade)}
-                      </td>
-                      <td className={`py-1.5 px-2 text-right ${gradeColor(row.grade)}`}>
-                        {fmt(row.grade)}
-                      </td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${oddsColor(row.overPrice)}`}>{fmtOdds(row.overPrice)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">{impliedProb(row.overPrice)}</td>
+                      <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.compositeGrade)}`}>{fmt(row.compositeGrade)}</td>
+                      <td className={`py-1.5 px-2 text-right ${gradeColor(row.grade)}`}>{fmt(row.grade)}</td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate60)}</td>
                       <td
@@ -709,9 +538,7 @@ export default function GradesPageInner() {
                       <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize60 ?? '-'}</td>
                       <td className={`py-1.5 pl-2 text-right tabular-nums text-xs ${
                         def.rank != null ? rankColor(def.rank) : 'text-gray-600'
-                      }`}>
-                        {def.label}
-                      </td>
+                      }`}>{def.label}</td>
                     </tr>
                   );
                 })}
