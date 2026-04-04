@@ -92,8 +92,16 @@ interface PlayerInfo {
   position: string | null;
   playerName: string | null;
   teamId: number | null;
-  gameLineupStatus: string | null;   // 'Confirmed' | 'Projected' | null
-  gameStarterStatus: string | null;  // 'Starter' | 'Bench' | 'Inactive' | null
+  gameLineupStatus: string | null;
+  gameStarterStatus: string | null;
+}
+
+interface TodayGame {
+  gameId: string;
+  homeTeamAbbr: string;
+  awayTeamAbbr: string;
+  homeTeamId: number;
+  awayTeamId: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +133,6 @@ const MARKET_ABBR: Record<string, string> = {
   player_rebounds_assists_alternate:       'RA',
 };
 
-// Canonical display order for Today's Props strip.
 const PROP_ORDER: string[] = [
   'player_points',
   'player_rebounds',
@@ -183,7 +190,6 @@ function todayLocal(): string {
 
 // ---------------------------------------------------------------------------
 // Lineup status badge
-// Inactive → red. Starter → blue. Bench → gray. Null → nothing shown.
 // ---------------------------------------------------------------------------
 
 function LineupStatusBadge({
@@ -202,12 +208,8 @@ function LineupStatusBadge({
     cls = 'text-red-400 border-red-900';
   } else if (starterStatus === 'Starter') {
     cls = 'text-blue-400 border-blue-900';
-  } else {
-    // Bench
-    cls = 'text-gray-500 border-gray-700';
   }
 
-  // Append lineup confirmation state in parentheses when available.
   if (lineupStatus) {
     label = `${starterStatus} (${lineupStatus})`;
   }
@@ -712,6 +714,93 @@ function StatsToggle({ showAll, onToggle }: { showAll: boolean; onToggle: () => 
 }
 
 // ---------------------------------------------------------------------------
+// Game + team selector
+// ---------------------------------------------------------------------------
+
+function GameTeamSelector({
+  games,
+  activeGameId,
+  currentPlayerId,
+  date,
+  tab,
+}: {
+  games: TodayGame[];
+  activeGameId: string | null;
+  currentPlayerId: string;
+  date: string;
+  tab: string;
+}) {
+  const router = useRouter();
+  const [loadingTeam, setLoadingTeam] = useState<number | null>(null);
+
+  if (games.length === 0) return null;
+
+  const activeGame = games.find((g) => g.gameId === activeGameId) ?? games[0];
+
+  function buildParams(gameId: string, playerId: string | number): string {
+    const p = new URLSearchParams();
+    p.set('gameId', gameId);
+    p.set('tab', tab);
+    p.set('date', date);
+    return p.toString();
+  }
+
+  async function navigateToTeam(teamId: number, gameId: string) {
+    setLoadingTeam(teamId);
+    try {
+      const res = await fetch(`/api/team-players?teamId=${teamId}`);
+      const data = await res.json();
+      const players: { playerId: number; playerName: string }[] = data.players ?? [];
+      if (players.length > 0) {
+        router.push(`/nba/player/${players[0].playerId}?${buildParams(gameId, players[0].playerId)}`);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingTeam(null);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 min-w-0">
+      {/* Game dropdown */}
+      <select
+        value={activeGame.gameId}
+        onChange={(e) => {
+          const g = games.find((x) => x.gameId === e.target.value);
+          if (!g) return;
+          // Navigate to current player but with new gameId
+          router.push(`/nba/player/${currentPlayerId}?${buildParams(g.gameId, currentPlayerId)}`);
+        }}
+        className="bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1 outline-none cursor-pointer"
+      >
+        {games.map((g) => (
+          <option key={g.gameId} value={g.gameId} className="bg-gray-900">
+            {g.awayTeamAbbr} @ {g.homeTeamAbbr}
+          </option>
+        ))}
+      </select>
+
+      {/* Team pills */}
+      <button
+        onClick={() => navigateToTeam(activeGame.awayTeamId, activeGame.gameId)}
+        disabled={loadingTeam !== null}
+        className="px-2.5 py-1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
+      >
+        {loadingTeam === activeGame.awayTeamId ? '…' : activeGame.awayTeamAbbr}
+      </button>
+      <button
+        onClick={() => navigateToTeam(activeGame.homeTeamId, activeGame.gameId)}
+        disabled={loadingTeam !== null}
+        className="px-2.5 py-1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
+      >
+        {loadingTeam === activeGame.homeTeamId ? '…' : activeGame.homeTeamAbbr}
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -747,8 +836,27 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
   const [showAllStats, setShowAllStats] = useState(false);
   const [vsOppOnly, setVsOppOnly]   = useState(false);
+  const [todayGames, setTodayGames] = useState<TodayGame[]>([]);
 
   const isFullGame = selectedPeriods.size === 0;
+
+  // Fetch today's games for the game/team selector
+  useEffect(() => {
+    const today = todayLocal();
+    fetch(`/api/games?sport=nba&date=${today}`)
+      .then((r) => r.ok ? r.json() : { games: [] })
+      .then((data) => {
+        const games: TodayGame[] = (data.games ?? []).map((g: any) => ({
+          gameId:       g.gameId,
+          homeTeamAbbr: g.homeTeamAbbr,
+          awayTeamAbbr: g.awayTeamAbbr,
+          homeTeamId:   g.homeTeamId,
+          awayTeamId:   g.awayTeamId,
+        }));
+        setTodayGames(games);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -760,7 +868,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     setTeamPlayers([]);
     setVsOppOnly(false);
 
-    // Pass gameId to the player API so it can look up today's lineup status.
     const playerUrl = backGameId
       ? `/api/player?playerId=${playerId}&lastN=9999&sport=nba&gameId=${backGameId}`
       : `/api/player?playerId=${playerId}&lastN=9999&sport=nba`;
@@ -972,9 +1079,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   return (
     <div className="flex flex-col min-h-screen">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3">
-        <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">&#8592;</Link>
+      <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap">
+        <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm flex-none">&#8592;</Link>
 
+        {/* Player name / team dropdown */}
         {teamPlayers.length > 0 ? (
           <select
             value={playerId}
@@ -982,7 +1090,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const params = new URLSearchParams(searchParams.toString());
               router.push(`/nba/player/${e.target.value}?${params.toString()}`);
             }}
-            className="bg-transparent text-sm font-semibold text-gray-200 border-none outline-none cursor-pointer"
+            className="bg-transparent text-sm font-semibold text-gray-200 border-none outline-none cursor-pointer flex-none"
           >
             {teamPlayers.map((p) => (
               <option key={p.playerId} value={String(p.playerId)}
@@ -992,10 +1100,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
             ))}
           </select>
         ) : (
-          <span className="text-sm font-semibold text-gray-200">{displayName}</span>
+          <span className="text-sm font-semibold text-gray-200 flex-none">{displayName}</span>
         )}
 
-        {/* Lineup status badge — only shown when navigated from a game */}
+        {/* Lineup status badge */}
         {playerInfo.gameStarterStatus && (
           <LineupStatusBadge
             starterStatus={playerInfo.gameStarterStatus}
@@ -1003,7 +1111,19 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           />
         )}
 
-        <span className="text-xs text-gray-600 ml-auto">
+        {/* Spacer */}
+        <div className="flex-1" />
+
+        {/* Game + team selector */}
+        <GameTeamSelector
+          games={todayGames}
+          activeGameId={backGameId}
+          currentPlayerId={playerId}
+          date={gradeDate}
+          tab={backTab}
+        />
+
+        <span className="text-xs text-gray-600 flex-none">
           {playedCount} GP / {teamGameCount} team games
         </span>
       </div>
@@ -1138,7 +1258,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const fmtM = (min: number, started: boolean | null): string => {
                 const m = Math.floor(min);
                 const s = Math.round((min - m) * 60);
-                const t = `${m}:${s.toString().padStart(2, '0')}`;
+                const t = `${m}:${s.toString().padStart(2, '00')}`;
                 return started === true ? `*${t}` : t;
               };
               const fmtPT = (actual: number, potential: number | null): string => {
