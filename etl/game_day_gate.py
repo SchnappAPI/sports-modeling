@@ -51,21 +51,31 @@ TODAY_ET = datetime.now(ET_TZ).strftime("%Y-%m-%d")
 INTERVAL_PREGAME = 14   # lines can still move pre-game
 INTERVAL_LIVE    = 30   # lines locked once games start; less urgency
 
+# SQL Server error 130 forbids aggregate functions on expressions containing
+# subqueries. The newly_final logic (NOT EXISTS against daily_grades) must
+# be resolved per-row in a CTE before aggregating.
 QUERY_GATE = f"""
+WITH game_flags AS (
+    SELECT
+        game_status,
+        CASE
+            WHEN game_status = 3
+             AND NOT EXISTS (
+                 SELECT 1 FROM common.daily_grades g
+                 WHERE g.grade_date = CAST(s.game_date AS DATE)
+                   AND g.bookmaker_key = 'fanduel'
+             )
+            THEN 1 ELSE 0
+        END AS is_newly_final
+    FROM nba.schedule s
+    WHERE CONVERT(VARCHAR(10), s.game_date, 120) = '{TODAY_ET}'
+)
 SELECT
     SUM(CASE WHEN game_status = 1 THEN 1 ELSE 0 END) AS pregame_count,
     SUM(CASE WHEN game_status = 2 THEN 1 ELSE 0 END) AS live_count,
     SUM(CASE WHEN game_status = 3 THEN 1 ELSE 0 END) AS final_count,
-    SUM(CASE
-        WHEN s.game_status = 3
-         AND NOT EXISTS (
-             SELECT 1 FROM common.daily_grades g
-             WHERE g.grade_date = CAST(s.game_date AS DATE)
-               AND g.bookmaker_key = 'fanduel'
-         )
-        THEN 1 ELSE 0 END) AS newly_final_count
-FROM nba.schedule s
-WHERE CONVERT(VARCHAR(10), s.game_date, 120) = '{TODAY_ET}'
+    SUM(is_newly_final)                               AS newly_final_count
+FROM game_flags
 """
 
 QUERY_LAST_GRADE = f"""
