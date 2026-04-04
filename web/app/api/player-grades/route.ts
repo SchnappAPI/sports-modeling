@@ -5,14 +5,14 @@ import { getPool } from '@/lib/db';
 // Returns the canonical FanDuel posted line per game per market for a player.
 // Used by the player game log to colour-code stat values vs prop lines.
 //
-// Only rows with a real posted price (over_price IS NOT NULL) are returned.
-// Bracket rows generated around the posted line have NULL prices and are
-// excluded so the coloring always reflects the actual line FanDuel offered,
-// not a synthetic bracket value.
+// For standard (non-alternate) markets we take the row with the lowest line
+// value. FanDuel's posted line is always the lowest standard line — bracket
+// lines written around it have higher values and must not shadow it.
 //
-// For historical games where the price is not stored (older backfill), we
-// fall back to any available line for that game/market so coloring still
-// works on as many rows as possible.
+// For alternate markets we fall back to grade_id ASC (earliest written) as a
+// stable tiebreaker, since alternate lines have no canonical "posted" concept.
+//
+// Only fanduel rows are returned. Rows without a game mapping are excluded.
 export async function GET(req: NextRequest) {
   const playerIdRaw = req.nextUrl.searchParams.get('playerId');
   if (!playerIdRaw) {
@@ -28,30 +28,23 @@ export async function GET(req: NextRequest) {
       .request()
       .input('playerId', mssql.Int, playerId)
       .query(
-        `-- Per game per market, prefer the row with a real posted price.
-         -- Fall back to any row when no price is stored (older backfill rows).
-         -- This ensures coloring works across the full history while always
-         -- using the actual FanDuel line when one is available.
-         WITH ranked AS (
+        `WITH ranked AS (
            SELECT
              egm.game_id   AS gameId,
              dg.market_key AS marketKey,
              dg.line_value AS lineValue,
-             -- Prefer rows that came from the odds table (have a real price).
-             -- We detect this via the prop_prices CTE used in /api/grades;
-             -- here we approximate by preferring standard (non-alternate) markets
-             -- first, then take the median line value as a proxy for the posted line.
              ROW_NUMBER() OVER (
                PARTITION BY egm.game_id, dg.market_key
                ORDER BY
-                 -- Rows with a real bookmaker line tend to cluster near the median.
-                 -- Use grade (hit rate) DESC as a stable tiebreaker so the pick
-                 -- is deterministic when multiple lines have equal priority.
+                 -- Standard markets: lowest line_value = the actual posted line.
+                 -- Bracket lines always have higher values and must be skipped.
+                 -- Alternate markets: grade_id ASC as a stable fallback.
+                 CASE WHEN dg.market_key NOT LIKE '%_alternate' THEN dg.line_value ELSE 9999 END ASC,
                  dg.grade_id ASC
              ) AS rn
            FROM common.daily_grades dg
            JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
-           WHERE dg.player_id    = @playerId
+           WHERE dg.player_id     = @playerId
              AND dg.bookmaker_key = 'fanduel'
          )
          SELECT gameId, marketKey, lineValue
