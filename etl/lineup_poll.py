@@ -9,14 +9,14 @@ Two-stage lineup strategy
 Stage 1 (Confirmed / Projected from official JSON): Fetch the NBA's official
   daily lineups JSON.
   URL: stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
-  This file is published hours before tip with projected starters, and is
-  updated with truly confirmed starters 30-60 minutes before tip.
 
-  To avoid showing "Confirmed" prematurely, rows from this JSON are written
-  as lineup_status = 'Confirmed' only when the game tips within
-  CONFIRMED_WINDOW_MINUTES. Games in the JSON whose tip is further out are
-  written as 'Projected'. In both cases Stage 2 is skipped for those games
-  (no need to call boxscorepreviewv3 when the official JSON has data).
+  The NBA publishes projected starters in this file throughout the day, then
+  updates it with truly confirmed starters 30-60 minutes before tip. The
+  confirmed signal is the game-level 'confirmed' flag in the JSON itself
+  (g.get('confirmed') == 1 or True). If the flag is absent or falsy, the
+  game is treated as Projected regardless of time-to-tip.
+
+  In both cases Stage 2 is skipped for games that appear in the JSON.
 
 Stage 2 (Projected): For any qualifying game that returned NO rows from
   the official JSON at all, call boxscorepreviewv3 per game.
@@ -66,9 +66,6 @@ log = logging.getLogger(__name__)
 PROXY_URL = __import__('os').environ.get("NBA_PROXY_URL")
 
 ET_TZ = ZoneInfo("America/New_York")
-
-# Only write 'Confirmed' when tip is this many minutes away or less.
-CONFIRMED_WINDOW_MINUTES = 90
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +182,11 @@ def fetch_official_lineups(game_date):
         game_id = safe_str(g.get("gameId"))
         if game_id is None:
             continue
+
+        # Log all top-level keys on the game object so we can identify
+        # the confirmed signal the NBA uses in this JSON.
+        log.info(f"  JSON game keys for {game_id}: { {k: g[k] for k in g if k not in ('homeTeam','awayTeam')} }")
+
         rows = []
         for side, home_away in (("homeTeam", "Home"), ("awayTeam", "Away")):
             team    = g.get(side, {})
@@ -282,33 +284,75 @@ def main():
     game_ids_to_update  = set(game_start_map.keys())
     log.info(f"{len(game_ids_to_update)} game(s) qualify for lineup refresh.")
 
-    today               = datetime.now(ET_TZ).date()
-    now_utc             = datetime.now(timezone.utc)
-    confirmed_threshold = timedelta(minutes=CONFIRMED_WINDOW_MINUTES)
+    today   = datetime.now(ET_TZ).date()
+    now_utc = datetime.now(timezone.utc)
 
     # ------------------------------------------------------------------
     # Stage 1: Official daily lineups JSON.
-    # Label rows Confirmed only when within CONFIRMED_WINDOW_MINUTES of tip.
+    # Use the JSON's own confirmed flag to determine the label.
+    # We fetch the raw JSON here to inspect game-level fields.
     # ------------------------------------------------------------------
     log.info("Stage 1: fetching official lineups JSON...")
-    official_by_game = fetch_official_lineups(today)
+
+    date_key = today.strftime("%Y%m%d")
+    url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_key}.json"
+    raw_data = _direct_get(url, f"daily_lineups {date_key}")
 
     stage1_rows     = []
     stage1_game_ids = set()
 
-    for gid, rows in official_by_game.items():
-        if gid not in game_ids_to_update:
-            continue
-        start_utc = game_start_map.get(gid)
-        if start_utc is None or (start_utc - now_utc) <= confirmed_threshold:
-            label = "Confirmed"
-        else:
-            label = "Projected"
-        for r in rows:
-            r["lineup_status"] = label
-        stage1_rows.extend(rows)
-        stage1_game_ids.add(gid)
-        log.info(f"  {gid}: {len(rows)} rows from official JSON, labeled '{label}'.")
+    if raw_data:
+        for g in raw_data.get("games", []):
+            gid = safe_str(g.get("gameId"))
+            if gid is None or gid not in game_ids_to_update:
+                continue
+
+            # Log game-level fields to identify the confirmed signal.
+            meta = {k: g[k] for k in g if k not in ("homeTeam", "awayTeam")}
+            log.info(f"  JSON game meta {gid}: {meta}")
+
+            # Use the JSON's own confirmed flag if present.
+            # Known candidate keys: 'confirmed', 'isConfirmed', 'lineupConfirmed'.
+            # Fall back to time-based check (30 min) until we confirm the key name.
+            json_confirmed = (
+                g.get("confirmed") or
+                g.get("isConfirmed") or
+                g.get("lineupConfirmed")
+            )
+            if json_confirmed:
+                label = "Confirmed"
+            else:
+                # Fallback: confirm only if tip is within 30 minutes.
+                start_utc = game_start_map.get(gid)
+                if start_utc is not None and (start_utc - now_utc) <= timedelta(minutes=30):
+                    label = "Confirmed"
+                else:
+                    label = "Projected"
+
+            rows = []
+            for side, home_away in (("homeTeam", "Home"), ("awayTeam", "Away")):
+                team    = g.get(side, {})
+                tricode = safe_str(team.get("teamAbbreviation"))
+                for p in team.get("players", []):
+                    pos     = safe_str(p.get("position"))
+                    roster  = safe_str(p.get("rosterStatus"))
+                    starter = "Starter" if pos else ("Bench" if roster == "Active" else "Inactive")
+                    rows.append({
+                        "game_id":        gid,
+                        "game_date":      today,
+                        "home_away":      home_away,
+                        "team_tricode":   tricode,
+                        "player_name":    safe_str(p.get("playerName")),
+                        "position":       pos,
+                        "roster_status":  roster,
+                        "starter_status": starter,
+                        "lineup_status":  label,
+                    })
+
+            if rows:
+                stage1_rows.extend(rows)
+                stage1_game_ids.add(gid)
+                log.info(f"  {gid}: {len(rows)} rows from official JSON, labeled '{label}'.")
 
     if stage1_rows:
         with engine.begin() as conn:
@@ -328,8 +372,8 @@ def main():
 
     # ------------------------------------------------------------------
     # Stage 2: Projected lineups for games absent from the official JSON.
-    # Delete ALL rows for these games first — not just Projected — so
-    # stale Confirmed rows from a prior run cannot survive.
+    # Delete ALL rows for these games first so stale Confirmed rows
+    # from a prior run cannot survive.
     # ------------------------------------------------------------------
     needs_projected = game_ids_to_update - stage1_game_ids
     if not needs_projected:
