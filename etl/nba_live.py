@@ -10,12 +10,15 @@ Two responsibilities:
 
   2. update_box_scores() -- Gates on game_status=2 (in-progress).
                             Calls NBA CDN for each live game and upserts
-                            cumulative stats (one row per player, period='GAME').
+                            cumulative stats (one row per player, period='G').
 
 CDN endpoint (public, no proxy):
   https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json
   Top-level key: "game" (not "boxScoreTraditional")
   statistics: single dict per player (cumulative game total)
+
+period='G' is used for cumulative live rows to fit the VARCHAR(2) column.
+Quarter rows from backfill use '1Q','2Q','3Q','4Q','OT'.
 
 Proxy
 -----
@@ -169,7 +172,8 @@ def _parse_minutes(clock_str):
 def fetch_live_box_score(game_id):
     """
     Fetch cumulative live box score from NBA CDN (public, no proxy needed).
-    Returns one row per player with period='GAME' for live upserts.
+    Returns one row per player with period='G' for live upserts.
+    period='G' fits the VARCHAR(2) column sized for '1Q','2Q','3Q','4Q','OT'.
     """
     url  = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
     data = _request(url, None, f"CDN boxscore {game_id}")
@@ -201,7 +205,7 @@ def fetch_live_box_score(game_id):
             rows.append({
                 "game_id":        game_id,
                 "player_id":      pid,
-                "period":         "GAME",   # cumulative live row
+                "period":         "G",      # cumulative live row, fits VARCHAR(2)
                 "season_year":    None,
                 "player_name":    pname,
                 "team_id":        team_id,
