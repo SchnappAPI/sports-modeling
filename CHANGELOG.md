@@ -9,6 +9,43 @@
 
 ---
 
+## 2026-04-04 (session 4)
+
+### UI | web/components/RefreshDataButton.tsx — NEW admin passcode refresh button
+- New reusable component. Shows a small refresh icon button; tapping opens a passcode modal.
+- Passcode validated server-side against `ADMIN_REFRESH_CODE` env var in Azure SWA app settings.
+- On success: dispatches `refresh-data.yml`, polls `/api/refresh-status` every 5s, shows spinner while running, triggers `onComplete()` callback when done.
+- Distinct from the user passcodes in `common.user_codes` — this is a separate admin-only code.
+- Do not revert to the old inline `handleRefresh` logic in GradesPageInner — that triggered `refresh-lines.yml` (odds+grading only) with no passcode. This button runs all four steps with auth.
+
+### API | web/app/api/refresh-data/route.ts — NEW admin refresh endpoint
+- POST endpoint. Validates `code` from request body against `ADMIN_REFRESH_CODE` env var (case-insensitive).
+- Returns 401 if code missing or wrong. Returns 500 if `GITHUB_PAT` or `ADMIN_REFRESH_CODE` not configured.
+- Dispatches `refresh-data.yml`, waits 3s, returns the run ID for client-side polling.
+
+### Infra | .github/workflows/refresh-data.yml — NEW full refresh workflow
+- Runs all four intra-day steps in sequence: live box score, odds (upcoming nba days-ahead=1), intraday grading, lineup poll.
+- `workflow_dispatch` only — triggered exclusively by `/api/refresh-data`.
+- Distinct from `refresh-lines.yml` (odds + grading only, no auth, used by old Refresh Lines button).
+
+### UI | web/app/nba/NbaPageInner.tsx — RefreshDataButton added to header
+- Imported `RefreshDataButton`, wired with `onComplete={loadGames}`.
+- `loadGames` extracted from the `useEffect` into a named function so it can be called on refresh completion.
+- Button appears in the right side of the header, between the At a Glance link and Log out. Hidden in demo mode.
+
+### UI | web/app/nba/grades/GradesPageInner.tsx — RefreshDataButton replaces old Refresh Lines button
+- Removed all `handleRefresh`, `refreshState`, `refreshError`, `pollRef`, `RefreshState` type, and `isRefreshing`/`refreshLabel`/`refreshBtnClass` helpers.
+- Imported `RefreshDataButton` instead. `onComplete` calls `loadGrades()` + `setDefenseCache({})`.
+- Error toast div removed (error display is now inside the modal component).
+
+### Grading | grading/grade_props.py — restored from push_files corruption
+- File was corrupted by `push_files` which serialized it with literal `\n` strings instead of real newlines. Stored in repo as a single line.
+- Restored via `github:create_or_update_file` (NOT push_files) — this is the only safe method for large Python files.
+- Verified with `py_compile` on VM after `git pull`. 939 lines, OK.
+- RULE: never use `push_files` for Python files. Always use `create_or_update_file` for Python. See Decision Log.
+
+---
+
 ## 2026-04-04 (session 3)
 
 ### Infra | Azure VM — self-hosted GitHub Actions runner provisioned
