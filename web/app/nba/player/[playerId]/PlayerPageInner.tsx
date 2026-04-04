@@ -123,6 +123,21 @@ const MARKET_ABBR: Record<string, string> = {
   player_rebounds_assists_alternate:       'RA',
 };
 
+// Canonical display order for Today's Props strip — matches game log column order.
+const PROP_ORDER: string[] = [
+  'player_points',
+  'player_rebounds',
+  'player_assists',
+  'player_threes',
+  'player_points_rebounds_assists',
+  'player_points_rebounds',
+  'player_points_assists',
+  'player_rebounds_assists',
+  'player_steals',
+  'player_blocks',
+  'player_turnovers',
+];
+
 function marketLabel(key: string): string {
   return MARKET_ABBR[key] ?? key.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
@@ -187,7 +202,8 @@ function buildGameSummaries(
         opponentAbbr: r.opponentAbbr,
         isHome:       r.isHome,
         dnp:          r.dnp,
-        started:      r.started,
+        // SQL returns 1/0 as integers; coerce to boolean here
+        started:      r.started != null ? !!r.started : null,
         potentialAst: r.potentialAst ?? null,
         rebChances:   r.rebChances   ?? null,
       });
@@ -268,12 +284,6 @@ function fmtMin(min: number, gp: number): string {
   return `${m}:${s.toString().padStart(2, '00')}`;
 }
 
-function fmtShoot(made: number, att: number, gp: number): string {
-  if (gp === 0 || att === 0) return '-';
-  const pct = ((made / att) * 100).toFixed(0);
-  return `${pct}%`;
-}
-
 const MARKET_STAT: Record<string, keyof GameSummary> = {
   player_points:            'pts',
   player_points_alternate:  'pts',
@@ -328,31 +338,34 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   const stdPaired = pairRows(stdRows);
   const altPaired = pairRows(altRows);
 
-  const order: string[] = [];
+  // Collect all base markets present in the data
   const seen = new Set<string>();
-  for (const r of grades) {
-    const base = baseMarket(r.marketKey);
-    if (!seen.has(base)) { order.push(base); seen.add(base); }
-  }
+  for (const r of grades) seen.add(baseMarket(r.marketKey));
 
-  return order.map((base) => {
-    const stdMap = stdPaired.get(base);
-    const altMap = altPaired.get(base);
-    const sortPairs = (m: Map<number, LinePair> | undefined): LinePair[] =>
-      m ? Array.from(m.values()).sort((a, b) => a.lineValue - b.lineValue) : [];
-    return {
-      baseKey: base,
-      label: marketLabel(base),
-      standardLines: sortPairs(stdMap),
-      altLines:      sortPairs(altMap),
-    };
-  // Only show markets that have a standard posted line. Alt-only markets are
-  // excluded from the strip — there is no meaningful single line to display.
-  }).filter((g) => g.standardLines.length > 0);
+  // Sort by canonical PROP_ORDER; unknown markets go to the end
+  const order = Array.from(seen).sort((a, b) => {
+    const ai = PROP_ORDER.indexOf(a);
+    const bi = PROP_ORDER.indexOf(b);
+    if (ai === -1 && bi === -1) return 0;
+    if (ai === -1) return 1;
+    if (bi === -1) return -1;
+    return ai - bi;
+  });
+
+  const sortPairs = (m: Map<number, LinePair> | undefined): LinePair[] =>
+    m ? Array.from(m.values()).sort((a, b) => a.lineValue - b.lineValue) : [];
+
+  return order.map((base) => ({
+    baseKey: base,
+    label: marketLabel(base),
+    standardLines: sortPairs(stdPaired.get(base)),
+    altLines:      sortPairs(altPaired.get(base)),
+  // Only show markets that have a standard posted line.
+  })).filter((g) => g.standardLines.length > 0);
 }
 
 // ---------------------------------------------------------------------------
-// Dot plot — full width via preserveAspectRatio="none" on a wide viewBox
+// Dot plot
 // ---------------------------------------------------------------------------
 
 type DotWindow = 'L10' | 'L30' | 'L50' | 'All';
@@ -373,7 +386,6 @@ function StatDotPlot({
 
   const played = summaries.filter((g) => !g.dnp);
   const count  = win === 'L10' ? 10 : win === 'L30' ? 30 : win === 'L50' ? 50 : played.length;
-  // Oldest game left, most recent right
   const slice  = played.slice(0, count).reverse();
 
   if (slice.length === 0) return null;
@@ -383,7 +395,6 @@ function StatDotPlot({
   const maxVal = Math.max(...values, lineValue);
   const range  = maxVal - minVal || 1;
 
-  // Wide fixed viewBox — SVG stretches to fill container via preserveAspectRatio="none"
   const VW = 600;
   const VH = 64;
   const PAD_X = 8;
@@ -405,29 +416,20 @@ function StatDotPlot({
       className="w-full"
       style={{ height: VH }}
     >
-      {/* Prop line */}
-      <line
-        x1={PAD_X} y1={lineY} x2={VW - PAD_X} y2={lineY}
-        stroke="#4b5563" strokeWidth="1.5" strokeDasharray="4 4"
-      />
-      {/* Line value label — fixed aspect so text isn't distorted */}
+      <line x1={PAD_X} y1={lineY} x2={VW - PAD_X} y2={lineY}
+        stroke="#4b5563" strokeWidth="1.5" strokeDasharray="4 4" />
       <text x={VW - PAD_X - 4} y={lineY - 4} fill="#6b7280" fontSize="9" textAnchor="end"
         style={{ fontVariantNumeric: 'tabular-nums' }}>
         {lineValue.toFixed(1)}
       </text>
-      {/* Dots */}
       {slice.map((g, i) => {
         const v   = Number(g[statKey] ?? 0);
         const cx  = xPos(i);
         const cy  = yPos(v);
         const hit = v > lineValue;
         return (
-          <circle
-            key={g.gameId}
-            cx={cx} cy={cy} r={4}
-            fill={hit ? '#4ade80' : '#f87171'}
-            opacity={0.9}
-          />
+          <circle key={g.gameId} cx={cx} cy={cy} r={4}
+            fill={hit ? '#4ade80' : '#f87171'} opacity={0.9} />
         );
       })}
     </svg>
@@ -435,7 +437,7 @@ function StatDotPlot({
 }
 
 // ---------------------------------------------------------------------------
-// Market panel — full-width dot plot + two-row alt line entries
+// Market panel
 // ---------------------------------------------------------------------------
 
 function MarketPanel({
@@ -452,7 +454,6 @@ function MarketPanel({
 
   return (
     <div className="border-t border-gray-800 pt-3 pb-3">
-      {/* Full-width dot plot — no horizontal padding so it reaches the edges */}
       <div className="px-2">
         <StatDotPlot
           summaries={summaries}
@@ -462,44 +463,40 @@ function MarketPanel({
         />
       </div>
 
-      {/* Alt lines — two-row layout per entry */}
+      {/* Alt lines — horizontal chips in a fixed-height scrollable row */}
       {group.altLines.length > 0 && (
-        <div className="mt-3 px-4 space-y-1.5">
-          <div className="text-xs text-gray-600 mb-1">Alt lines</div>
-          {group.altLines.map((pair) => {
-            const over  = pair.over;
-            const under = pair.under;
-            const grade = over?.compositeGrade ?? null;
-            const hr20  = over?.hitRate20 ?? null;
-            const hr60  = over?.hitRate60 ?? null;
-            return (
-              <div
-                key={pair.lineValue}
-                className={`px-3 py-1.5 rounded border border-gray-700/60 ${gradeBg(grade)}`}
-              >
-                {/* Row 1: line | O odds | U odds | grade */}
-                <div className="flex items-center gap-3 text-xs tabular-nums">
-                  <span className="font-semibold text-gray-200 w-9 shrink-0">
-                    {pair.lineValue.toFixed(1)}
-                  </span>
-                  <span className="text-gray-400">O {fmtOdds(over?.overPrice ?? null)}</span>
-                  {under && (
-                    <span className="text-gray-500">U {fmtOdds(under.overPrice)}</span>
-                  )}
-                  {grade != null && (
-                    <span className={`font-semibold ml-auto ${gradeColor(grade)}`}>
-                      {grade.toFixed(0)}
-                    </span>
-                  )}
+        <div className="mt-3 px-4">
+          <div className="text-xs text-gray-600 mb-1.5">Alt lines</div>
+          <div className="flex flex-nowrap gap-2 overflow-x-auto pb-1">
+            {group.altLines.map((pair) => {
+              const over  = pair.over;
+              const under = pair.under;
+              const grade = over?.compositeGrade ?? null;
+              const hr20  = over?.hitRate20 ?? null;
+              const hr60  = over?.hitRate60 ?? null;
+              return (
+                <div
+                  key={pair.lineValue}
+                  className={`flex-none px-3 py-2 rounded border border-gray-700/60 ${gradeBg(grade)}`}
+                  style={{ minWidth: '100px' }}
+                >
+                  <div className="flex items-center justify-between gap-2 text-xs tabular-nums">
+                    <span className="font-semibold text-gray-200">{pair.lineValue.toFixed(1)}</span>
+                    {grade != null && (
+                      <span className={`font-semibold ${gradeColor(grade)}`}>{grade.toFixed(0)}</span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs tabular-nums text-gray-400 space-y-0.5">
+                    <div>O {fmtOdds(over?.overPrice ?? null)}{under ? `  U ${fmtOdds(under.overPrice)}` : ''}</div>
+                    <div className="text-gray-500">
+                      {hr20 != null && <span>L20: {fmtPct(hr20)} </span>}
+                      {hr60 != null && <span>L60: {fmtPct(hr60)}</span>}
+                    </div>
+                  </div>
                 </div>
-                {/* Row 2: hit rate percentages */}
-                <div className="flex gap-2 mt-0.5 text-xs tabular-nums text-gray-500">
-                  {hr20 != null && <span>L20: {fmtPct(hr20)}</span>}
-                  {hr60 != null && <span>L60: {fmtPct(hr60)}</span>}
-                </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -507,7 +504,7 @@ function MarketPanel({
 }
 
 // ---------------------------------------------------------------------------
-// Today's Props section — spread strip + expandable panel
+// Today's Props section
 // ---------------------------------------------------------------------------
 
 function TodayPropsSection({
@@ -555,11 +552,6 @@ function TodayPropsSection({
 
   return (
     <div className="border-b border-gray-800">
-      {/*
-        Header row + market strip share the same border-b so there is no
-        stray horizontal line between them. The strip itself uses border-t
-        only on the row that separates it from the header text.
-      */}
       <div className="flex items-center px-4 py-1.5 border-b border-gray-800">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today's Props</span>
         <div className="flex gap-1 ml-auto">
@@ -578,11 +570,6 @@ function TodayPropsSection({
         </div>
       </div>
 
-      {/*
-        Strip: w-full flex so cells fill the full width and spread evenly.
-        overflow-x-auto kicks in only when total min-width exceeds viewport.
-        No border-t here — it would appear as the "extra line" seen in the screenshot.
-      */}
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
@@ -617,7 +604,6 @@ function TodayPropsSection({
         </div>
       </div>
 
-      {/* Expanded panel for the active market */}
       {activeGroup && (
         <MarketPanel
           group={activeGroup}
@@ -630,7 +616,7 @@ function TodayPropsSection({
 }
 
 // ---------------------------------------------------------------------------
-// Stats toggle button
+// Stats toggle
 // ---------------------------------------------------------------------------
 
 function StatsToggle({ showAll, onToggle }: { showAll: boolean; onToggle: () => void }) {
@@ -756,8 +742,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     [log, selectedPeriods],
   );
 
-  // Game log view — optionally filtered to vs-opp games only.
-  // Splits table is unaffected (it already shows a dedicated vs-opp row).
   const displayedSummaries = useMemo(
     () => vsOppOnly && oppParam
       ? summaries.filter((g) => g.opponentAbbr === oppParam)
@@ -828,8 +812,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     ...(oppParam ? [{ key: 'opp' as SplitKey, label: `vs ${oppParam}` }] : []),
   ];
 
-  const compactSplitHeaders = ['MIN', 'PTS', '3PT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA'];
-  const allStatsSplitHeaders = ['MIN', 'PTS', 'FG', '3PT', 'FT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'STL', 'BLK', 'TOV'];
+  // Compact: MIN PTS 3PM REB AST PRA PR PA RA
+  // All Stats: MIN PTS FG 3PM 3PA FT REB AST PRA PR PA RA STL BLK TOV
+  const compactSplitHeaders  = ['MIN', 'PTS', '3PM', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA'];
+  const allStatsSplitHeaders = ['MIN', 'PTS', 'FG', '3PM', '3PA', 'FT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'STL', 'BLK', 'TOV'];
   const splitHeaders = showAllStats ? allStatsSplitHeaders : compactSplitHeaders;
 
   function renderSplitCells(s: SplitStats) {
@@ -845,8 +831,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
             {s.gp === 0 ? '-' : `${(s.fgm/s.gp).toFixed(1)}-${(s.fga/s.gp).toFixed(1)}`}
           </td>
+          {/* 3PM and 3PA as separate columns in all-stats */}
           <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
-            {s.gp === 0 ? '-' : `${(s.fg3m/s.gp).toFixed(1)}-${(s.fg3a/s.gp).toFixed(1)}`}
+            {avg(s.fg3m, s.gp)}
+          </td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
+            {avg(s.fg3a, s.gp)}
           </td>
           <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
             {s.gp === 0 ? '-' : `${(s.ftm/s.gp).toFixed(1)}-${(s.fta/s.gp).toFixed(1)}`}
@@ -867,8 +857,9 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       <>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
+        {/* Compact: avg 3PM only (plain number, no ratio) */}
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
-          {s.gp === 0 ? '-' : `${(s.fg3m/s.gp).toFixed(1)}-${(s.fg3a/s.gp).toFixed(1)}`}
+          {avg(s.fg3m, s.gp)}
         </td>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
@@ -954,7 +945,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         summaries={summaries}
       />
 
-      {/* Period filter — All Stats toggle and vs Opp button live here */}
+      {/* Period filter */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
         <span className="text-xs text-gray-600">All</span>
         {availablePeriods.map((p) => (
@@ -1018,12 +1009,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               ) : (
                 <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
               )}
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">
-                REB
-              </th>
-              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">
-                AST
-              </th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">REB</th>
+              <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">AST</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PRA</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PR</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PA</th>
@@ -1043,6 +1030,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 const m = Math.floor(min);
                 const s = Math.round((min - m) * 60);
                 const t = `${m}:${s.toString().padStart(2, '0')}`;
+                // started is already coerced to boolean in buildGameSummaries
                 return started === true ? `*${t}` : t;
               };
               const fmtS = (made: number, att: number) =>
@@ -1052,12 +1040,19 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 return `${actual}-${Math.round(potential)}`;
               };
 
+              // Box score link for this game
+              const gameHref = `/nba?gameId=${g.gameId}&tab=boxscore&date=${g.gameDate.slice(0, 10)}`;
+
               if (g.dnp) {
                 return (
                   <tr key={g.gameId} className="border-b border-gray-800 opacity-40">
-                    <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{g.gameDate.slice(5)}</td>
+                    <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">
+                      <Link href={gameHref} className="hover:text-blue-400 transition-colors">{g.gameDate.slice(5)}</Link>
+                    </td>
                     <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
-                      {g.isHome ? '' : '@'}{g.opponentAbbr}
+                      <Link href={gameHref} className="hover:text-blue-400 transition-colors">
+                        {g.isHome ? '' : '@'}{g.opponentAbbr}
+                      </Link>
                     </td>
                     <td className="px-2 py-1.5 text-right text-gray-600 text-xs whitespace-nowrap">DNP</td>
                     <td colSpan={showAllStats ? 12 : 9} />
@@ -1076,11 +1071,20 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const paLine   = getComboLineCls(g.gameId, g.pts + g.ast, ['player_points_assists', 'player_points_assists_alternate']);
               const raLine   = getComboLineCls(g.gameId, g.reb + g.ast, ['player_rebounds_assists', 'player_rebounds_assists_alternate']);
 
+              // Starter indicator: slightly brighter left border on starter rows
+              const rowCls = g.started === true
+                ? 'border-b border-gray-800 border-l-2 border-l-blue-800'
+                : 'border-b border-gray-800';
+
               return (
-                <tr key={g.gameId} className="border-b border-gray-800">
-                  <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">{g.gameDate.slice(5)}</td>
+                <tr key={g.gameId} className={rowCls}>
+                  <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">
+                    <Link href={gameHref} className="hover:text-blue-400 transition-colors">{g.gameDate.slice(5)}</Link>
+                  </td>
                   <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
-                    {g.isHome ? '' : '@'}{g.opponentAbbr}
+                    <Link href={gameHref} className="hover:text-blue-400 transition-colors">
+                      {g.isHome ? '' : '@'}{g.opponentAbbr}
+                    </Link>
                   </td>
                   <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">
                     {fmtM(g.min, g.started)}
