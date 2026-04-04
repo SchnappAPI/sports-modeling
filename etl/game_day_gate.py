@@ -9,12 +9,12 @@ Queries nba.schedule and writes GitHub Actions outputs:
   has_final         true/false  -- any game_status = 3 today with no grade rows yet
   any_active        true/false  -- has_pregame OR has_live
   final_date        YYYY-MM-DD  -- ET game date for newly-final grading
-  run_odds_grading  true/false  -- true if >= 14 minutes since last intraday grade
+  run_odds_grading  true/false  -- true if enough time has elapsed since last
+                                   intraday grade (interval depends on game state)
 
-The run_odds_grading flag replaces the fragile run_number % 3 throttle.
-It checks the MAX created_at timestamp in common.daily_grades for today
-and returns true if more than 14 minutes have elapsed, giving a reliable
-~15-minute cadence that is drift-proof and self-healing.
+Odds/grading interval:
+  Pre-game only:  14 minutes  (lines can move; grade fresh often)
+  Any game live:  30 minutes  (lines are locked; less need to re-grade)
 
 Exit code is always 0.
 """
@@ -43,41 +43,14 @@ CONN_STR = (
     "Connection Timeout=90;"
 )
 
-# Use Eastern time (UTC-4 during EDT) for the game date.
 ET_OFFSET = timedelta(hours=-4)
 NOW_UTC   = datetime.now(timezone.utc)
 TODAY_ET  = NOW_UTC.astimezone(timezone(ET_OFFSET)).strftime("%Y-%m-%d")
 
-# Minimum minutes between intraday odds+grading runs.
-ODDS_INTERVAL_MINUTES = 14
+# Minutes between odds+grading runs depending on game state.
+INTERVAL_PREGAME = 14   # lines can still move pre-game
+INTERVAL_LIVE    = 30   # lines locked once games start; less urgency
 
-QUERY = f"""
-SELECT
-    SUM(CASE WHEN game_status = 1 THEN 1 ELSE 0 END) AS pregame_count,
-    SUM(CASE WHEN game_status = 2 THEN 1 ELSE 0 END) AS live_count,
-    SUM(CASE WHEN game_status = 3 THEN 1 ELSE 0 END) AS final_count,
-    SUM(CASE
-        WHEN s.game_status = 3
-         AND NOT EXISTS (
-             SELECT 1 FROM common.daily_grades g
-             WHERE g.grade_date = CAST(s.game_date AS DATE)
-               AND g.bookmaker_key = 'fanduel'
-         )
-        THEN 1 ELSE 0 END) AS newly_final_count,
-    -- Minutes since last intraday grade written today (NULL if none yet)
-    DATEDIFF(minute,
-        MAX(CASE WHEN CAST(g2.grade_date AS DATE) = '{TODAY_ET}'
-                 THEN g2.created_at END),
-        GETUTCDATE()
-    ) AS minutes_since_last_grade
-FROM nba.schedule s
-CROSS JOIN (SELECT MAX(created_at) AS created_at, grade_date
-             FROM common.daily_grades
-             GROUP BY grade_date) g2
-WHERE CONVERT(VARCHAR(10), s.game_date, 120) = '{TODAY_ET}'
-"""
-
-# Simpler fallback query if cross join causes issues
 QUERY_GATE = f"""
 SELECT
     SUM(CASE WHEN game_status = 1 THEN 1 ELSE 0 END) AS pregame_count,
@@ -108,7 +81,6 @@ def run():
             conn   = pyodbc.connect(CONN_STR, timeout=90)
             cursor = conn.cursor()
 
-            # Gate query
             cursor.execute(QUERY_GATE)
             row = cursor.fetchone()
 
@@ -116,13 +88,16 @@ def run():
             live        = int(row[1] or 0)
             newly_final = int(row[3] or 0)
 
-            # Timestamp-based odds/grading gate
             cursor.execute(QUERY_LAST_GRADE)
             trow = cursor.fetchone()
             minutes_since = trow[0] if trow and trow[0] is not None else 9999
-            run_odds_grading = "true" if minutes_since >= ODDS_INTERVAL_MINUTES else "false"
 
             conn.close()
+
+            # Use a longer interval once any game is live — lines are locked
+            # and re-grading every 14 minutes adds no value mid-game.
+            interval = INTERVAL_LIVE if live > 0 else INTERVAL_PREGAME
+            run_odds_grading = "true" if minutes_since >= interval else "false"
 
             has_pregame = "true" if pregame > 0 else "false"
             has_live    = "true" if live    > 0 else "false"
@@ -148,7 +123,8 @@ def run():
 
             print(
                 f"Gate: pregame={pregame} live={live} newly_final={newly_final} "
-                f"minutes_since_grade={minutes_since} run_odds={run_odds_grading} today_et={TODAY_ET}",
+                f"minutes_since_grade={minutes_since} interval={interval} "
+                f"run_odds={run_odds_grading} today_et={TODAY_ET}",
                 file=sys.stderr,
             )
             return
@@ -158,7 +134,6 @@ def run():
             if attempt < 3:
                 time.sleep(45)
 
-    # Fallback: default everything to safe values
     print("Gate check failed — defaulting to false.", file=sys.stderr)
     output_file = os.environ.get("GITHUB_OUTPUT")
     lines = [
