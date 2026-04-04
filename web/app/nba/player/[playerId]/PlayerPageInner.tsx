@@ -180,17 +180,41 @@ function todayLocal(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Volume color helper
-// Compares a game attempt value against the player's season average.
-// High (>20% above avg): teal. Low (>20% below avg): orange. Middle: gray.
+// Volume heatmap helper
+//
+// Returns an inline backgroundColor string for attempt columns.
+// Values near the season average are transparent (no background).
+// Values toward the season max get a teal background that deepens linearly.
+// Values toward the season min get an orange background that deepens linearly.
+// Max opacity is capped at 0.35 so the color stays subtle.
 // ---------------------------------------------------------------------------
 
-function volumeCls(value: number, seasonAvg: number): string {
-  if (seasonAvg === 0) return 'text-gray-300';
-  const ratio = value / seasonAvg;
-  if (ratio > 1.2) return 'text-teal-400';
-  if (ratio < 0.8) return 'text-orange-400';
-  return 'text-gray-300';
+interface AttemptRange {
+  min: number;
+  avg: number;
+  max: number;
+}
+
+function volumeBg(value: number, range: AttemptRange): string {
+  const { min, avg, max } = range;
+  // Not enough spread to be meaningful — don't color.
+  if (max === min) return 'transparent';
+
+  const MAX_OPACITY = 0.35;
+
+  if (value >= avg) {
+    // High side: scale from avg (opacity 0) to max (opacity MAX_OPACITY). Teal.
+    const span = max - avg;
+    if (span === 0) return 'transparent';
+    const opacity = Math.min((value - avg) / span, 1) * MAX_OPACITY;
+    return `rgba(45, 212, 191, ${opacity.toFixed(3)})`; // teal-400
+  } else {
+    // Low side: scale from avg (opacity 0) to min (opacity MAX_OPACITY). Orange.
+    const span = avg - min;
+    if (span === 0) return 'transparent';
+    const opacity = Math.min((avg - value) / span, 1) * MAX_OPACITY;
+    return `rgba(251, 146, 60, ${opacity.toFixed(3)})`; // orange-400
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -751,17 +775,27 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     [log, selectedPeriods],
   );
 
-  // Season averages for attempt volume coloring — always computed from the full
-  // unfiltered summaries (no period or opp filter) so the baseline stays stable.
-  const seasonAvgAttempts = useMemo(() => {
-    const fullSummaries = buildGameSummaries(log, new Set<QuarterKey>());
-    const played = fullSummaries.filter((g) => !g.dnp);
+  // Attempt ranges for volume heatmap — always from full unfiltered season so
+  // the scale stays stable regardless of quarter or opp filters.
+  const attemptRanges = useMemo((): { fga: AttemptRange; fg3a: AttemptRange; fta: AttemptRange } => {
+    const played = buildGameSummaries(log, new Set<QuarterKey>()).filter((g) => !g.dnp);
     const gp = played.length;
-    if (gp === 0) return { fga: 0, fg3a: 0, fta: 0 };
+    const empty: AttemptRange = { min: 0, avg: 0, max: 0 };
+    if (gp === 0) return { fga: empty, fg3a: empty, fta: empty };
+
+    const compute = (key: 'fga' | 'fg3a' | 'fta'): AttemptRange => {
+      const vals = played.map((g) => g[key]);
+      return {
+        min: Math.min(...vals),
+        avg: vals.reduce((s, v) => s + v, 0) / gp,
+        max: Math.max(...vals),
+      };
+    };
+
     return {
-      fga:  played.reduce((s, g) => s + g.fga,  0) / gp,
-      fg3a: played.reduce((s, g) => s + g.fg3a, 0) / gp,
-      fta:  played.reduce((s, g) => s + g.fta,  0) / gp,
+      fga:  compute('fga'),
+      fg3a: compute('fg3a'),
+      fta:  compute('fta'),
     };
   }, [log]);
 
@@ -1084,11 +1118,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const paLine   = getComboLineCls(g.gameId, g.pts + g.ast, ['player_points_assists', 'player_points_assists_alternate']);
               const raLine   = getComboLineCls(g.gameId, g.reb + g.ast, ['player_rebounds_assists', 'player_rebounds_assists_alternate']);
 
-              // Volume coloring for attempt columns — relative to season avg
-              const fgaVolCls  = volumeCls(g.fga,  seasonAvgAttempts.fga);
-              const fg3aVolCls = volumeCls(g.fg3a, seasonAvgAttempts.fg3a);
-              const ftaVolCls  = volumeCls(g.fta,  seasonAvgAttempts.fta);
-
               const rowCls = g.started === true
                 ? 'border-b border-gray-800 border-l-2 border-l-blue-800'
                 : 'border-b border-gray-800';
@@ -1110,11 +1139,26 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   {showAllStats ? (
                     <>
                       <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fgm}</td>
-                      <td className={`px-2 py-1.5 text-right whitespace-nowrap tabular-nums ${fgaVolCls}`}>{g.fga}</td>
+                      <td
+                        className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
+                        style={{ backgroundColor: volumeBg(g.fga, attemptRanges.fga) }}
+                      >
+                        {g.fga}
+                      </td>
                       <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
-                      <td className={`px-2 py-1.5 text-right whitespace-nowrap tabular-nums ${fg3aVolCls}`}>{g.fg3a}</td>
+                      <td
+                        className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
+                        style={{ backgroundColor: volumeBg(g.fg3a, attemptRanges.fg3a) }}
+                      >
+                        {g.fg3a}
+                      </td>
                       <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.ftm}</td>
-                      <td className={`px-2 py-1.5 text-right whitespace-nowrap tabular-nums ${ftaVolCls}`}>{g.fta}</td>
+                      <td
+                        className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
+                        style={{ backgroundColor: volumeBg(g.fta, attemptRanges.fta) }}
+                      >
+                        {g.fta}
+                      </td>
                     </>
                   ) : (
                     <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
