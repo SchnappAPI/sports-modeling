@@ -19,9 +19,11 @@
 - Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
 - PWA active. Install via Safari Share → Add to Home Screen.
 - `sports-session-close` skill installed — use at end of every session to update docs and generate handoff primer.
-- Compact/All Stats toggle live across player page (splits + game log), StatsTable, and BoxScoreTable. Compact shows MIN, PTS, 3PT, REB, AST, PRA, PR, PA, RA. All Stats adds FG, FT, STL, BLK, TOV.
-- VS Defense column order fixed: PTS, 3PM, REB, AST, STL, BLK, TOV (matches game log).
-- Today's Props section redesigned: Over/Under rows paired per line value, collapsible markets, horizontal alt lines.
+- Compact/All Stats toggle live across player page (splits + game log), StatsTable, and BoxScoreTable.
+- VS Defense column order: PTS, 3PM, REB, AST, STL, BLK, TOV.
+- Today's Props: horizontal strip of market cells, tappable to expand dot plot + alt lines panel. Full-width SVG dot plot (preserveAspectRatio=none). Alt lines show two-row detail (odds + hit rates). Default min odds filter on At a Glance set to -600.
+- Roster tab: badge logic fixed (Confirmed/Projected/Expected). Inactive players shown in separate dimmed section.
+- StatsTable: 3PT column split into 3PM and 3PA (separate columns in All Stats, 3PM only in compact).
 
 **Known issues:**
 - `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
@@ -32,10 +34,14 @@
 - Auto-pause delay locked — free database offer prevents changing it. Keep-alive workflow mitigates.
 - PNG icons not generated — SVG covers all modern browsers; generate via `web/scripts/generate-icons.mjs` if needed.
 - VS Defense does not show combo market columns (PRA/PR/PA/RA) — requires extending `/api/contextual` query. Deferred.
-- Today's Props section layout not final — next session rebuilds it as a horizontal strip matching VS Defense, with dot plot distribution per market.
+- Not all players' props load on player page — if a player has no rows in `common.daily_grades` for today, section correctly returns null. Investigate if a specific player should have grades but doesn't.
+- Game log prop coloring may use wrong line if an alt line appears in `gradeMap` before the standard line — `gradeMap` takes the first `marketKey` hit per game per market. Investigate with Naz Reid 4-02 example (3PT showed 4-9 red — suspect alt line with value >4 in the map).
+- `dev` branch has a stale merge conflict on `PlayerPageInner.tsx`. Close PR #29 without merging.
+- Today's Props dot plot revisit deferred — Austin wants to explore a bell-curve distribution plot as an alternative.
 
 **Next up:**
-- Redesign Today's Props in `PlayerPageInner.tsx`: horizontal header strip (one cell per market, label + posted line + composite grade, same layout as VS Defense). Expanded panel per market shows: (1) SVG dot plot of player game-by-game outcomes with L10/L30/L50/All selector and posted line marker; (2) standard line row (Over price, Under price, hit rates); (3) alt lines horizontally with hit rates even when no posted odds. Pass `summaries: GameSummary[]` into `TodayPropsSection` as a prop. `buildMarketGroups` and `LinePair` types already exist in the file.
+- PlayerPageInner.tsx: (1) Move All Stats toggle to the period filter bar. (2) Add vs Opp filter button to period filter bar. (3) Fix game log prop coloring bug — gradeMap should prefer standard line over alt line. (4) Make date/opp cells in game log link to that game's box score. (5) Fix Today's Props strip header cell when `standardLines` is empty — promote lowest alt line as display line instead of showing nothing. (6) Alt lines in panel: side-by-side chips in a fixed-height scrollable row, not stacked.
+- New page: VS Defense dashboard at `/nba/defense` — sortable table of all 30 teams × position × stat defense ranks. Clicking a row opens filtered player list. New API endpoint needed.
 - Step 15: MLB ETL and web views.
 - Step 16: NFL ETL automation and web views.
 
@@ -189,9 +195,9 @@ All components inverted for Under rows (100 - value). Rising trend is bad for an
 ### CANONICAL UI LAYOUTS — do not revert without checking CHANGELOG.md
 
 **All stat tables — compact vs all-stats toggle:**
-- Compact (default): Player/Date/Opp, MIN, PTS, 3PT (3PM-3PA), REB, AST, PRA, PR, PA, RA
-- All Stats: adds FG (FGM-FGA), FT (FTM-FTA), STL, BLK, TOV
-- Toggle button: splits header (player page), filter bar (stats/boxscore)
+- Compact (default): Player/Date/Opp, MIN, PTS, 3PT (3PM only as plain avg in StatsTable; 3PM-3PA in game log), REB, AST, PRA, PR, PA, RA
+- All Stats: adds FG (FGM-FGA), 3PA (separate column), FT (FTM-FTA), STL, BLK, TOV
+- Toggle button: period filter bar (player page + boxscore), filter bar (stats)
 - Companion values (REB-RebChances, AST-PotAst): player game log only, full game only
 
 **Player game log (`PlayerPageInner.tsx`):**
@@ -215,23 +221,22 @@ All components inverted for Under rows (100 - value). Rising trend is bad for an
 | FT | `ftm-fta` | all-stats only — DASH separator |
 
 **Stats table (`StatsTable.tsx`):**
-Compact: Player, GP, MIN, PTS, 3PT (avg3pm-avg3pa), REB, AST, PRA, PR, PA, RA. All Stats adds FG (avgFgm-avgFga), FT (avgFtm-avgFta), STL, BLK, TOV. Uses `fmtRatio()` for ratio columns, never `fmtPct()`.
+Compact: Player, GP, MIN, PTS, 3PM (plain avg), REB, AST, PRA, PR, PA, RA. All Stats adds FG (avgFgm-avgFga), 3PA (plain avg, separate col), FT (avgFtm-avgFta), STL, BLK, TOV. colSpanTotal: compact=11, all-stats=17.
 
 **VS Defense (`MatchupDefense.tsx`):**
 Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 
 **Today's Props (`PlayerPageInner.tsx` — TodayPropsSection):**
-- Over/Under rows paired into LinePair structs by (baseMarket, lineValue).
-- Each market is a collapsible section, expanded by default.
-- Standard lines: one row per line — Over price, Under price, composite grade, hit rates.
-- Alt lines: horizontal chips inside each market, collapsed by default.
-- `TodayGradeRow` has `outcomeName` field.
-- NEXT SESSION: rebuild as horizontal strip + dot plot. See Next Up above.
+- Horizontal strip: one cell per market (label, posted line, composite grade). `flex w-full divide-x`, each cell `flex-1 min-w-[52px]`. No `min-w-max` on wrapper, no `border-t` on the strip div.
+- Tapping a cell expands a panel below containing: full-width SVG dot plot (`preserveAspectRatio="none"`, 600-wide viewBox, oldest-left newest-right, green=hit red=miss), then alt lines with two-row detail.
+- Standard line detail rows removed from panel — the strip cell already shows posted line + grade.
+- `TodayPropsSection` accepts `summaries: GameSummary[]` prop.
+- `getGrades` reads `dg.outcome_name` + `dg.over_price` directly — no join to odds tables.
 
 **At a Glance (`GradesPageInner.tsx`):**
-- `r.overPrice != null` gates all display
-- Over/Under toggle filters on `r.outcomeName` ('Over'/'Under')
-- Prices and direction come from `dg.outcome_name` + `dg.over_price` directly — no odds table join
+- Default min odds: -600. Slider range: -1000 to +200. Reset button goes to -1000 (shows everything).
+- `oddsFilterActive` = `minOdds > ODDS_MIN` (-1000). Do not change this condition.
+- Over/Under toggle filters on `r.outcomeName`.
 
 ### API Routes
 - `/api/ping` — public (anonymous). SELECT 1. Used by keep-alive.
@@ -284,3 +289,6 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | Compact/all-stats toggle instead of always showing all columns | Reduces visual noise on mobile; PRA/PR/PA/RA are the most useful default prop research columns. |
 | Companion values (rebChances, potentialAst) on player page only | Team views don't have per-player PT stat data in team-averages API; not worth the join complexity. |
 | VS Defense combo columns deferred | Requires extending /api/contextual to compute sum-stat defense averages — non-trivial query change. |
+| At a Glance default min odds -600 | Filters out extreme chalk lines (-800, -1000, -5000) that have no betting value. Slider reaches -1000. |
+| RosterTable badge: Confirmed only when lineupStatus=Confirmed | Old logic showed Confirmed whenever lineup wasn't Projected, including null (not-yet-confirmed). |
+| StatsTable 3PM/3PA split into separate columns | Made-att ratio in compact was not useful; plain averages in separate columns are more readable. |
