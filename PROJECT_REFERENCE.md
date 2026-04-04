@@ -11,22 +11,21 @@
 
 ---
 
-## Current State (updated 2026-04-04)
+## Current State (updated 2026-04-04 session 4)
 
 **What is working:**
-- NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, pre-game refresh, Refresh Lines all running.
-- Grading: all components live, Over + Under grades written daily.
+- NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, grading all running.
+- Grading: all components live, Over + Under grades written daily. `grade_props.py` restored and verified OK (py_compile clean, 939 lines).
 - Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
 - PWA active. Install via Safari Share → Add to Home Screen.
 - `sports-session-close` skill installed — use at end of every session to update docs and generate handoff primer.
 - Compact/All Stats toggle live across player page (splits + game log), StatsTable, and BoxScoreTable.
-- VS Defense column order: PTS, 3PM, REB, AST, STL, BLK, TOV.
-- Today's Props: horizontal strip of market cells, tappable to expand dot plot + alt lines panel. Full-width SVG dot plot (preserveAspectRatio=none). Alt lines show two-row detail (odds + hit rates). Default min odds filter on At a Glance set to -600.
-- Roster tab: badge logic fixed (Confirmed/Projected/Expected). Inactive players shown in separate dimmed section.
-- StatsTable: 3PT column split into 3PM and 3PA (separate columns in All Stats, 3PM only in compact).
-- **Self-hosted runner live:** `schnapp-runner` Azure VM (West US 2, B2s_v2) running as permanent GitHub Actions runner. All active workflows use it. ETL runs in ~25 seconds vs 2-4 minutes previously.
-- **Uptime Robot active:** pings `https://schnapp.bet/api/ping` every 30 minutes. Replaces keepalive.yml schedule.
-- **All workflow improvements shipped:** DB-timestamp gate (replaces run_number % 3), grading triggers on odds completion (not hardcoded delay), backfill isolated to nba-backfill.yml, requirements.txt pinned.
+- Today's Props: horizontal strip of market cells, tappable to expand dot plot + alt lines panel.
+- Roster tab: badge logic fixed. Inactive players shown in separate dimmed section.
+- Self-hosted runner live: `schnapp-runner` Azure VM (West US 2, B2s_v2). All active workflows use it. ETL ~25 seconds.
+- Uptime Robot active: pings schnapp.bet/api/ping every 30 minutes.
+- **Refresh Data button live** on both NBA page header and At a Glance. Admin passcode required (`ADMIN_REFRESH_CODE` in SWA app settings). Runs all four steps: live box score, odds, grading, lineup poll.
+- `refresh-data.yml` workflow wired. `/api/refresh-data` route validates passcode, dispatches workflow. `RefreshDataButton.tsx` component polls for completion.
 
 **Known issues:**
 - `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
@@ -37,18 +36,17 @@
 - Auto-pause delay locked — free database offer prevents changing it. Uptime Robot mitigates.
 - PNG icons not generated — SVG covers all modern browsers; generate via `web/scripts/generate-icons.mjs` if needed.
 - VS Defense does not show combo market columns (PRA/PR/PA/RA) — requires extending `/api/contextual` query. Deferred.
-- Not all players' props load on player page — if a player has no rows in `common.daily_grades` for today, section correctly returns null. Investigate if a specific player should have grades but doesn't.
-- Game log prop coloring may use wrong line if an alt line appears in `gradeMap` before the standard line — `gradeMap` takes the first `marketKey` hit per game per market. Investigate with Naz Reid 4-02 example (3PT showed 4-9 red — suspect alt line with value >4 in the map).
+- Game log prop coloring may use wrong line if an alt line appears in `gradeMap` before the standard line.
 - `dev` branch has a stale merge conflict on `PlayerPageInner.tsx`. Close PR #29 without merging.
-- Today's Props dot plot revisit deferred — Austin wants to explore a bell-curve distribution plot as an alternative.
-- VM resize pending — currently B2s_v2 (~$60/month) on free trial credits. Downsize to B1s_v2 (~$15-20/month) after trial credits expire.
+- VM resize pending — B2s_v2 on free trial. Downsize to B1s_v2 after trial credits expire.
 
 **Next up:**
-- PlayerPageInner.tsx: (1) Move All Stats toggle to the period filter bar. (2) Add vs Opp filter button to period filter bar. (3) Fix game log prop coloring bug — gradeMap should prefer standard line over alt line. (4) Make date/opp cells in game log link to that game's box score. (5) Fix Today's Props strip header cell when `standardLines` is empty — promote lowest alt line as display line instead of showing nothing. (6) Alt lines in panel: side-by-side chips in a fixed-height scrollable row, not stacked.
-- New page: VS Defense dashboard at `/nba/defense` — sortable table of all 30 teams × position × stat defense ranks. Clicking a row opens filtered player list. New API endpoint needed.
+- Verify nba-game-day.yml test run dispatched at end of session 4 completed successfully (grading step should now pass with restored grade_props.py).
+- PlayerPageInner.tsx: (1) Move All Stats toggle to period filter bar. (2) Add vs Opp filter button. (3) Fix game log prop coloring — gradeMap should prefer standard line over alt. (4) Link date/opp cells to box score. (5) Fix Today's Props strip header when standardLines empty. (6) Alt lines panel: side-by-side chips in scrollable row.
+- New page: VS Defense dashboard at `/nba/defense`.
 - Step 15: MLB ETL and web views.
 - Step 16: NFL ETL automation and web views.
-- Re-enable PasscodeGate (`BYPASS = false`) before sharing app with users.
+- Re-enable PasscodeGate (`BYPASS = false`) before sharing with users.
 - Downsize schnapp-runner VM to B1s_v2 after free trial credits expire.
 
 ---
@@ -72,7 +70,7 @@
 - All active workflows use `runs-on: [self-hosted, schnapp-runner]`. No ODBC or pip install steps in any workflow.
 - After trial: downsize VM to B1s_v2 (~$15-20/month). Resize via Azure Portal, no data loss.
 - Secrets: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD`, `NBA_PROXY_URL`, `ODDS_API_KEY`, `AZURE_STATIC_WEB_APPS_API_TOKEN_RED_SMOKE_0BBE1FB10`, `GITHUB_PAT`
-- Always fetch file SHA before `create_or_update_file`. Use `push_files` for multi-file atomic commits.
+- Always fetch file SHA before `create_or_update_file`. Use `push_files` for multi-file atomic commits — BUT NEVER for Python files (corrupts newlines). Use `create_or_update_file` for all Python files.
 
 ### Active Workflows
 | Workflow | Trigger | Purpose |
@@ -82,7 +80,8 @@
 | `odds-etl.yml` | Daily UTC 10:00 | Today's FanDuel lines |
 | `grading.yml` | After odds-etl succeeds (workflow_run) | Grade today's props |
 | `nba-backfill.yml` | Dispatched by nba-game-day when game goes Final | Odds + grade backfill for completed games |
-| `refresh-lines.yml` | POST /api/refresh-lines from web app | Manual odds + grade refresh |
+| `refresh-lines.yml` | POST /api/refresh-lines from web app | Manual odds + grade refresh (no auth) |
+| `refresh-data.yml` | POST /api/refresh-data from web app (admin passcode) | Full refresh: live box + odds + grading + lineups |
 
 ### Retired Workflows (dispatch-only)
 `pregame-refresh.yml`, `nba-live.yml`, `lineup-poll.yml` — kept for manual one-off runs only. Do not re-add schedules.
@@ -93,7 +92,7 @@
 - Deploy: push to `main` → auto-deploys in ~90s
 - Next.js 15.2.8, React 19
 - Auth: passcode gate (`PasscodeGate.tsx`). `BYPASS = true` currently. Set to `false` to re-enable.
-- App settings: `AZURE_SQL_CONNECTION_STRING`, `GITHUB_PAT` (workflow scope, for Refresh Lines)
+- App settings: `AZURE_SQL_CONNECTION_STRING`, `GITHUB_PAT` (workflow scope), `ADMIN_REFRESH_CODE` (admin refresh button passcode)
 
 ### Local Dev
 - Laptop: Node.js v24.12.0. `npm run dev` blocked by ThreatLocker. Test by pushing to `main`.
@@ -179,7 +178,8 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 - `starter_status` values: 'Starter' (has position field), 'Inactive' (lineupStatus contains out/inactive/not with team/gtd), 'Bench' (Active roster, no position, not inactive)
 
 ### Refresh Lines
-- `refresh-lines.yml` — triggered by POST to `/api/refresh-lines` via GITHUB_PAT in SWA app settings.
+- `refresh-lines.yml` — triggered by POST to `/api/refresh-lines` via GITHUB_PAT in SWA app settings. No passcode.
+- `refresh-data.yml` — triggered by POST to `/api/refresh-data`. Requires `ADMIN_REFRESH_CODE` passcode. Runs all four steps.
 
 ---
 
@@ -253,13 +253,15 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 - Default min odds: -600. Slider range: -1000 to +200. Reset button goes to -1000 (shows everything).
 - `oddsFilterActive` = `minOdds > ODDS_MIN` (-1000). Do not change this condition.
 - Over/Under toggle filters on `r.outcomeName`.
+- Refresh Data button (RefreshDataButton component) requires admin passcode.
 
 ### API Routes
 - `/api/ping` — public (anonymous). SELECT 1. Used by Uptime Robot for DB keep-alive.
 - `/api/grades?date=&gameId=` — reads `dg.outcome_name` + `dg.over_price` directly
 - `/api/team-averages` — returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`, `avgFtm`, `avgFta` plus standard stats
 - `/api/contextual?oppTeamId=&position=` — defense ranks. Rank 1 = most allowed.
-- `/api/refresh-lines` POST — triggers `refresh-lines.yml` via GITHUB_PAT
+- `/api/refresh-lines` POST — triggers `refresh-lines.yml` via GITHUB_PAT (no passcode)
+- `/api/refresh-data` POST — validates `ADMIN_REFRESH_CODE`, triggers `refresh-data.yml`
 - `/api/refresh-status?runId=` — polls workflow run status
 - `/api/live-boxscore?gameId=` — proxies BoxScoreTraditionalV3 from stats.nba.com server-side
 
@@ -315,3 +317,6 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | Backfill isolated to nba-backfill.yml | Prevents expensive backfill competing with live score bandwidth in the same 12-min job window. |
 | requirements.txt pinned to exact versions | Prevents silent breakage from upstream package releases. |
 | VM B2s_v2 initially, downsize to B1s_v2 after trial | Free trial credits cover B2s_v2; B1s_v2 (~$15-20/month) is sufficient for I/O-bound ETL workloads. |
+| RefreshDataButton uses separate ADMIN_REFRESH_CODE | Keeps admin refresh distinct from user passcodes; allows sharing app without exposing the refresh trigger. |
+| NEVER use push_files for Python files | push_files serializes content with literal \n strings instead of real newlines, producing a single-line file that fails py_compile. Always use create_or_update_file for .py files. |
+| refresh-data.yml separate from refresh-lines.yml | refresh-lines is unauthenticated (odds+grading only, used by old button); refresh-data is admin-passcode-gated and runs all four steps. |
