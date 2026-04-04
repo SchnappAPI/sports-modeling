@@ -1,11 +1,19 @@
 name: NBA Game Day
 
-# Consolidated intra-day workflow. Runs every 5 minutes during game hours.
+# Consolidated intra-day workflow. Runs continuously during game hours via
+# self-re-dispatch from the schnapp-runner VM.
+#
+# Loop behavior:
+#   - Cron fires once to kick off the loop each day.
+#   - At the end of each cycle, if any games are active the workflow sleeps
+#     270s on the runner then re-dispatches itself. This keeps the loop
+#     running on the VM without depending on GitHub's scheduler.
+#   - The loop self-terminates when no active games are found.
+#   - Cron remains as a daily kickoff and fallback in case re-dispatch fails.
 #
 # Every cycle (~5 min):
 #   1. Gate script   -- checks DB for pre-game/live games AND whether
-#                       14+ minutes have elapsed since last grade (replaces
-#                       the fragile run_number % 3 throttle)
+#                       14+ minutes have elapsed since last grade
 #   2. nba_live.py   -- syncs schedule status/scores, upserts live box scores
 #
 # When gate says run_odds_grading=true (~every 15 min):
@@ -13,13 +21,12 @@ name: NBA Game Day
 #   4. grade_props intraday -- re-grade moved standard lines
 #   5. lineup_poll        -- fetch projected/confirmed lineups
 #
-# Backfill for newly-final games is handled by nba-backfill.yml
-# which is dispatched separately to avoid competing with live updates.
+# Backfill for newly-final games is dispatched to nba-backfill.yml separately.
 
 on:
   schedule:
-    - cron: '*/5 16-23 * * *'   # UTC 16:00-23:55 (noon-7:55 PM ET)
-    - cron: '*/5 0-6  * * *'    # UTC 00:00-06:00 (8 PM-2 AM ET)
+    - cron: '0 16 * * *'        # UTC 16:00 daily (noon ET) — loop kickoff
+    - cron: '*/30 0-6 * * *'    # UTC 00:00-06:00 fallback (every 30 min)
   workflow_dispatch:
     inputs:
       skip_gate:
@@ -84,3 +91,15 @@ jobs:
               --ref main \
               --field date="$DATE"
           fi
+
+      - name: Sleep then re-dispatch (keep loop alive on VM)
+        if: |
+          steps.gate.outputs.any_active == 'true' ||
+          github.event.inputs.skip_gate == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
+        run: |
+          sleep 270
+          gh workflow run nba-game-day.yml \
+            --repo "${{ github.repository }}" \
+            --ref main
