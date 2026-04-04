@@ -11,21 +11,18 @@
 
 ---
 
-## Current State (updated 2026-04-04 session 4)
+## Current State (updated 2026-04-04 session 5)
 
 **What is working:**
 - NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, grading all running.
-- Grading: all components live, Over + Under grades written daily. `grade_props.py` restored and verified OK (py_compile clean, 939 lines).
+- Lineup poll: two-stage architecture. Stage 1 = official JSON (starters, 5 per team). Stage 2 = boxscorepreviewv3 (full roster). Both run every cycle. Full rosters (starters + bench + inactive) now written correctly.
+- Grading: all components live, Over + Under grades written daily. `grade_props.py` verified OK.
 - Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
-- PWA active. Install via Safari Share → Add to Home Screen.
-- `sports-session-close` skill installed — use at end of every session to update docs and generate handoff primer.
-- Compact/All Stats toggle live across player page (splits + game log), StatsTable, and BoxScoreTable.
-- Today's Props: horizontal strip of market cells, tappable to expand dot plot + alt lines panel.
-- Roster tab: badge logic fixed. Inactive players shown in separate dimmed section.
-- Self-hosted runner live: `schnapp-runner` Azure VM (West US 2, B2s_v2). All active workflows use it. ETL ~25 seconds.
-- Uptime Robot active: pings schnapp.bet/api/ping every 30 minutes.
-- **Refresh Data button live** on both NBA page header and At a Glance. Admin passcode required (`ADMIN_REFRESH_CODE` in SWA app settings). Runs all four steps: live box score, odds, grading, lineup poll.
-- `refresh-data.yml` workflow wired. `/api/refresh-data` route validates passcode, dispatches workflow. `RefreshDataButton.tsx` component polls for completion.
+- Matchups tab live on game page: defense grid by G/F/C position groups, 7 stat columns, rank out of 30. Tap row to see today's active players. Player links carry gameId/tab/date.
+- Player page game/team selector: game dropdown + team pill buttons to navigate without going back.
+- Player page lineup status badge: shows Starter/Bench/Inactive (Confirmed/Projected) when navigated from a game.
+- Today's Props strip: horizontal market cells, tap to expand dot plot + alt lines.
+- PWA active. Self-hosted runner live. Uptime Robot active. Refresh Data button live.
 
 **Known issues:**
 - `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
@@ -33,20 +30,19 @@
 - Odds/grading backfill gap — pre-April 2026 dates still being backfilled by nightly chain.
 - NFL workflow missing — `nfl_etl.py` exists, `nfl-etl.yml` does not.
 - NFL and MLB `run_mappings` not implemented in odds_etl.py — only NBA branch exists.
-- Auto-pause delay locked — free database offer prevents changing it. Uptime Robot mitigates.
-- PNG icons not generated — SVG covers all modern browsers; generate via `web/scripts/generate-icons.mjs` if needed.
-- VS Defense does not show combo market columns (PRA/PR/PA/RA) — requires extending `/api/contextual` query. Deferred.
-- Game log prop coloring may use wrong line if an alt line appears in `gradeMap` before the standard line.
-- `dev` branch has a stale merge conflict on `PlayerPageInner.tsx`. Close PR #29 without merging.
-- VM resize pending — B2s_v2 on free trial. Downsize to B1s_v2 after trial credits expire.
+- VS Defense does not show combo market columns (PRA/PR/PA/RA) — deferred.
+- Game log prop coloring may use wrong line if alt line appears in gradeMap before standard line.
+- `dev` branch has stale merge conflict on `PlayerPageInner.tsx`. Close PR #29 without merging.
+- VM resize pending — downsize to B1s_v2 after trial credits expire.
+- Odds backfill: confirm run 23916639705 completion, then run mappings (mode=mappings, sport=nba).
+- At a Glance duplicate prop rows: standard vs alt market keys both abbreviating to same label in UI.
 
 **Next up:**
-- Verify nba-game-day.yml test run dispatched at end of session 4 completed successfully (grading step should now pass with restored grade_props.py).
-- PlayerPageInner.tsx: (1) Move All Stats toggle to period filter bar. (2) Add vs Opp filter button. (3) Fix game log prop coloring — gradeMap should prefer standard line over alt. (4) Link date/opp cells to box score. (5) Fix Today's Props strip header when standardLines empty. (6) Alt lines panel: side-by-side chips in scrollable row.
-- New page: VS Defense dashboard at `/nba/defense`.
-- Step 15: MLB ETL and web views.
-- Step 16: NFL ETL automation and web views.
-- Re-enable PasscodeGate (`BYPASS = false`) before sharing with users.
+- Confirm odds backfill run 23916639705 status. If complete, run NBA mappings (mode=mappings, sport=nba).
+- At a Glance duplicate prop row fix (display layer — market key abbreviation collision).
+- Re-enable PasscodeGate (BYPASS = false) before sharing with users.
+- MLB ETL wiring, web views, grading backfill.
+- NFL/MLB run_mappings branches in odds_etl.py.
 - Downsize schnapp-runner VM to B1s_v2 after free trial credits expire.
 
 ---
@@ -70,7 +66,7 @@
 - All active workflows use `runs-on: [self-hosted, schnapp-runner]`. No ODBC or pip install steps in any workflow.
 - After trial: downsize VM to B1s_v2 (~$15-20/month). Resize via Azure Portal, no data loss.
 - Secrets: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD`, `NBA_PROXY_URL`, `ODDS_API_KEY`, `AZURE_STATIC_WEB_APPS_API_TOKEN_RED_SMOKE_0BBE1FB10`, `GITHUB_PAT`
-- Always fetch file SHA before `create_or_update_file`. Use `push_files` for multi-file atomic commits — BUT NEVER for Python files (corrupts newlines). Use `create_or_update_file` for all Python files.
+- Always fetch file SHA before `create_or_update_file`. Use `push_files` for multi-file atomic commits — BUT NEVER for Python files OR TSX files with non-ASCII Unicode characters. Both cause corruption. Use `create_or_update_file` for all Python files and any TSX with Unicode symbols.
 
 ### Active Workflows
 | Workflow | Trigger | Purpose |
@@ -128,7 +124,7 @@
 - `nba.games` — completed games only (box score ETL source). Populated for `game_date <= today` and `game_status = 3`.
 - `nba.teams` — hardcoded static dict in ETL
 - `nba.players` — `player_id`, `player_name`, `team_id`, `team_tricode`, `roster_status` (1=active), `position`
-- `nba.daily_lineups` — keyed by `player_name` + `team_tricode`. No `player_id` or `team_id`. `starter_status` = 'Starter'/'Bench'/'Inactive'.
+- `nba.daily_lineups` — keyed by `player_name` + `team_tricode`. No `player_id` or `team_id`. `starter_status` = 'Starter'/'Bench'/'Inactive'. Position values are full strings: PG, SG, SF, PF, C.
 - `nba.player_box_score_stats` — PK: `(game_id, player_id, period)`. Periods: '1Q','2Q','3Q','4Q','OT' only. Columns include `fg3a`. `minutes` is DECIMAL.
 - `nba.player_passing_stats` — `(player_id, game_date)`. `potential_ast`.
 - `nba.player_rebound_chances` — `(player_id, game_date)`. `reb_chances`.
@@ -173,9 +169,10 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 - Nightly: `upcoming/nba/days-ahead=1`. Upcoming mode writes to `odds.event_game_map`.
 
 ### Lineup Poll
-- `etl/lineup_poll.py` — standalone, does NOT import nba_etl.py (top-level argparse would trigger)
-- Runs inside `nba-game-day.yml` odds+grading step every ~15 min when games are active
-- `starter_status` values: 'Starter' (has position field), 'Inactive' (lineupStatus contains out/inactive/not with team/gtd), 'Bench' (Active roster, no position, not inactive)
+- `etl/lineup_poll.py` — two-stage: Stage 1 fetches official JSON (starters only, 5 per team, lineup_status Confirmed/Projected). Stage 2 always fetches boxscorepreviewv3 for full roster (bench + inactive). Stage 1 starter designations override Stage 2 for overlapping players.
+- PREVIEW_TIMEOUT=20s, BETWEEN_GAMES_DELAY=0.5s. No retry on preview path (prevents timeout).
+- Position values in daily_lineups are full strings (PG, SG, SF, PF, C). Use posToGroup() mapping — NOT position[0] — when grouping by G/F/C. PG/SG→G, SF/PF→F, C→C.
+- Runs inside `nba-game-day.yml` every cycle. Also runs in `refresh-data.yml`.
 
 ### Refresh Lines
 - `refresh-lines.yml` — triggered by POST to `/api/refresh-lines` via GITHUB_PAT in SWA app settings. No passcode.
@@ -255,11 +252,20 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 - Over/Under toggle filters on `r.outcomeName`.
 - Refresh Data button (RefreshDataButton component) requires admin passcode.
 
+**Matchups tab (`MatchupGrid.tsx` + `/api/matchup-grid`):**
+- Two defense panels side by side (away defense left, home defense right).
+- Rows: G / F / C position groups. Columns: PTS, REB, AST, 3PM, STL, BLK, TOV.
+- Each cell: season avg allowed + rank out of 30. Green rank 1-10 (soft/exploitable), red rank 21-30 (tough).
+- Tap row to expand — shows today's active players at that position facing that defense. Player links to player page.
+- `posToGroup()` in route maps PG/SG→G, SF/PF→F, C→C. DO NOT use position[0] — gives P/S/C, not G/F/C.
+- Panel labels: "vs AWY Defense" shows home team players (they attack AWY). "vs HME Defense" shows away team players.
+
 ### API Routes
 - `/api/ping` — public (anonymous). SELECT 1. Used by Uptime Robot for DB keep-alive.
 - `/api/grades?date=&gameId=` — reads `dg.outcome_name` + `dg.over_price` directly
 - `/api/team-averages` — returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`, `avgFtm`, `avgFta` plus standard stats
 - `/api/contextual?oppTeamId=&position=` — defense ranks. Rank 1 = most allowed.
+- `/api/matchup-grid?gameId=` — both teams' defense by position group + today's lineup players. Uses `posToGroup()`.
 - `/api/refresh-lines` POST — triggers `refresh-lines.yml` via GITHUB_PAT (no passcode)
 - `/api/refresh-data` POST — validates `ADMIN_REFRESH_CODE`, triggers `refresh-data.yml`
 - `/api/refresh-status?runId=` — polls workflow run status
@@ -319,4 +325,8 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | VM B2s_v2 initially, downsize to B1s_v2 after trial | Free trial credits cover B2s_v2; B1s_v2 (~$15-20/month) is sufficient for I/O-bound ETL workloads. |
 | RefreshDataButton uses separate ADMIN_REFRESH_CODE | Keeps admin refresh distinct from user passcodes; allows sharing app without exposing the refresh trigger. |
 | NEVER use push_files for Python files | push_files serializes content with literal \n strings instead of real newlines, producing a single-line file that fails py_compile. Always use create_or_update_file for .py files. |
+| NEVER use push_files for TSX with non-ASCII Unicode | push_files also corrupts non-ASCII characters (arrows ▲▼, em dash —) in TSX, causing client-side JavaScript crash on load. Use create_or_update_file for any TSX with Unicode symbols. |
 | refresh-data.yml separate from refresh-lines.yml | refresh-lines is unauthenticated (odds+grading only, used by old button); refresh-data is admin-passcode-gated and runs all four steps. |
+| posToGroup() maps PG/SG→G, SF/PF→F, C→C | position[0] gives P/S/C — none match G or F. Full position string mapping is required for lineup grouping in matchup-grid. |
+| Lineup poll Stage 2 always runs | Official JSON only has 5 starters per team. Skipping Stage 2 when Stage 1 has data left bench and inactive unwritten. |
+| Lineup poll PREVIEW_TIMEOUT=20s, no retry | 60s timeout × 3 retries × 3 games exceeded 5-minute refresh-data timeout. Single 20s attempt is sufficient — 404 on live games is expected and handled. |
