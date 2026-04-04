@@ -1,0 +1,228 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { getPool } from '@/lib/db';
+import mssql from 'mssql';
+
+// Returns matchup defense data for both teams in a game, all position groups.
+// Also returns today's lineup players for each team keyed by position group.
+
+const POS_GROUPS = ['G', 'F', 'C'] as const;
+type PosGroup = typeof POS_GROUPS[number];
+
+interface StatLine {
+  avg: number;
+  rank: number;
+  gamesDefended: number;
+}
+
+interface TeamMatchup {
+  teamId: number;
+  teamAbbr: string;
+  positions: Partial<Record<PosGroup, {
+    pts:  StatLine;
+    reb:  StatLine;
+    ast:  StatLine;
+    fg3m: StatLine;
+    stl:  StatLine;
+    blk:  StatLine;
+    tov:  StatLine;
+    gamesDefended: number;
+  }>>;
+}
+
+interface LineupPlayer {
+  playerId: number | null;
+  playerName: string;
+  position: string | null;
+  starterStatus: string | null;
+  lineupStatus: string | null;
+}
+
+export async function GET(req: NextRequest) {
+  const gameId = req.nextUrl.searchParams.get('gameId');
+  if (!gameId) {
+    return NextResponse.json({ error: 'gameId required' }, { status: 400 });
+  }
+
+  const pool = await getPool();
+
+  // Get home/away team IDs from the schedule
+  const gameRes = await pool.request()
+    .input('gameId', mssql.VarChar, gameId)
+    .query<{ homeTeamId: number; awayTeamId: number; homeAbbr: string; awayAbbr: string }>(`
+      SELECT
+        s.home_team_id AS homeTeamId,
+        s.away_team_id AS awayTeamId,
+        ht.team_tricode AS homeAbbr,
+        at.team_tricode AS awayAbbr
+      FROM nba.schedule s
+      JOIN nba.teams ht ON ht.team_id = s.home_team_id
+      JOIN nba.teams at ON at.team_id = s.away_team_id
+      WHERE s.game_id = @gameId
+    `);
+
+  if (gameRes.recordset.length === 0) {
+    return NextResponse.json({ error: 'game not found' }, { status: 404 });
+  }
+
+  const { homeTeamId, awayTeamId, homeAbbr, awayAbbr } = gameRes.recordset[0];
+
+  // Compute matchup defense for all teams + all positions in one query,
+  // then filter to the two teams we need. This avoids 6 separate queries.
+  const defRes = await pool.request().query<{
+    oppTeamId: number;
+    posGroup: string;
+    gamesDefended: number;
+    avgPts: number; rankPts: number;
+    avgReb: number; rankReb: number;
+    avgAst: number; rankAst: number;
+    avgFg3m: number; rankFg3m: number;
+    avgStl: number; rankStl: number;
+    avgBlk: number; rankBlk: number;
+    avgTov: number; rankTov: number;
+  }>(`
+    WITH season_start AS (
+      SELECT CAST(
+        CAST(
+          CASE WHEN MONTH(GETUTCDATE()) < 10
+            THEN YEAR(GETUTCDATE()) - 1
+            ELSE YEAR(GETUTCDATE())
+          END
+        AS VARCHAR(4)) + '-10-01'
+      AS DATE) AS dt
+    ),
+    game_totals AS (
+      SELECT
+        pbs.player_id,
+        pbs.game_id,
+        CASE
+          WHEN pbs.team_id = s.home_team_id THEN s.away_team_id
+          ELSE s.home_team_id
+        END AS opp_team_id,
+        SUM(pbs.pts)    AS pts,
+        SUM(pbs.reb)    AS reb,
+        SUM(pbs.ast)    AS ast,
+        SUM(pbs.stl)    AS stl,
+        SUM(pbs.blk)    AS blk,
+        SUM(pbs.fg3m)   AS fg3m,
+        SUM(pbs.tov)    AS tov
+      FROM nba.player_box_score_stats pbs
+      JOIN nba.schedule s ON s.game_id = pbs.game_id
+      WHERE s.game_date >= (SELECT dt FROM season_start)
+      GROUP BY pbs.player_id, pbs.game_id, pbs.team_id, s.home_team_id, s.away_team_id
+    ),
+    pos_filtered AS (
+      SELECT gt.*, LEFT(p.position, 1) AS pos_group
+      FROM game_totals gt
+      JOIN nba.players p ON p.player_id = gt.player_id
+      WHERE p.position IS NOT NULL
+    ),
+    team_pos_defense AS (
+      SELECT
+        opp_team_id,
+        pos_group,
+        COUNT(*)                    AS games_defended,
+        AVG(CAST(pts  AS FLOAT))    AS avg_pts,
+        AVG(CAST(reb  AS FLOAT))    AS avg_reb,
+        AVG(CAST(ast  AS FLOAT))    AS avg_ast,
+        AVG(CAST(stl  AS FLOAT))    AS avg_stl,
+        AVG(CAST(blk  AS FLOAT))    AS avg_blk,
+        AVG(CAST(fg3m AS FLOAT))    AS avg_fg3m,
+        AVG(CAST(tov  AS FLOAT))    AS avg_tov
+      FROM pos_filtered
+      GROUP BY opp_team_id, pos_group
+    ),
+    ranked AS (
+      SELECT
+        opp_team_id,
+        pos_group,
+        games_defended,
+        avg_pts,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_pts  DESC) AS rank_pts,
+        avg_reb,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_reb  DESC) AS rank_reb,
+        avg_ast,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_ast  DESC) AS rank_ast,
+        avg_stl,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_stl  DESC) AS rank_stl,
+        avg_blk,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_blk  DESC) AS rank_blk,
+        avg_fg3m, RANK() OVER (PARTITION BY pos_group ORDER BY avg_fg3m DESC) AS rank_fg3m,
+        avg_tov,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_tov  DESC) AS rank_tov
+      FROM team_pos_defense
+    )
+    SELECT
+      r.opp_team_id  AS oppTeamId,
+      r.pos_group    AS posGroup,
+      r.games_defended AS gamesDefended,
+      r.avg_pts,  r.rank_pts  AS rankPts,
+      r.avg_reb,  r.rank_reb  AS rankReb,
+      r.avg_ast,  r.rank_ast  AS rankAst,
+      r.avg_fg3m, r.rank_fg3m AS rankFg3m,
+      r.avg_stl,  r.rank_stl  AS rankStl,
+      r.avg_blk,  r.rank_blk  AS rankBlk,
+      r.avg_tov,  r.rank_tov  AS rankTov
+    FROM ranked r
+    WHERE r.opp_team_id IN (${homeTeamId}, ${awayTeamId})
+      AND r.pos_group IN ('G', 'F', 'C')
+  `);
+
+  // Get today's lineup for the game with player IDs
+  const lineupRes = await pool.request()
+    .input('gameId', mssql.VarChar, gameId)
+    .query<LineupPlayer & { teamTricode: string }>(`
+      SELECT
+        p.player_id      AS playerId,
+        dl.player_name   AS playerName,
+        dl.position      AS position,
+        dl.starter_status AS starterStatus,
+        dl.lineup_status AS lineupStatus,
+        dl.team_tricode  AS teamTricode
+      FROM nba.daily_lineups dl
+      LEFT JOIN nba.players p ON p.player_name = dl.player_name
+      WHERE dl.game_id = @gameId
+        AND dl.starter_status != 'Inactive'
+      ORDER BY dl.team_tricode,
+        CASE dl.starter_status WHEN 'Starter' THEN 0 ELSE 1 END,
+        dl.player_name
+    `);
+
+  function buildTeam(teamId: number, abbr: string): TeamMatchup {
+    const positions: TeamMatchup['positions'] = {};
+    for (const row of defRes.recordset) {
+      if (row.oppTeamId !== teamId) continue;
+      const pg = row.posGroup as PosGroup;
+      if (!['G', 'F', 'C'].includes(pg)) continue;
+      const sl = (avg: number, rank: number): StatLine => ({ avg, rank, gamesDefended: row.gamesDefended });
+      positions[pg] = {
+        pts:  sl(row.avgPts,  row.rankPts),
+        reb:  sl(row.avgReb,  row.rankReb),
+        ast:  sl(row.avgAst,  row.rankAst),
+        fg3m: sl(row.avgFg3m, row.rankFg3m),
+        stl:  sl(row.avgStl,  row.rankStl),
+        blk:  sl(row.avgBlk,  row.rankBlk),
+        tov:  sl(row.avgTov,  row.rankTov),
+        gamesDefended: row.gamesDefended,
+      };
+    }
+    return { teamId, teamAbbr: abbr, positions };
+  }
+
+  // Build lineup by team tricode + position group
+  const lineupByTeam: Record<string, Record<string, LineupPlayer[]>> = {};
+  for (const row of lineupRes.recordset) {
+    const tc  = row.teamTricode;
+    const pos = row.position ? row.position[0].toUpperCase() : null;
+    if (!pos || !['G', 'F', 'C'].includes(pos)) continue;
+    if (!lineupByTeam[tc]) lineupByTeam[tc] = {};
+    if (!lineupByTeam[tc][pos]) lineupByTeam[tc][pos] = [];
+    lineupByTeam[tc][pos].push({
+      playerId:     row.playerId,
+      playerName:   row.playerName,
+      position:     row.position,
+      starterStatus: row.starterStatus,
+      lineupStatus:  row.lineupStatus,
+    });
+  }
+
+  return NextResponse.json({
+    home: buildTeam(homeTeamId, homeAbbr),
+    away: buildTeam(awayTeamId, awayAbbr),
+    lineup: lineupByTeam,
+    gameId,
+  });
+}
