@@ -18,7 +18,7 @@ env:
 jobs:
   refresh:
     runs-on: [self-hosted, schnapp-runner]
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
