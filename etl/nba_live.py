@@ -9,18 +9,18 @@ Two responsibilities:
                            This is what flips status 1->2->3 in the DB.
 
   2. update_box_scores() -- Gates on game_status=2 (in-progress).
-                            Calls BoxScoreTraditionalV3 for each live game
-                            and upserts per-period stats.
+                            Calls NBA CDN for each live game and upserts
+                            cumulative stats (one row per player, period='GAME').
 
-The schedule update MUST run unconditionally so that:
-  - Pre-game status (1) flips to live (2) when tip-off happens.
-  - Live (2) flips to final (3) when the game ends.
-  - The nba-game-day.yml workflow can gate subsequent steps on these values.
+CDN endpoint (public, no proxy):
+  https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json
+  Top-level key: "game" (not "boxScoreTraditional")
+  statistics: single dict per player (cumulative game total)
 
 Proxy
 -----
-All stats.nba.com calls require the Webshare rotating residential proxy.
-Secret: NBA_PROXY_URL.
+ScoreboardV3 still requires the Webshare rotating residential proxy.
+CDN boxscore endpoint is public and requires no proxy.
 """
 
 import os
@@ -57,20 +57,17 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-PERIOD_MAP = {1: "1Q", 2: "2Q", 3: "3Q", 4: "4Q"}
-
 
 # ---------------------------------------------------------------------------
 # HTTP helper
 # ---------------------------------------------------------------------------
 
-def _request(url, params, label):
-    proxies = get_proxies()
+def _request(url, params, label, proxies=None, headers=None):
     for attempt in range(1, RETRY_COUNT + 1):
         try:
             resp = requests.get(
                 url,
-                headers=NBA_HEADERS,
+                headers=headers,
                 params=params,
                 proxies=proxies,
                 timeout=60,
@@ -100,7 +97,8 @@ def update_schedule(engine):
     today  = date.today()
     url    = "https://stats.nba.com/stats/scoreboardv3"
     params = {"GameDate": today.strftime("%m/%d/%Y"), "LeagueID": "00"}
-    data   = _request(url, params, f"ScoreboardV3 {today}")
+    data   = _request(url, params, f"ScoreboardV3 {today}",
+                      proxies=get_proxies(), headers=NBA_HEADERS)
     if data is None:
         log.warning("ScoreboardV3 call failed — schedule not updated this cycle.")
         return 0
@@ -169,26 +167,22 @@ def _parse_minutes(clock_str):
 
 
 def fetch_live_box_score(game_id):
-    url    = "https://stats.nba.com/stats/boxscoretraditionalv3"
-    params = {
-        "GameID":      game_id,
-        "StartPeriod": 0,
-        "EndPeriod":   0,
-        "StartRange":  0,
-        "EndRange":    0,
-        "RangeType":   0,
-    }
-    data = _request(url, params, f"BoxScoreTraditionalV3 {game_id}")
+    """
+    Fetch cumulative live box score from NBA CDN (public, no proxy needed).
+    Returns one row per player with period='GAME' for live upserts.
+    """
+    url  = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
+    data = _request(url, None, f"CDN boxscore {game_id}")
     if data is None:
         return []
 
     try:
-        game_data     = data["boxScoreTraditional"]
+        game_data     = data["game"]
         home_team     = game_data["homeTeam"]
         away_team     = game_data["awayTeam"]
         game_date_raw = game_data.get("gameTimeLocal", "")[:10] or None
     except (KeyError, TypeError) as exc:
-        log.warning(f"  {game_id}: unexpected response shape: {exc}")
+        log.warning(f"  {game_id}: unexpected CDN response shape: {exc}")
         return []
 
     rows = []
@@ -200,49 +194,47 @@ def fetch_live_box_score(game_id):
             pname = safe_str(player_obj.get("name"))
             if pid is None:
                 continue
-            for period_stats in player_obj.get("statistics", []):
-                period_num = safe_int(period_stats.get("period"))
-                if period_num is None:
-                    continue
-                period_label = PERIOD_MAP.get(period_num, "OT")
-                s = period_stats
-                rows.append({
-                    "game_id":        game_id,
-                    "player_id":      pid,
-                    "period":         period_label,
-                    "season_year":    None,
-                    "player_name":    pname,
-                    "team_id":        team_id,
-                    "team_tricode":   team_tricode,
-                    "game_date":      safe_date(game_date_raw),
-                    "matchup":        None,
-                    "minutes":        _parse_minutes(safe_str(s.get("clock"))),
-                    "minutes_sec":    safe_str(s.get("clock")),
-                    "fgm":            safe_int(s.get("fieldGoalsMade")),
-                    "fga":            safe_int(s.get("fieldGoalsAttempted")),
-                    "fg_pct":         safe_float(s.get("fieldGoalsPercentage")),
-                    "fg3m":           safe_int(s.get("threePointersMade")),
-                    "fg3a":           safe_int(s.get("threePointersAttempted")),
-                    "fg3_pct":        safe_float(s.get("threePointersPercentage")),
-                    "ftm":            safe_int(s.get("freeThrowsMade")),
-                    "fta":            safe_int(s.get("freeThrowsAttempted")),
-                    "ft_pct":         safe_float(s.get("freeThrowsPercentage")),
-                    "oreb":           safe_int(s.get("reboundsOffensive")),
-                    "dreb":           safe_int(s.get("reboundsDefensive")),
-                    "reb":            safe_int(s.get("reboundsTotal")),
-                    "ast":            safe_int(s.get("assists")),
-                    "tov":            safe_int(s.get("turnovers")),
-                    "stl":            safe_int(s.get("steals")),
-                    "blk":            safe_int(s.get("blocks")),
-                    "blka":           safe_int(s.get("blocksReceived")),
-                    "pf":             safe_int(s.get("foulsPersonal")),
-                    "pfd":            safe_int(s.get("foulsDrawn")),
-                    "pts":            safe_int(s.get("points")),
-                    "plus_minus":     safe_int(s.get("plusMinusPoints")),
-                    "dd2":            None,
-                    "td3":            None,
-                    "available_flag": None,
-                })
+            # statistics is a single cumulative dict on CDN (not a list)
+            s = player_obj.get("statistics", {})
+            if not isinstance(s, dict):
+                s = {}
+            rows.append({
+                "game_id":        game_id,
+                "player_id":      pid,
+                "period":         "GAME",   # cumulative live row
+                "season_year":    None,
+                "player_name":    pname,
+                "team_id":        team_id,
+                "team_tricode":   team_tricode,
+                "game_date":      safe_date(game_date_raw),
+                "matchup":        None,
+                "minutes":        _parse_minutes(safe_str(s.get("minutes"))),
+                "minutes_sec":    safe_str(s.get("minutes")),
+                "fgm":            safe_int(s.get("fieldGoalsMade")),
+                "fga":            safe_int(s.get("fieldGoalsAttempted")),
+                "fg_pct":         safe_float(s.get("fieldGoalsPercentage")),
+                "fg3m":           safe_int(s.get("threePointersMade")),
+                "fg3a":           safe_int(s.get("threePointersAttempted")),
+                "fg3_pct":        safe_float(s.get("threePointersPercentage")),
+                "ftm":            safe_int(s.get("freeThrowsMade")),
+                "fta":            safe_int(s.get("freeThrowsAttempted")),
+                "ft_pct":         safe_float(s.get("freeThrowsPercentage")),
+                "oreb":           safe_int(s.get("reboundsOffensive")),
+                "dreb":           safe_int(s.get("reboundsDefensive")),
+                "reb":            safe_int(s.get("reboundsTotal")),
+                "ast":            safe_int(s.get("assists")),
+                "tov":            safe_int(s.get("turnovers")),
+                "stl":            safe_int(s.get("steals")),
+                "blk":            safe_int(s.get("blocks")),
+                "blka":           safe_int(s.get("blocksReceived")),
+                "pf":             safe_int(s.get("foulsPersonal")),
+                "pfd":            safe_int(s.get("foulsDrawn")),
+                "pts":            safe_int(s.get("points")),
+                "plus_minus":     safe_int(s.get("plusMinusPoints")),
+                "dd2":            None,
+                "td3":            None,
+                "available_flag": None,
+            })
     return rows
 
 
