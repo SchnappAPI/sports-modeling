@@ -9,6 +9,39 @@
 
 ---
 
+## 2026-04-03 (session close 4)
+
+### UI | web/app/nba/player/[playerId]/PlayerPageInner.tsx — Today's Props horizontal strip + dot plot + alt line layout
+- Replaced collapsible `MarketSection`/`LinePairRow` design with: horizontal scrollable strip of market cells (one per market: label, posted line, composite grade), tappable to expand a panel below.
+- Strip uses `flex w-full divide-x` with `flex-1 min-w-[52px]` on each cell — spreads evenly when space allows, scrolls when cramped. No `min-w-max` on the outer wrapper (that caused bunching). No `border-t` on the strip container (that caused a stray horizontal line between the header and the strip).
+- Added `StatDotPlot` SVG component: `preserveAspectRatio="none"` on a 600-wide viewBox so it fills the full container width. Oldest game left, most recent right. Green dots above the prop line, red dots below. L10/L30/L50/All window selector in the header row.
+- `MarketPanel` shows the dot plot then alt lines with full two-row detail per entry (row 1: line value, O odds, U odds, grade; row 2: L20% and L60% hit rates). Standard line rows were removed — the strip cell already shows the posted line and grade.
+- `TodayPropsSection` now takes `summaries: GameSummary[]` prop (passed from parent where it is already in scope). Auto-selects first market on load.
+- The section header row and the strip share the same `border-b` container so there is no extra line between them.
+- Do not revert the `preserveAspectRatio="none"` dot plot — the old fixed 280px viewBox caused all dots to bunch to the left.
+
+### UI | web/components/StatsTable.tsx — 3PT column split
+- Compact view: `3PM` column shows `avg3pm` as a plain average (e.g. `1.5`). Was previously showing `avg3pm-avg3pa` ratio.
+- All Stats view: `3PM` and `3PA` are now two separate columns, each showing a plain average.
+- `colSpanTotal` updated: compact = 11, all-stats = 17.
+- Do not revert — the previous made-att ratio in compact was not useful; the separate columns are more readable.
+
+### UI | web/lib/queries.ts + web/components/RosterTable.tsx — roster badge logic + inactive section
+- `getRoster` query: returns `starterStatus` (raw string: 'Starter'/'Bench'/'Inactive') instead of the old boolean `isStarter`. SQL ORDER BY now sorts Inactive after Bench.
+- `RosterRow` interface updated: `starterStatus: string | null` replaces `isStarter: boolean`.
+- `RosterTable.tsx`: `teamBadge()` now shows Confirmed (green) only when at least one player has `lineupStatus === 'Confirmed'`, Projected (yellow) when any player has `lineupStatus === 'Projected'`, and Expected (gray) when all `lineupStatus` values are null. Previously it showed Confirmed whenever the lineup was not Projected, including when no lineup data was confirmed yet.
+- Added `Inactive` section below Bench with an "Out / Inactive" label row. Inactive rows render dimmed (`opacity-40`).
+- Do not revert the badge logic — the old version showed every pre-game lineup as Confirmed.
+
+### UI | web/app/nba/grades/GradesPageInner.tsx — default min odds filter
+- `ODDS_DEFAULT` changed from -1000 to -600. Page loads with the odds floor at -600, hiding lines with odds worse than -600 (e.g. -800, -1000, -5000).
+- Slider still reaches -1000 so the user can drag left to reveal worse lines.
+- Reset button now resets to `ODDS_MIN` (-1000) instead of `ODDS_DEFAULT`, so clicking Reset shows everything.
+- `oddsFilterActive` now reflects `minOdds > ODDS_MIN` (not `> ODDS_DEFAULT`), so the active indicator correctly lights up at -600.
+- Do not change `ODDS_DEFAULT` back to -1000 — the purpose is to filter junk lines by default.
+
+---
+
 ## 2026-04-03 (session close 3)
 
 ### UI | web/app/nba/player/[playerId]/PlayerPageInner.tsx — compact/all-stats toggle + props redesign
