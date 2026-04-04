@@ -18,14 +18,8 @@ Stage 2 (Full roster from boxscorepreviewv3): Always runs for every qualifying
   game, regardless of Stage 1 results.
   - Provides bench and inactive players that Stage 1 omits.
   - If Stage 1 already wrote a player as a Starter, Stage 2 does not
-    overwrite them (the upsert PK is game_id + team_tricode + player_name,
-    and Stage 1 rows are written first, so Stage 2 only inserts net-new rows).
-  - Players from Stage 2 that are NOT in Stage 1 keep the starter_status
-    derived from the preview endpoint (Starter/Bench/Inactive).
-
-This approach gives us:
-  - Accurate starters from the official JSON (most reliable source)
-  - Full bench + inactive roster from the preview (fills the gap)
+    overwrite them — Stage 1's starter designation and label take priority.
+  - Players from Stage 2 not in Stage 1 keep Stage 2's starter_status.
 
 Secrets required
   NBA_PROXY_URL, AZURE_SQL_SERVER, AZURE_SQL_DATABASE,
@@ -48,13 +42,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from etl.nba_etl import (
     get_engine,
     upsert,
-    safe_int,
     safe_str,
     NBA_HEADERS,
     get_proxies,
-    API_DELAY,
-    RETRY_COUNT,
-    RETRY_WAIT,
 )
 
 import requests
@@ -69,6 +59,11 @@ log = logging.getLogger(__name__)
 PROXY_URL = __import__('os').environ.get("NBA_PROXY_URL")
 
 ET_TZ = ZoneInfo("America/New_York")
+
+# Tight timeouts to keep the full poll under 2 minutes for 3 games.
+OFFICIAL_JSON_TIMEOUT = 20   # seconds for the daily lineups JSON
+PREVIEW_TIMEOUT       = 20   # seconds per boxscorepreviewv3 call
+BETWEEN_GAMES_DELAY   = 0.5  # seconds between preview calls
 
 
 # ---------------------------------------------------------------------------
@@ -142,27 +137,24 @@ def get_todays_nonfinal_games(engine, hours_ahead):
 
 
 # ---------------------------------------------------------------------------
-# HTTP helper
+# HTTP helper (single attempt, tight timeout — no long retry waits)
 # ---------------------------------------------------------------------------
-def _direct_get(url, label, timeout=30):
-    for attempt in range(1, RETRY_COUNT + 1):
-        try:
-            resp = requests.get(
-                url,
-                headers=NBA_HEADERS,
-                proxies=get_proxies(),
-                timeout=timeout,
-            )
-            if resp.status_code != 200:
-                raise ValueError(f"HTTP {resp.status_code}")
-            time.sleep(API_DELAY)
-            return resp.json()
-        except Exception as exc:
-            log.warning(f"  {label} attempt {attempt}/{RETRY_COUNT} failed: {exc}")
-            if attempt < RETRY_COUNT:
-                time.sleep(RETRY_WAIT)
-    log.error(f"  {label} failed after {RETRY_COUNT} attempts")
-    return None
+def _get(url, label, timeout):
+    """Single-attempt GET with a tight timeout. Returns JSON or None."""
+    try:
+        resp = requests.get(
+            url,
+            headers=NBA_HEADERS,
+            proxies=get_proxies(),
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            log.warning(f"  {label}: HTTP {resp.status_code}")
+            return None
+        return resp.json()
+    except Exception as exc:
+        log.warning(f"  {label} failed: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +162,12 @@ def _direct_get(url, label, timeout=30):
 # ---------------------------------------------------------------------------
 def fetch_official_lineups(game_date):
     """
-    Returns dict keyed by game_id. Each value is a dict of:
-      { player_name: { lineup_status, starter_status, position, ... } }
+    Returns dict keyed by game_id -> {player_name: row_dict}.
     Only starters appear in this data.
     """
     date_key = game_date.strftime("%Y%m%d")
     url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_key}.json"
-    data     = _direct_get(url, f"daily_lineups {date_key}")
+    data     = _get(url, f"daily_lineups {date_key}", OFFICIAL_JSON_TIMEOUT)
     if data is None:
         return {}
 
@@ -219,12 +210,12 @@ def fetch_official_lineups(game_date):
 # Stage 2: Full roster from boxscorepreviewv3
 # ---------------------------------------------------------------------------
 def fetch_preview_roster(game_id, game_date):
-    """
-    Returns list of row dicts for all players in the game preview.
-    lineup_status is always 'Projected' here.
-    """
-    url  = "https://stats.nba.com/stats/boxscorepreviewv3"
-    data = _direct_get(url, f"boxscorepreviewv3 {game_id}", timeout=60)
+    """Returns list of row dicts for all players. lineup_status = 'Projected'."""
+    data = _get(
+        "https://stats.nba.com/stats/boxscorepreviewv3",
+        f"boxscorepreviewv3 {game_id}",
+        PREVIEW_TIMEOUT,
+    )
     if data is None:
         return []
 
@@ -233,7 +224,7 @@ def fetch_preview_roster(game_id, game_date):
         home_obj  = game_data.get("homeTeam", {})
         away_obj  = game_data.get("awayTeam", {})
     except Exception as exc:
-        log.warning(f"  {game_id}: unexpected preview response shape: {exc}")
+        log.warning(f"  {game_id}: unexpected preview shape: {exc}")
         return []
 
     rows = []
@@ -296,90 +287,77 @@ def main():
     now_utc = datetime.now(timezone.utc)
 
     # ------------------------------------------------------------------
-    # Stage 1: Official daily lineups JSON.
-    # Only contains starters. Determines Confirmed vs Projected label.
+    # Stage 1: Official daily lineups JSON (starters only).
     # ------------------------------------------------------------------
     log.info("Stage 1: fetching official lineups JSON...")
     official_by_game = fetch_official_lineups(today)
 
-    # Determine label per game.
+    # Determine Confirmed vs Projected label per game.
+    # Confirmed only within 30 minutes of tip.
     game_labels = {}
     for gid in game_ids_to_update:
         start_utc = game_start_map.get(gid)
         if start_utc is not None and (start_utc - now_utc) <= timedelta(minutes=30):
             game_labels[gid] = "Confirmed"
-        elif gid in official_by_game:
-            # Official JSON has data but tip is more than 30 min out.
-            game_labels[gid] = "Projected"
         else:
-            # No official data at all yet.
             game_labels[gid] = "Projected"
 
-    # Apply label to Stage 1 rows.
     stage1_by_game = {}
     for gid, player_dict in official_by_game.items():
         if gid not in game_ids_to_update:
             continue
         label = game_labels[gid]
-        for name, row in player_dict.items():
+        for row in player_dict.values():
             row["lineup_status"] = label
         stage1_by_game[gid] = player_dict
         log.info(f"  {gid}: {len(player_dict)} starters from official JSON, label '{label}'.")
 
     # ------------------------------------------------------------------
     # Stage 2: Full roster from boxscorepreviewv3.
-    # Always runs for all qualifying games.
-    # Merges with Stage 1: Stage 1 starters take priority.
-    # Stage 2 provides bench + inactive players not in Stage 1.
+    # Always runs. Merges with Stage 1 — Stage 1 starters take priority.
     # ------------------------------------------------------------------
     log.info("Stage 2: fetching full rosters from boxscorepreviewv3...")
 
     all_rows = []
-    for gid in sorted(game_ids_to_update):
+    for i, gid in enumerate(sorted(game_ids_to_update)):
+        if i > 0:
+            time.sleep(BETWEEN_GAMES_DELAY)
+
         preview_rows = fetch_preview_roster(gid, today)
-        label = game_labels.get(gid, "Projected")
+        label        = game_labels.get(gid, "Projected")
+        stage1_players = stage1_by_game.get(gid, {})
 
         if not preview_rows:
-            log.warning(f"  {gid}: boxscorepreviewv3 returned no data.")
-            # Fall back to Stage 1 only if we have it.
-            if gid in stage1_by_game:
-                all_rows.extend(stage1_by_game[gid].values())
-                log.info(f"  {gid}: using {len(stage1_by_game[gid])} Stage 1 rows only.")
+            log.warning(f"  {gid}: boxscorepreviewv3 returned no data — using Stage 1 only.")
+            all_rows.extend(stage1_players.values())
             continue
 
-        # Build merged roster:
-        # - Start with Stage 2 (full roster, all players).
-        # - For any player that also appears in Stage 1, override with
-        #   Stage 1's starter_status and lineup_status (more authoritative).
-        stage1_players = stage1_by_game.get(gid, {})
         merged = []
         for row in preview_rows:
             name = row["player_name"]
             if name in stage1_players:
-                # Use Stage 1's authoritative starter/confirmation data.
                 s1 = stage1_players[name]
                 row["starter_status"] = s1["starter_status"]
                 row["lineup_status"]  = s1["lineup_status"]
                 row["position"]       = s1["position"]
             else:
-                # Player not in official JSON — keep Stage 2 data but
-                # use the game's label for lineup_status.
                 row["lineup_status"] = label
             merged.append(row)
 
-        # Add any Stage 1 starters NOT found in Stage 2 preview
-        # (shouldn't happen often, but handles edge cases).
+        # Add Stage 1 starters missing from the preview (edge case).
         preview_names = {r["player_name"] for r in preview_rows}
         for name, s1row in stage1_players.items():
             if name not in preview_names:
-                log.info(f"  {gid}: {name} in official JSON but not preview — adding from Stage 1.")
+                log.info(f"  {gid}: {name} in official JSON but not preview — adding.")
                 merged.append(s1row)
 
         all_rows.extend(merged)
-        s1_count = len(stage1_players)
-        s2_only  = len([r for r in merged if r["player_name"] not in stage1_players])
-        log.info(f"  {gid}: {len(merged)} total ({s1_count} from official JSON, {s2_only} from preview only), label '{label}'.")
-        time.sleep(API_DELAY)
+        s2_only = len([r for r in merged if r["player_name"] not in stage1_players])
+        log.info(
+            f"  {gid}: {len(merged)} total "
+            f"({len(stage1_players)} official starters, {s2_only} from preview only), "
+            f"label '{label}'."
+        )
 
     if not all_rows:
         log.info("No rows to write.")
