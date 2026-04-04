@@ -19,10 +19,12 @@ interface LivePlayer {
   tov: number;
   min: number;
   fg3m: number;
+  fg3a: number;
   fgm: number;
   fga: number;
   ftm: number;
   fta: number;
+  starterStatus: string | null;
 }
 
 interface LiveData {
@@ -39,7 +41,7 @@ function fmtMin(min: number): string {
 }
 
 function fmtShoot(made: number, att: number): string {
-  return att === 0 ? '-' : `${made}/${att}`;
+  return att === 0 ? '-' : `${made}-${att}`;
 }
 
 function TeamTable({
@@ -54,12 +56,53 @@ function TeamTable({
   selectedDate: string;
 }) {
   const searchParams = useSearchParams();
-  // Sort by minutes descending (most played first)
-  const sorted = [...players].sort((a, b) => b.min - a.min);
+  const hasLineup = players.some((p) => p.starterStatus != null);
+
+  const starters = hasLineup
+    ? players.filter((p) => p.starterStatus === 'Starter')
+    : [];
+  const bench = hasLineup
+    ? players.filter((p) => p.starterStatus !== 'Starter')
+    : [...players].sort((a, b) => b.min - a.min);
+
+  const renderRow = (p: LivePlayer) => {
+    const href = `/nba/player/${p.playerId}?gameId=${gameId}&tab=boxscore&date=${selectedDate}`;
+    const isStarter = p.starterStatus === 'Starter';
+    return (
+      <tr key={p.playerId} className={`border-b border-gray-800 ${p.min === 0 ? 'opacity-40' : ''}`}>
+        <td className="py-1 pr-3 whitespace-nowrap">
+          <Link
+            href={href}
+            className={`hover:text-blue-400 transition-colors ${isStarter ? 'text-gray-100 font-medium' : 'text-gray-300'}`}
+          >
+            {p.playerName}
+          </Link>
+        </td>
+        <td className="py-1 px-2 text-right text-gray-300">{fmtMin(p.min)}</td>
+        <td className="py-1 px-2 text-right text-gray-100 font-medium">{p.pts}</td>
+        <td className="py-1 px-2 text-right text-gray-300">{p.reb}</td>
+        <td className="py-1 px-2 text-right text-gray-300">{p.ast}</td>
+        <td className="py-1 px-2 text-right text-gray-300">{p.stl}</td>
+        <td className="py-1 px-2 text-right text-gray-300">{p.blk}</td>
+        <td className="py-1 px-2 text-right text-gray-300">{p.tov}</td>
+        <td className="py-1 px-2 text-right text-gray-300 tabular-nums">{fmtShoot(p.fgm, p.fga)}</td>
+        <td className="py-1 px-2 text-right text-gray-300 tabular-nums">{fmtShoot(p.fg3m, p.fg3a)}</td>
+        <td className="py-1 pl-2 text-right text-gray-300 tabular-nums">{fmtShoot(p.ftm, p.fta)}</td>
+      </tr>
+    );
+  };
+
+  const sectionHeader = (label: string) => (
+    <tr>
+      <td colSpan={11} className="pt-2 pb-0.5 text-xs text-gray-600 font-semibold uppercase tracking-wider">
+        {label}
+      </td>
+    </tr>
+  );
 
   return (
     <div className="overflow-x-auto">
-      <div className="text-xs text-gray-600 font-semibold uppercase tracking-wider mb-1">{teamAbbr}</div>
+      <div className="text-xs text-gray-500 font-semibold uppercase tracking-wider mb-1">{teamAbbr}</div>
       <table className="w-full text-sm">
         <thead>
           <tr className="text-xs text-gray-500 border-b border-gray-800">
@@ -77,30 +120,16 @@ function TeamTable({
           </tr>
         </thead>
         <tbody>
-          {sorted.map((p) => {
-            const params = new URLSearchParams(searchParams.toString());
-            params.set('tab', 'boxscore');
-            const href = `/nba/player/${p.playerId}?gameId=${gameId}&tab=boxscore&date=${selectedDate}`;
-            return (
-              <tr key={p.playerId} className={`border-b border-gray-800 ${p.min === 0 ? 'opacity-40' : ''}`}>
-                <td className="py-1 pr-3">
-                  <Link href={href} className="text-gray-100 hover:text-blue-400 transition-colors">
-                    {p.playerName}
-                  </Link>
-                </td>
-                <td className="py-1 px-2 text-right text-gray-300">{fmtMin(p.min)}</td>
-                <td className="py-1 px-2 text-right text-gray-100 font-medium">{p.pts}</td>
-                <td className="py-1 px-2 text-right text-gray-300">{p.reb}</td>
-                <td className="py-1 px-2 text-right text-gray-300">{p.ast}</td>
-                <td className="py-1 px-2 text-right text-gray-300">{p.stl}</td>
-                <td className="py-1 px-2 text-right text-gray-300">{p.blk}</td>
-                <td className="py-1 px-2 text-right text-gray-300">{p.tov}</td>
-                <td className="py-1 px-2 text-right text-gray-300">{fmtShoot(p.fgm, p.fga)}</td>
-                <td className="py-1 px-2 text-right text-gray-300">{fmtShoot(p.fg3m, p.fga)}</td>
-                <td className="py-1 pl-2 text-right text-gray-300">{fmtShoot(p.ftm, p.fta)}</td>
-              </tr>
-            );
-          })}
+          {hasLineup ? (
+            <>
+              {starters.length > 0 && sectionHeader('Starters')}
+              {starters.map(renderRow)}
+              {bench.length > 0 && sectionHeader('Bench')}
+              {bench.map(renderRow)}
+            </>
+          ) : (
+            bench.map(renderRow)
+          )}
         </tbody>
       </table>
     </div>
@@ -114,16 +143,19 @@ export default function LiveBoxScore({
   gameId: string;
   selectedDate: string;
 }) {
-  const [data, setData]           = useState<LiveData | null>(null);
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState<string | null>(null);
+  const [data, setData]               = useState<LiveData | null>(null);
+  const [loading, setLoading]         = useState(true);
+  const [error, setError]             = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function fetchLive() {
     try {
       const r = await fetch(`/api/live-boxscore?gameId=${gameId}`, { cache: 'no-store' });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${r.status}`);
+      }
       const json = await r.json();
       setData(json);
       setError(null);
@@ -139,13 +171,14 @@ export default function LiveBoxScore({
     fetchLive();
     intervalRef.current = setInterval(fetchLive, POLL_INTERVAL_MS);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gameId]);
 
   const refreshStr = lastRefresh.toLocaleTimeString([], {
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
 
-  // Group players by team
+  // Group players by team, preserving DB order (already sorted by team_id)
   const teams = data
     ? Array.from(new Map(data.players.map((p) => [p.teamAbbr, p.teamAbbr])).keys()).map((abbr) => ({
         abbr,
@@ -164,11 +197,11 @@ export default function LiveBoxScore({
         {data?.gameStatusText && (
           <span className="text-xs text-gray-400">{data.gameStatusText}</span>
         )}
-        <span className="text-xs text-gray-600 ml-1">Updated {refreshStr} · refreshes every 30s</span>
+        <span className="text-xs text-gray-600 ml-1">Updated {refreshStr} · auto-refreshes every 30s</span>
       </div>
 
       {loading && <div className="text-sm text-gray-500">Loading...</div>}
-      {error && <div className="text-sm text-red-400">Error: {error}</div>}
+      {error && <div className="text-sm text-red-400">{error}</div>}
 
       {!loading && !error && teams.length > 0 && (
         <div className="flex flex-col gap-6">
