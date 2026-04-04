@@ -9,6 +9,41 @@
 
 ---
 
+## 2026-04-04 (session 7)
+
+### ETL | etl/nba_live.py — switched to NBA CDN endpoint, removed DB write for live box scores
+- Root cause of `no rows returned` warning: `stats.nba.com/stats/boxscoretraditionalv3` was returning HTTP 200 with `homeTeam: null` — the key `boxScoreTraditional.homeTeam` existed but contained no player data for in-progress games from Azure VM IPs.
+- Switched to public CDN endpoint: `https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json`. No proxy needed. Returns full cumulative player stats immediately.
+- CDN response shape differs from V3: top-level key is `game` (not `boxScoreTraditional`), and `statistics` is a **single dict per player** (cumulative game total), not a list of per-period dicts.
+- DB write for live rows removed entirely. The Flask runner on the VM serves live box scores directly from CDN to the UI on each request — no intermediate DB write is needed or useful.
+- `nba_live.py` now just verifies CDN availability and logs player counts per game. The schedule status update (ScoreboardV3) is unchanged.
+- Do not restore the DB upsert path for live box scores — it requires schema changes (VARCHAR column widths for Unicode player names) and the Flask CDN path is strictly better.
+
+### ETL | etl/runner.py — switched to NBA CDN endpoint
+- Removed `stats.nba.com` BoxScoreTraditionalV3 call and Webshare proxy dependency from `/boxscore` route.
+- Now fetches `https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json` directly.
+- CDN is public — no proxy, no auth headers required. Faster and more reliable.
+- Response parsing updated: `statistics` is a single dict per player (not a list), `minutes` field replaces `clock` for time parsing.
+- Added `starter` and `oncourt` boolean fields to the response (from CDN `starter == "1"` and `oncourt == "1"`).
+- `NBA_PROXY_URL` env var is no longer used by runner.py (still present in systemd service env, harmless).
+- Confirmed working: `curl localhost:5000/boxscore?gameId=0022501129` returns 36 players, correct stats, Q4 game clock.
+
+### Infra | self-dispatch loop removed from nba-game-day.yml
+- The self-re-dispatch loop added in session 6 was reverted. The loop caused complexity in the workflow and competed with the simpler Refresh Data button model.
+- Active game-day live updates are now driven exclusively by the Refresh Data button (dispatches `refresh-data.yml`).
+- Scheduled cron retained: daily 09:30 UTC for overnight backfill, 00:00-06:00 UTC every 30 min for late-game sync.
+
+### UI | web/components/LiveBoxScore.tsx — 30s auto-poll re-enabled, Starters/Bench sections
+- Re-enabled 30-second auto-poll now that Flask proxy serves CDN data fast (no proxy latency).
+- Added Starters/Bench section headers matching RosterTable pattern.
+- Fixed `fg3a` typo (was incorrectly using `fga` as denominator for 3P display).
+
+### Infra | schnapp-flask.service — runner.py no longer needs NBA_PROXY_URL
+- `NBA_PROXY_URL` env var remains in the systemd unit (harmless) but is unused by runner.py since CDN switch.
+- Flask service confirmed active and serving CDN data after `sudo systemctl restart schnapp-flask`.
+
+---
+
 ## 2026-04-04 (session 6, continued)
 
 ### Infra | .github/workflows/nba-game-day.yml — self-re-dispatch loop replaces cron dependency
@@ -231,7 +266,7 @@
 
 ## 2026-04-04
 
-### Grading | grading/grade_props.py — grade_date UTC midnight mismatch fix
+### Grading | grade_props.py — grade_date UTC midnight mismatch fix
 - Root cause: `run_upcoming` and `run_intraday` used `date.today()` which returns UTC date on GitHub Actions runners. When the pregame-refresh workflow fires after midnight UTC (still same NBA game night in ET), yesterday's late games received today's `grade_date`, causing At a Glance to show those games in tomorrow's dropdown.
 - Fix: added `today_et()` helper using `datetime.now(timezone.utc)` offset by -4h (EDT). Both `run_upcoming` and `run_intraday` now call `today_et()` instead of `str(date.today())`. Import updated to `from datetime import date, datetime, timezone, timedelta`.
 - Also manually deleted 2,647 misattributed rows from `common.daily_grades` for 2026-04-04 that belonged to 7 April 3rd games (game IDs: 0022501121, 0022501122, 0022501124, 0022501125, 0022501126, 0022501127, 0022501128).
