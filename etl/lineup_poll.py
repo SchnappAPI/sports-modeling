@@ -6,23 +6,26 @@ Runs every 15 minutes during the game window via lineup-poll.yml.
 
 Two-stage lineup strategy
 --------------------------
-Stage 1 (Confirmed / Projected from official JSON): Fetch the NBA's official
-  daily lineups JSON.
+Stage 1 (Official starters JSON): Fetch the NBA's official daily lineups JSON.
   URL: stats.nba.com/js/data/leaders/00_daily_lineups_{YYYYMMDD}.json
+  This file only contains the projected or confirmed starting five per team.
+  It does NOT include bench or inactive players.
 
-  The NBA publishes projected starters in this file throughout the day, then
-  updates it with truly confirmed starters 30-60 minutes before tip. The
-  confirmed signal is the game-level 'confirmed' flag in the JSON itself
-  (g.get('confirmed') == 1 or True). If the flag is absent or falsy, the
-  game is treated as Projected regardless of time-to-tip.
+  Players from this JSON are written as 'Starter' with lineup_status
+  'Confirmed' (within 30 min of tip) or 'Projected' (further out).
 
-  In both cases Stage 2 is skipped for games that appear in the JSON.
+Stage 2 (Full roster from boxscorepreviewv3): Always runs for every qualifying
+  game, regardless of Stage 1 results.
+  - Provides bench and inactive players that Stage 1 omits.
+  - If Stage 1 already wrote a player as a Starter, Stage 2 does not
+    overwrite them (the upsert PK is game_id + team_tricode + player_name,
+    and Stage 1 rows are written first, so Stage 2 only inserts net-new rows).
+  - Players from Stage 2 that are NOT in Stage 1 keep the starter_status
+    derived from the preview endpoint (Starter/Bench/Inactive).
 
-Stage 2 (Projected): For any qualifying game that returned NO rows from
-  the official JSON at all, call boxscorepreviewv3 per game.
-  Players written with lineup_status = 'Projected'.
-  The pre-delete for Stage 2 clears ALL rows for the game (not just
-  Projected), so stale Confirmed rows from a prior run cannot survive.
+This approach gives us:
+  - Accurate starters from the official JSON (most reliable source)
+  - Full bench + inactive roster from the preview (fills the gap)
 
 Secrets required
   NBA_PROXY_URL, AZURE_SQL_SERVER, AZURE_SQL_DATABASE,
@@ -74,11 +77,6 @@ ET_TZ = ZoneInfo("America/New_York")
 _TIME_RE = re.compile(r"(\d{1,2}):(\d{2})\s*(am|pm)", re.IGNORECASE)
 
 def parse_game_start_utc(game_status_text):
-    """
-    Parse a game_status_text like '7:30 pm ET' into a UTC datetime for today.
-    Uses America/New_York to correctly handle EDT vs EST automatically.
-    Returns None if parsing fails.
-    """
     if not game_status_text:
         return None
     m = _TIME_RE.search(game_status_text)
@@ -168,9 +166,14 @@ def _direct_get(url, label, timeout=30):
 
 
 # ---------------------------------------------------------------------------
-# Stage 1: Official daily lineups JSON
+# Stage 1: Official daily lineups JSON (starters only)
 # ---------------------------------------------------------------------------
 def fetch_official_lineups(game_date):
+    """
+    Returns dict keyed by game_id. Each value is a dict of:
+      { player_name: { lineup_status, starter_status, position, ... } }
+    Only starters appear in this data.
+    """
     date_key = game_date.strftime("%Y%m%d")
     url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_key}.json"
     data     = _direct_get(url, f"daily_lineups {date_key}")
@@ -183,38 +186,43 @@ def fetch_official_lineups(game_date):
         if game_id is None:
             continue
 
-        # Log all top-level keys on the game object so we can identify
-        # the confirmed signal the NBA uses in this JSON.
-        log.info(f"  JSON game keys for {game_id}: { {k: g[k] for k in g if k not in ('homeTeam','awayTeam')} }")
+        meta = {k: g[k] for k in g if k not in ("homeTeam", "awayTeam")}
+        log.info(f"  Official JSON meta {game_id}: {meta}")
 
-        rows = []
+        rows = {}
         for side, home_away in (("homeTeam", "Home"), ("awayTeam", "Away")):
             team    = g.get(side, {})
             tricode = safe_str(team.get("teamAbbreviation"))
             for p in team.get("players", []):
+                name    = safe_str(p.get("playerName"))
                 pos     = safe_str(p.get("position"))
                 roster  = safe_str(p.get("rosterStatus"))
                 starter = "Starter" if pos else ("Bench" if roster == "Active" else "Inactive")
-                rows.append({
-                    "game_id":        game_id,
-                    "game_date":      game_date,
-                    "home_away":      home_away,
-                    "team_tricode":   tricode,
-                    "player_name":    safe_str(p.get("playerName")),
-                    "position":       pos,
-                    "roster_status":  roster,
-                    "starter_status": starter,
-                    "lineup_status":  None,  # filled in by caller
-                })
+                if name:
+                    rows[name] = {
+                        "game_id":        game_id,
+                        "game_date":      game_date,
+                        "home_away":      home_away,
+                        "team_tricode":   tricode,
+                        "player_name":    name,
+                        "position":       pos,
+                        "roster_status":  roster,
+                        "starter_status": starter,
+                        "lineup_status":  None,  # set by caller
+                    }
         if rows:
             by_game[game_id] = rows
     return by_game
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: Projected lineups from boxscorepreviewv3
+# Stage 2: Full roster from boxscorepreviewv3
 # ---------------------------------------------------------------------------
-def fetch_projected_lineups(game_id, game_date):
+def fetch_preview_roster(game_id, game_date):
+    """
+    Returns list of row dicts for all players in the game preview.
+    lineup_status is always 'Projected' here.
+    """
     url  = "https://stats.nba.com/stats/boxscorepreviewv3"
     data = _direct_get(url, f"boxscorepreviewv3 {game_id}", timeout=60)
     if data is None:
@@ -280,8 +288,8 @@ def main():
         log.info(f"No non-final games starting within {args.hours_ahead}h. Nothing to do.")
         return
 
-    game_start_map      = {r["game_id"]: r.get("start_utc") for r in qualified_games}
-    game_ids_to_update  = set(game_start_map.keys())
+    game_start_map     = {r["game_id"]: r.get("start_utc") for r in qualified_games}
+    game_ids_to_update = set(game_start_map.keys())
     log.info(f"{len(game_ids_to_update)} game(s) qualify for lineup refresh.")
 
     today   = datetime.now(ET_TZ).date()
@@ -289,125 +297,108 @@ def main():
 
     # ------------------------------------------------------------------
     # Stage 1: Official daily lineups JSON.
-    # Use the JSON's own confirmed flag to determine the label.
-    # We fetch the raw JSON here to inspect game-level fields.
+    # Only contains starters. Determines Confirmed vs Projected label.
     # ------------------------------------------------------------------
     log.info("Stage 1: fetching official lineups JSON...")
+    official_by_game = fetch_official_lineups(today)
 
-    date_key = today.strftime("%Y%m%d")
-    url      = f"https://stats.nba.com/js/data/leaders/00_daily_lineups_{date_key}.json"
-    raw_data = _direct_get(url, f"daily_lineups {date_key}")
+    # Determine label per game.
+    game_labels = {}
+    for gid in game_ids_to_update:
+        start_utc = game_start_map.get(gid)
+        if start_utc is not None and (start_utc - now_utc) <= timedelta(minutes=30):
+            game_labels[gid] = "Confirmed"
+        elif gid in official_by_game:
+            # Official JSON has data but tip is more than 30 min out.
+            game_labels[gid] = "Projected"
+        else:
+            # No official data at all yet.
+            game_labels[gid] = "Projected"
 
-    stage1_rows     = []
-    stage1_game_ids = set()
-
-    if raw_data:
-        for g in raw_data.get("games", []):
-            gid = safe_str(g.get("gameId"))
-            if gid is None or gid not in game_ids_to_update:
-                continue
-
-            # Log game-level fields to identify the confirmed signal.
-            meta = {k: g[k] for k in g if k not in ("homeTeam", "awayTeam")}
-            log.info(f"  JSON game meta {gid}: {meta}")
-
-            # Use the JSON's own confirmed flag if present.
-            # Known candidate keys: 'confirmed', 'isConfirmed', 'lineupConfirmed'.
-            # Fall back to time-based check (30 min) until we confirm the key name.
-            json_confirmed = (
-                g.get("confirmed") or
-                g.get("isConfirmed") or
-                g.get("lineupConfirmed")
-            )
-            if json_confirmed:
-                label = "Confirmed"
-            else:
-                # Fallback: confirm only if tip is within 30 minutes.
-                start_utc = game_start_map.get(gid)
-                if start_utc is not None and (start_utc - now_utc) <= timedelta(minutes=30):
-                    label = "Confirmed"
-                else:
-                    label = "Projected"
-
-            rows = []
-            for side, home_away in (("homeTeam", "Home"), ("awayTeam", "Away")):
-                team    = g.get(side, {})
-                tricode = safe_str(team.get("teamAbbreviation"))
-                for p in team.get("players", []):
-                    pos     = safe_str(p.get("position"))
-                    roster  = safe_str(p.get("rosterStatus"))
-                    starter = "Starter" if pos else ("Bench" if roster == "Active" else "Inactive")
-                    rows.append({
-                        "game_id":        gid,
-                        "game_date":      today,
-                        "home_away":      home_away,
-                        "team_tricode":   tricode,
-                        "player_name":    safe_str(p.get("playerName")),
-                        "position":       pos,
-                        "roster_status":  roster,
-                        "starter_status": starter,
-                        "lineup_status":  label,
-                    })
-
-            if rows:
-                stage1_rows.extend(rows)
-                stage1_game_ids.add(gid)
-                log.info(f"  {gid}: {len(rows)} rows from official JSON, labeled '{label}'.")
-
-    if stage1_rows:
-        with engine.begin() as conn:
-            for gid in stage1_game_ids:
-                conn.execute(
-                    text("DELETE FROM nba.daily_lineups WHERE game_id = :gid"),
-                    {"gid": gid}
-                )
-        upsert(
-            pd.DataFrame(stage1_rows),
-            engine, "nba", "daily_lineups",
-            ["game_id", "team_tricode", "player_name"]
-        )
-        log.info(f"  Stage 1 complete: {len(stage1_rows)} rows for {len(stage1_game_ids)} game(s).")
-    else:
-        log.info("  Stage 1: official JSON returned no rows for qualifying games.")
-
-    # ------------------------------------------------------------------
-    # Stage 2: Projected lineups for games absent from the official JSON.
-    # Delete ALL rows for these games first so stale Confirmed rows
-    # from a prior run cannot survive.
-    # ------------------------------------------------------------------
-    needs_projected = game_ids_to_update - stage1_game_ids
-    if not needs_projected:
-        log.info("Stage 2: all qualifying games have official JSON data. Skipping.")
-        return
-
-    log.info(f"Stage 2: fetching projected lineups for {len(needs_projected)} game(s): {needs_projected}")
-    projected_rows = []
-    for gid in sorted(needs_projected):
-        rows = fetch_projected_lineups(gid, today)
-        if not rows:
-            log.warning(f"  {gid}: boxscorepreviewv3 returned no data.")
+    # Apply label to Stage 1 rows.
+    stage1_by_game = {}
+    for gid, player_dict in official_by_game.items():
+        if gid not in game_ids_to_update:
             continue
-        projected_rows.extend(rows)
-        log.info(f"  {gid}: {len(rows)} projected rows.")
+        label = game_labels[gid]
+        for name, row in player_dict.items():
+            row["lineup_status"] = label
+        stage1_by_game[gid] = player_dict
+        log.info(f"  {gid}: {len(player_dict)} starters from official JSON, label '{label}'.")
+
+    # ------------------------------------------------------------------
+    # Stage 2: Full roster from boxscorepreviewv3.
+    # Always runs for all qualifying games.
+    # Merges with Stage 1: Stage 1 starters take priority.
+    # Stage 2 provides bench + inactive players not in Stage 1.
+    # ------------------------------------------------------------------
+    log.info("Stage 2: fetching full rosters from boxscorepreviewv3...")
+
+    all_rows = []
+    for gid in sorted(game_ids_to_update):
+        preview_rows = fetch_preview_roster(gid, today)
+        label = game_labels.get(gid, "Projected")
+
+        if not preview_rows:
+            log.warning(f"  {gid}: boxscorepreviewv3 returned no data.")
+            # Fall back to Stage 1 only if we have it.
+            if gid in stage1_by_game:
+                all_rows.extend(stage1_by_game[gid].values())
+                log.info(f"  {gid}: using {len(stage1_by_game[gid])} Stage 1 rows only.")
+            continue
+
+        # Build merged roster:
+        # - Start with Stage 2 (full roster, all players).
+        # - For any player that also appears in Stage 1, override with
+        #   Stage 1's starter_status and lineup_status (more authoritative).
+        stage1_players = stage1_by_game.get(gid, {})
+        merged = []
+        for row in preview_rows:
+            name = row["player_name"]
+            if name in stage1_players:
+                # Use Stage 1's authoritative starter/confirmation data.
+                s1 = stage1_players[name]
+                row["starter_status"] = s1["starter_status"]
+                row["lineup_status"]  = s1["lineup_status"]
+                row["position"]       = s1["position"]
+            else:
+                # Player not in official JSON — keep Stage 2 data but
+                # use the game's label for lineup_status.
+                row["lineup_status"] = label
+            merged.append(row)
+
+        # Add any Stage 1 starters NOT found in Stage 2 preview
+        # (shouldn't happen often, but handles edge cases).
+        preview_names = {r["player_name"] for r in preview_rows}
+        for name, s1row in stage1_players.items():
+            if name not in preview_names:
+                log.info(f"  {gid}: {name} in official JSON but not preview — adding from Stage 1.")
+                merged.append(s1row)
+
+        all_rows.extend(merged)
+        s1_count = len(stage1_players)
+        s2_only  = len([r for r in merged if r["player_name"] not in stage1_players])
+        log.info(f"  {gid}: {len(merged)} total ({s1_count} from official JSON, {s2_only} from preview only), label '{label}'.")
         time.sleep(API_DELAY)
 
-    if projected_rows:
-        with engine.begin() as conn:
-            for gid in needs_projected:
-                conn.execute(
-                    text("DELETE FROM nba.daily_lineups WHERE game_id = :gid"),
-                    {"gid": gid}
-                )
-        upsert(
-            pd.DataFrame(projected_rows),
-            engine, "nba", "daily_lineups",
-            ["game_id", "team_tricode", "player_name"]
-        )
-        log.info(f"  Stage 2 complete: {len(projected_rows)} projected rows for "
-                 f"{len(needs_projected)} game(s).")
-    else:
-        log.info("  Stage 2: no projected rows returned.")
+    if not all_rows:
+        log.info("No rows to write.")
+        return
 
+    # Delete all existing rows for qualifying games, then write merged set.
+    with engine.begin() as conn:
+        for gid in game_ids_to_update:
+            conn.execute(
+                text("DELETE FROM nba.daily_lineups WHERE game_id = :gid"),
+                {"gid": gid}
+            )
+
+    upsert(
+        pd.DataFrame(all_rows),
+        engine, "nba", "daily_lineups",
+        ["game_id", "team_tricode", "player_name"]
+    )
+    log.info(f"  Written {len(all_rows)} total rows for {len(game_ids_to_update)} game(s).")
     log.info("Lineup poll complete.")
 
 
