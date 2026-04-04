@@ -9,6 +9,19 @@
 
 ---
 
+## 2026-04-04 (session 6, continued)
+
+### Infra | .github/workflows/nba-game-day.yml — self-re-dispatch loop replaces cron dependency
+- Root cause of live stats gap: GitHub's cron scheduler can lag 15-30+ minutes during busy periods. The workflow saw a 14-minute gap with no runs while WAS@MIA was in-progress.
+- Fix: added a final step "Sleep then re-dispatch" that runs on the VM when `any_active=true`. It sleeps 270 seconds then re-dispatches `nba-game-day.yml` via `gh workflow run`. The loop sustains itself entirely on the self-hosted VM runner without depending on GitHub's scheduler.
+- Loop self-terminates when gate returns `any_active=false` (no pre-game or live games remaining).
+- Cron schedule reduced to a single daily kickoff at UTC 16:00 (noon ET) plus a 30-min fallback during overnight hours (UTC 00:00-06:00). These start or restart the loop if it dies unexpectedly.
+- Previous cron: `*/5 16-23` and `*/5 0-6` (every 5 min across 13 hours). Removed — all timing is now VM-driven.
+- Do not restore the every-5-min cron — the self-dispatch loop is more reliable and doesn't consume unnecessary GitHub quota when no games are active.
+- Decision: `sleep 270` on the runner (not a cron delay) because the runner is self-hosted and sleeping is free. The 270s sleep plus ~25s ETL runtime gives ~5 minutes per cycle.
+
+---
+
 ## 2026-04-04 (session 6)
 
 ### API | web/app/api/live-boxscore/route.ts — rewritten to read from DB
