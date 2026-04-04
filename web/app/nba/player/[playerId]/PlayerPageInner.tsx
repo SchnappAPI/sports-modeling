@@ -181,12 +181,6 @@ function todayLocal(): string {
 
 // ---------------------------------------------------------------------------
 // Volume heatmap helper
-//
-// Returns an inline backgroundColor string for attempt columns.
-// Values near the season average are transparent (no background).
-// Values toward the season max get a teal background that deepens linearly.
-// Values toward the season min get an orange background that deepens linearly.
-// Max opacity is capped at 0.35 so the color stays subtle.
 // ---------------------------------------------------------------------------
 
 interface AttemptRange {
@@ -197,23 +191,18 @@ interface AttemptRange {
 
 function volumeBg(value: number, range: AttemptRange): string {
   const { min, avg, max } = range;
-  // Not enough spread to be meaningful — don't color.
   if (max === min) return 'transparent';
-
   const MAX_OPACITY = 0.35;
-
   if (value >= avg) {
-    // High side: scale from avg (opacity 0) to max (opacity MAX_OPACITY). Teal.
     const span = max - avg;
     if (span === 0) return 'transparent';
     const opacity = Math.min((value - avg) / span, 1) * MAX_OPACITY;
-    return `rgba(45, 212, 191, ${opacity.toFixed(3)})`; // teal-400
+    return `rgba(45, 212, 191, ${opacity.toFixed(3)})`;
   } else {
-    // Low side: scale from avg (opacity 0) to min (opacity MAX_OPACITY). Orange.
     const span = avg - min;
     if (span === 0) return 'transparent';
     const opacity = Math.min((avg - value) / span, 1) * MAX_OPACITY;
-    return `rgba(251, 146, 60, ${opacity.toFixed(3)})`; // orange-400
+    return `rgba(251, 146, 60, ${opacity.toFixed(3)})`;
   }
 }
 
@@ -354,6 +343,28 @@ interface MarketGroup {
   altLines: LinePair[];
 }
 
+// Select the posted (standard) line from a list of standard LinePairs.
+// The true posted line at the book is always near even money (-110 to -115).
+// Alt lines that end up in the standard market key will have more extreme
+// pricing. Pick the pair whose Over price is closest to -110; fall back to
+// the middle element if no price data is available.
+function postedLine(pairs: LinePair[]): LinePair | undefined {
+  if (pairs.length === 0) return undefined;
+  if (pairs.length === 1) return pairs[0];
+
+  const withPrice = pairs.filter((p) => p.over?.overPrice != null);
+  if (withPrice.length > 0) {
+    return withPrice.reduce((best, p) => {
+      const bestDiff = Math.abs((best.over!.overPrice ?? -110) - (-110));
+      const currDiff = Math.abs((p.over!.overPrice ?? -110) - (-110));
+      return currDiff < bestDiff ? p : best;
+    });
+  }
+
+  // No price data — return the middle element (not the extreme minimum).
+  return pairs[Math.floor(pairs.length / 2)];
+}
+
 function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   const stdRows  = grades.filter((g) => !isAlternate(g.marketKey));
   const altRows  = grades.filter((g) =>  isAlternate(g.marketKey));
@@ -483,7 +494,7 @@ function MarketPanel({
   summaries: GameSummary[];
   dotWindow: DotWindow;
 }) {
-  const posted    = group.standardLines[0];
+  const posted    = postedLine(group.standardLines);
   const lineValue = posted?.lineValue ?? 0;
 
   return (
@@ -606,7 +617,7 @@ function TodayPropsSection({
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
-            const posted   = group.standardLines[0];
+            const posted   = postedLine(group.standardLines);
             const grade    = posted?.over?.compositeGrade ?? null;
             const isActive = group.baseKey === activeBase;
             return (
@@ -775,8 +786,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     [log, selectedPeriods],
   );
 
-  // Attempt ranges for volume heatmap — always from full unfiltered season so
-  // the scale stays stable regardless of quarter or opp filters.
   const attemptRanges = useMemo((): { fga: AttemptRange; fg3a: AttemptRange; fta: AttemptRange } => {
     const played = buildGameSummaries(log, new Set<QuarterKey>()).filter((g) => !g.dnp);
     const gp = played.length;
@@ -869,8 +878,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     ...(oppParam ? [{ key: 'opp' as SplitKey, label: `vs ${oppParam}` }] : []),
   ];
 
-  // Compact:   MIN PTS 3PM REB AST PRA PR PA RA
-  // All Stats: MIN PTS FGM FGA 3PM 3PA FTM FTA REB AST PRA PR PA RA STL BLK TOV
   const compactSplitHeaders  = ['MIN', 'PTS', '3PM', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA'];
   const allStatsSplitHeaders = ['MIN', 'PTS', 'FGM', 'FGA', '3PM', '3PA', 'FTM', 'FTA', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'STL', 'BLK', 'TOV'];
   const splitHeaders = showAllStats ? allStatsSplitHeaders : compactSplitHeaders;
