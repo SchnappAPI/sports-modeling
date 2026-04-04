@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import GameStrip, { type Game } from '@/components/GameStrip';
 import GameTabs from '@/components/GameTabs';
+import RefreshDataButton from '@/components/RefreshDataButton';
 import { randomLoadingWord } from '@/lib/loadingWord';
 import { useAuth } from '@/lib/auth-context';
 
@@ -85,14 +86,12 @@ export default function NbaPageInner() {
   const activeGameId = searchParams.get('gameId');
   const activeGame   = games.find((g) => g.gameId === activeGameId) ?? null;
 
-  // In demo mode, always force the date back to the demo date
   const effectiveDate = isDemo && demoDate ? demoDate : selectedDate;
 
-  useEffect(() => {
+  function loadGames() {
     setLoading(true);
     setError(null);
     setGames([]);
-
     fetch(`/api/games?sport=nba&date=${effectiveDate}`)
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -116,7 +115,9 @@ export default function NbaPageInner() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [effectiveDate]);
+  }
+
+  useEffect(() => { loadGames(); }, [effectiveDate]);
 
   function handleSelectGame(gameId: string) {
     const params = new URLSearchParams();
@@ -128,7 +129,7 @@ export default function NbaPageInner() {
   }
 
   function applyDate(newDate: string) {
-    if (isDemo) return; // locked in demo mode
+    if (isDemo) return;
     setSelectedDate(newDate);
     router.replace(`/nba?date=${newDate}`);
   }
@@ -182,6 +183,9 @@ export default function NbaPageInner() {
           >
             At a Glance
           </Link>
+          {!isDemo && (
+            <RefreshDataButton onComplete={loadGames} />
+          )}
           {!isDemo && (
             <button
               onClick={logout}

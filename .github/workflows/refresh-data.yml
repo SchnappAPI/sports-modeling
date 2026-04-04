@@ -1,0 +1,37 @@
+name: Refresh Data
+
+# Triggered from the web app's Refresh Data button via /api/refresh-data.
+# Runs all four intra-day steps: live box score, odds, grading, lineup poll.
+# Admin-passcode protected at the API route level.
+
+on:
+  workflow_dispatch:
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+  ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
+  NBA_PROXY_URL:      ${{ secrets.NBA_PROXY_URL }}
+
+jobs:
+  refresh:
+    runs-on: [self-hosted, schnapp-runner]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Live box score + schedule status
+        run: python etl/nba_live.py
+
+      - name: Odds + intraday grading
+        run: |
+          python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
+          python grading/grade_props.py --mode intraday
+
+      - name: Lineup poll
+        run: python etl/lineup_poll.py --hours-ahead 6
