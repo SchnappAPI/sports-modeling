@@ -1,25 +1,9 @@
 name: NBA Game Day
 
-# Consolidated intra-day workflow. Runs every 5 minutes during game hours.
-# Replaces the schedules of: nba-live.yml, pregame-refresh.yml, lineup-poll.yml.
-#
-# Every cycle (~5 min):
-#   1. Gate script   -- checks DB for pre-game, live, newly-final games
-#   2. nba_live.py   -- always syncs schedule status/scores via ScoreboardV3
-#                       then upserts live box score rows for status=2 games
-#
-# Every third cycle (~15 min), when pre-game or live games exist:
-#   3. odds_etl upcoming  -- refresh today's FanDuel lines
-#   4. grade_props intraday -- re-grade moved standard lines
-#   5. lineup_poll        -- fetch projected/confirmed lineups
-#
-# When a game flips to Final and has no grade rows yet:
-#   6. odds_etl backfill + mappings + grade_props backfill for that date
-
 on:
   schedule:
-    - cron: '*/5 16-23 * * *'   # UTC 16:00-23:55 (noon-7:55 PM ET)
-    - cron: '*/5 0-6  * * *'    # UTC 00:00-06:00 (8 PM-2 AM ET)
+    - cron: '*/5 16-23 * * *'
+    - cron: '*/5 0-6  * * *'
   workflow_dispatch:
     inputs:
       skip_gate:
@@ -37,50 +21,22 @@ env:
 
 jobs:
   game-day:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, schnapp-runner]
     timeout-minutes: 12
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
 
-      - name: Install ODBC Driver 18
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y curl gnupg apt-transport-https
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
-            | gpg --dearmor --batch --yes --no-tty \
-            | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
-          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update -q
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
-      - name: Install Python dependencies
-        run: pip install -r etl/requirements.txt
-
-      # -----------------------------------------------------------------------
-      # Gate: outputs has_pregame, has_live, has_final, any_active, final_date
-      # Also compute run_mod (run_number % 3) to approximate every-15-min.
-      # -----------------------------------------------------------------------
       - name: Game day gate
         id: gate
         run: |
           python etl/game_day_gate.py
-          # run_number % 3: 0 = run odds+grading this cycle (every ~15 min)
           MOD=$(( ${{ github.run_number }} % 3 ))
           echo "run_mod=$MOD" >> $GITHUB_OUTPUT
 
-      # -----------------------------------------------------------------------
-      # Step 1: Schedule status + live box score
-      # Runs whenever today has any non-final game (pre-game or live).
-      # nba_live.py always calls ScoreboardV3 to flip statuses, then
-      # conditionally upserts box score rows for status=2 games.
-      # -----------------------------------------------------------------------
       - name: Schedule status + live box score
         if: |
           steps.gate.outputs.has_pregame == 'true' ||
@@ -88,11 +44,6 @@ jobs:
           github.event.inputs.skip_gate == 'true'
         run: python etl/nba_live.py
 
-      # -----------------------------------------------------------------------
-      # Step 2: Odds refresh + intraday grading
-      # Runs on every third 5-min cycle (~15 min) when games are active.
-      # Manual dispatch always runs this step.
-      # -----------------------------------------------------------------------
       - name: Odds upcoming + intraday grading
         if: |
           (
@@ -106,20 +57,12 @@ jobs:
           python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
           python grading/grade_props.py --mode intraday
 
-      # -----------------------------------------------------------------------
-      # Step 3: Lineup poll
-      # Runs every cycle when any game is pre-game or live.
-      # -----------------------------------------------------------------------
       - name: Lineup poll
         if: |
           steps.gate.outputs.any_active == 'true' ||
           github.event.inputs.skip_gate == 'true'
         run: python etl/lineup_poll.py --hours-ahead 6
 
-      # -----------------------------------------------------------------------
-      # Step 4: Backfill odds + grades for newly-final games
-      # Only fires when a game has just gone Final with no existing grades.
-      # -----------------------------------------------------------------------
       - name: Backfill odds + grades for newly-final games
         if: |
           steps.gate.outputs.has_final == 'true' ||

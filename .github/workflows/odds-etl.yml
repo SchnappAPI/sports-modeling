@@ -1,14 +1,8 @@
 name: Odds ETL
 
-# Nightly upcoming fetch at UTC 10:00 keeps today's FanDuel lines and the
-# event_game_map current each morning. grading.yml fires at UTC 10:30 and
-# depends on this run completing first.
-#
-# Use manual dispatch for one-off runs: probe, discover, or targeted backfill.
-
 on:
   schedule:
-    - cron: '0 10 * * *'   # UTC 10:00 nightly — fetch today's NBA lines
+    - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -20,7 +14,7 @@ on:
         required: false
         default: "nba"
       season:
-        description: "Season year (NBA/NFL = start year, e.g. 2025 for 2025-26). Leave blank for auto-detect."
+        description: "Season year. Leave blank for auto-detect."
         required: false
         default: ""
       snapshots:
@@ -49,33 +43,16 @@ env:
 
 jobs:
   odds-etl:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, schnapp-runner]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
-      - name: Install ODBC Driver 18
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y curl gnupg apt-transport-https
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
-            | gpg --dearmor --batch --yes --no-tty \
-            | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
-          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update -q
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
-      - name: Install Python dependencies
-        run: pip install -r etl/requirements.txt
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
 
       - name: Build CLI flags
         id: flags
         run: |
-          # Scheduled run always uses upcoming nba mode.
-          # Manual dispatch uses whatever inputs are provided.
           if [ "${{ github.event_name }}" = "schedule" ]; then
             echo "flags=--mode upcoming --sport nba --days-ahead 1" >> $GITHUB_OUTPUT
             exit 0

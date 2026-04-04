@@ -1,9 +1,5 @@
 name: Refresh Lines
 
-# Manual trigger only — fired from the web app's Refresh Lines button.
-# No gate, no schedule. Runs the minimum work: fetch latest props from
-# the Odds API and re-grade against them.
-
 on:
   workflow_dispatch:
 
@@ -16,28 +12,12 @@ env:
 
 jobs:
   refresh:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, schnapp-runner]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install ODBC Driver 18
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y curl gnupg apt-transport-https
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
-            | gpg --dearmor --batch --yes --no-tty \
-            | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
-          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update -q
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
-      - name: Install Python dependencies
-        run: pip install -r etl/requirements.txt
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
 
       - name: Fetch latest props
         run: python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1

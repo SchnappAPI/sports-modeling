@@ -1,12 +1,8 @@
 name: NBA Nightly ETL
 
 on:
-  # Nightly scheduled run
   schedule:
-    # 09:00 UTC = 3:00 AM CST / 4:00 AM CDT
     - cron: '0 9 * * *'
-
-  # Manual trigger with inputs
   workflow_dispatch:
     inputs:
       days:
@@ -35,52 +31,15 @@ env:
 
 jobs:
   nba-etl:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, schnapp-runner]
 
     steps:
-      # --------------------------------------------------
-      # 1. CHECKOUT CODE
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # 2. SET UP PYTHON
-      # --------------------------------------------------
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
 
-      # --------------------------------------------------
-      # 3. INSTALL MICROSOFT ODBC DRIVER 18
-      # --------------------------------------------------
-      - name: Install Microsoft ODBC Driver 18
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl gnupg apt-transport-https
-
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
-            | gpg --dearmor --batch --yes --no-tty \
-            | sudo tee /usr/share/keyrings/microsoft-prod.gpg > /dev/null
-
-          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list
-
-          sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
-      # --------------------------------------------------
-      # 4. INSTALL PYTHON DEPENDENCIES
-      # --------------------------------------------------
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r etl/requirements.txt
-
-      # --------------------------------------------------
-      # 5. BUILD CLI FLAGS
-      # --------------------------------------------------
       - name: Build CLI flags
         id: flags
         run: |
@@ -90,8 +49,5 @@ jobs:
           [ "${{ github.event.inputs.skip_lineups }}"  = "true" ] && FLAGS="$FLAGS --skip-lineups"
           echo "flags=$FLAGS" >> $GITHUB_OUTPUT
 
-      # --------------------------------------------------
-      # 6. RUN NBA ETL
-      # --------------------------------------------------
       - name: Run NBA ETL
         run: python etl/nba_etl.py ${{ steps.flags.outputs.flags }}
