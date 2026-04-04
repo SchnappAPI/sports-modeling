@@ -346,7 +346,9 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
       standardLines: sortPairs(stdMap),
       altLines:      sortPairs(altMap),
     };
-  }).filter((g) => g.standardLines.length > 0 || g.altLines.length > 0);
+  // Only show markets that have a standard posted line. Alt-only markets are
+  // excluded from the strip — there is no meaningful single line to display.
+  }).filter((g) => g.standardLines.length > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -445,8 +447,7 @@ function MarketPanel({
   summaries: GameSummary[];
   dotWindow: DotWindow;
 }) {
-  // Use standard line if available, fall back to lowest alt line for the dot plot.
-  const posted    = group.standardLines[0] ?? group.altLines[0];
+  const posted    = group.standardLines[0];
   const lineValue = posted?.lineValue ?? 0;
 
   return (
@@ -585,8 +586,7 @@ function TodayPropsSection({
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
-            // Use standard line if available, fall back to lowest alt line.
-            const posted   = group.standardLines[0] ?? group.altLines[0];
+            const posted   = group.standardLines[0];
             const grade    = posted?.over?.compositeGrade ?? null;
             const isActive = group.baseKey === activeBase;
             return (
