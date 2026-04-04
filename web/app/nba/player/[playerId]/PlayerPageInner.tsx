@@ -445,7 +445,8 @@ function MarketPanel({
   summaries: GameSummary[];
   dotWindow: DotWindow;
 }) {
-  const posted    = group.standardLines[0];
+  // Use standard line if available, fall back to lowest alt line for the dot plot.
+  const posted    = group.standardLines[0] ?? group.altLines[0];
   const lineValue = posted?.lineValue ?? 0;
 
   return (
@@ -584,7 +585,8 @@ function TodayPropsSection({
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
-            const posted   = group.standardLines[0];
+            // Use standard line if available, fall back to lowest alt line.
+            const posted   = group.standardLines[0] ?? group.altLines[0];
             const grade    = posted?.over?.compositeGrade ?? null;
             const isActive = group.baseKey === activeBase;
             return (
