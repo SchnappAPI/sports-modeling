@@ -92,6 +92,8 @@ interface PlayerInfo {
   position: string | null;
   playerName: string | null;
   teamId: number | null;
+  gameLineupStatus: string | null;   // 'Confirmed' | 'Projected' | null
+  gameStarterStatus: string | null;  // 'Starter' | 'Bench' | 'Inactive' | null
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +179,44 @@ function gradeBg(grade: number | null): string {
 function todayLocal(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// ---------------------------------------------------------------------------
+// Lineup status badge
+// Inactive → red. Starter → blue. Bench → gray. Null → nothing shown.
+// ---------------------------------------------------------------------------
+
+function LineupStatusBadge({
+  starterStatus,
+  lineupStatus,
+}: {
+  starterStatus: string | null;
+  lineupStatus: string | null;
+}) {
+  if (!starterStatus) return null;
+
+  let label = starterStatus;
+  let cls   = 'text-gray-500 border-gray-700';
+
+  if (starterStatus === 'Inactive') {
+    cls = 'text-red-400 border-red-900';
+  } else if (starterStatus === 'Starter') {
+    cls = 'text-blue-400 border-blue-900';
+  } else {
+    // Bench
+    cls = 'text-gray-500 border-gray-700';
+  }
+
+  // Append lineup confirmation state in parentheses when available.
+  if (lineupStatus) {
+    label = `${starterStatus} (${lineupStatus})`;
+  }
+
+  return (
+    <span className={`text-xs border rounded px-1.5 py-0.5 leading-none ${cls}`}>
+      {label}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -343,11 +383,6 @@ interface MarketGroup {
   altLines: LinePair[];
 }
 
-// Select the posted (standard) line from a list of standard LinePairs.
-// The true posted line at the book is always near even money (-110 to -115).
-// Alt lines that end up in the standard market key will have more extreme
-// pricing. Pick the pair whose Over price is closest to -110; fall back to
-// the middle element if no price data is available.
 function postedLine(pairs: LinePair[]): LinePair | undefined {
   if (pairs.length === 0) return undefined;
   if (pairs.length === 1) return pairs[0];
@@ -361,7 +396,6 @@ function postedLine(pairs: LinePair[]): LinePair | undefined {
     });
   }
 
-  // No price data — return the middle element (not the extreme minimum).
   return pairs[Math.floor(pairs.length / 2)];
 }
 
@@ -703,7 +737,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
   const [log, setLog]               = useState<GameLogRow[]>([]);
   const [grades, setGrades]         = useState<GradeLine[]>([]);
-  const [playerInfo, setPlayerInfo] = useState<PlayerInfo>({ oppTeamId: null, position: null, playerName: null, teamId: null });
+  const [playerInfo, setPlayerInfo] = useState<PlayerInfo>({
+    oppTeamId: null, position: null, playerName: null, teamId: null,
+    gameLineupStatus: null, gameStarterStatus: null,
+  });
   const [loading, setLoading]       = useState(true);
   const [error, setError]           = useState<string | null>(null);
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
@@ -718,13 +755,18 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     setError(null);
     setLog([]);
     setGrades([]);
-    setPlayerInfo({ oppTeamId: null, position: null, playerName: null, teamId: null });
+    setPlayerInfo({ oppTeamId: null, position: null, playerName: null, teamId: null, gameLineupStatus: null, gameStarterStatus: null });
     setSelectedPeriods(new Set());
     setTeamPlayers([]);
     setVsOppOnly(false);
 
+    // Pass gameId to the player API so it can look up today's lineup status.
+    const playerUrl = backGameId
+      ? `/api/player?playerId=${playerId}&lastN=9999&sport=nba&gameId=${backGameId}`
+      : `/api/player?playerId=${playerId}&lastN=9999&sport=nba`;
+
     Promise.all([
-      fetch(`/api/player?playerId=${playerId}&lastN=9999&sport=nba`)
+      fetch(playerUrl)
         .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
       fetch(`/api/player-grades?playerId=${playerId}`)
         .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
@@ -734,10 +776,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         setGrades(gradeData.grades ?? []);
 
         const info: PlayerInfo = {
-          playerName: playerData.playerName ?? null,
-          position:   playerData.position   ?? null,
-          oppTeamId:  playerData.lastOppTeamId ?? null,
-          teamId:     playerData.teamId ?? null,
+          playerName:        playerData.playerName        ?? null,
+          position:          playerData.position          ?? null,
+          oppTeamId:         playerData.lastOppTeamId     ?? null,
+          teamId:            playerData.teamId            ?? null,
+          gameLineupStatus:  playerData.gameLineupStatus  ?? null,
+          gameStarterStatus: playerData.gameStarterStatus ?? null,
         };
         setPlayerInfo(info);
 
@@ -949,6 +993,14 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           </select>
         ) : (
           <span className="text-sm font-semibold text-gray-200">{displayName}</span>
+        )}
+
+        {/* Lineup status badge — only shown when navigated from a game */}
+        {playerInfo.gameStarterStatus && (
+          <LineupStatusBadge
+            starterStatus={playerInfo.gameStarterStatus}
+            lineupStatus={playerInfo.gameLineupStatus}
+          />
         )}
 
         <span className="text-xs text-gray-600 ml-auto">
