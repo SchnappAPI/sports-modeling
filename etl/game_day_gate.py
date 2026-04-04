@@ -22,7 +22,8 @@ Exit code is always 0.
 import os
 import sys
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pyodbc
 
@@ -43,9 +44,8 @@ CONN_STR = (
     "Connection Timeout=90;"
 )
 
-ET_OFFSET = timedelta(hours=-4)
-NOW_UTC   = datetime.now(timezone.utc)
-TODAY_ET  = NOW_UTC.astimezone(timezone(ET_OFFSET)).strftime("%Y-%m-%d")
+ET_TZ    = ZoneInfo("America/New_York")
+TODAY_ET = datetime.now(ET_TZ).strftime("%Y-%m-%d")
 
 # Minutes between odds+grading runs depending on game state.
 INTERVAL_PREGAME = 14   # lines can still move pre-game
