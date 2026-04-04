@@ -1,33 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getPool } from '@/lib/db';
+import mssql from 'mssql';
 
-// Proxy live box score data from stats.nba.com server-side.
-// Returns game totals only (all quarters summed) — no period breakdown.
-//
-// BoxScoreTraditionalV3 returns each player's stats as an ARRAY of per-period
-// objects (each with a "period" integer key). This route sums them to produce
-// game-level totals, mirroring the logic in nba_live.py.
-
-const NBA_HEADERS = {
-  'User-Agent':         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept':             'application/json, text/plain, */*',
-  'Accept-Language':    'en-US,en;q=0.9',
-  'Accept-Encoding':    'gzip, deflate, br',
-  'x-nba-stats-origin': 'stats',
-  'x-nba-stats-token':  'true',
-  'Origin':             'https://www.nba.com',
-  'Referer':            'https://www.nba.com/',
-  'Connection':         'keep-alive',
-};
+// Live box score reads from nba.player_box_score_stats (written by nba_live.py every 5 min).
+// We no longer call stats.nba.com directly from SWA — that endpoint blocks Azure SWA IPs.
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function parseMinutes(clock: string | undefined | null): number {
-  if (!clock) return 0;
-  const m = clock.match(/PT(\d+)M([\d.]+)S/);
-  if (m) return parseInt(m[1], 10) + parseFloat(m[2]) / 60;
-  const plain = parseFloat(String(clock));
-  return isNaN(plain) ? 0 : plain;
+interface LivePlayer {
+  playerId: number;
+  playerName: string;
+  teamId: number;
+  teamAbbr: string;
+  pts: number;
+  reb: number;
+  ast: number;
+  stl: number;
+  blk: number;
+  tov: number;
+  min: number;
+  fg3m: number;
+  fg3a: number;
+  fgm: number;
+  fga: number;
+  ftm: number;
+  fta: number;
+  starterStatus: string | null;
 }
 
 export async function GET(req: NextRequest) {
@@ -36,85 +35,70 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'gameId required' }, { status: 400 });
   }
 
-  const url = `https://stats.nba.com/stats/boxscoretraditionalv3?GameID=${gameId}&StartPeriod=0&EndPeriod=0&StartRange=0&EndRange=0&RangeType=0`;
-
   try {
-    const resp = await fetch(url, {
-      headers: NBA_HEADERS,
-      cache: 'no-store',
-    });
+    const pool = await getPool();
 
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => '');
+    // Get game status text from schedule
+    const schedRes = await pool.request()
+      .input('gameId', mssql.VarChar, gameId)
+      .query<{ gameStatusText: string; gameStatus: number }>(`
+        SELECT game_status_text AS gameStatusText, game_status AS gameStatus
+        FROM nba.schedule
+        WHERE game_id = @gameId
+      `);
+
+    const gameStatusText = schedRes.recordset[0]?.gameStatusText ?? '';
+
+    // Sum all quarters for each player in this game
+    const res = await pool.request()
+      .input('gameId', mssql.VarChar, gameId)
+      .query<LivePlayer>(`
+        SELECT
+          pbs.player_id                    AS playerId,
+          p.player_name                    AS playerName,
+          pbs.team_id                      AS teamId,
+          COALESCE(t.team_tricode, '')      AS teamAbbr,
+          SUM(COALESCE(pbs.pts,  0))       AS pts,
+          SUM(COALESCE(pbs.reb,  0))       AS reb,
+          SUM(COALESCE(pbs.ast,  0))       AS ast,
+          SUM(COALESCE(pbs.stl,  0))       AS stl,
+          SUM(COALESCE(pbs.blk,  0))       AS blk,
+          SUM(COALESCE(pbs.tov,  0))       AS tov,
+          SUM(COALESCE(CAST(pbs.minutes AS FLOAT), 0)) AS min,
+          SUM(COALESCE(pbs.fg3m, 0))       AS fg3m,
+          SUM(COALESCE(pbs.fg3a, 0))       AS fg3a,
+          SUM(COALESCE(pbs.fgm,  0))       AS fgm,
+          SUM(COALESCE(pbs.fga,  0))       AS fga,
+          SUM(COALESCE(pbs.ftm,  0))       AS ftm,
+          SUM(COALESCE(pbs.fta,  0))       AS fta,
+          dl.starter_status                AS starterStatus
+        FROM nba.player_box_score_stats pbs
+        JOIN nba.players p   ON p.player_id  = pbs.player_id
+        JOIN nba.teams t     ON t.team_id    = pbs.team_id
+        LEFT JOIN nba.daily_lineups dl
+          ON dl.player_name   = p.player_name
+         AND dl.team_tricode  = t.team_tricode
+         AND dl.game_id       = pbs.game_id
+        WHERE pbs.game_id = @gameId
+          AND pbs.period != 'OT'
+        GROUP BY pbs.player_id, p.player_name, pbs.team_id, t.team_tricode, dl.starter_status
+        ORDER BY
+          pbs.team_id,
+          CASE dl.starter_status WHEN 'Starter' THEN 0 WHEN 'Bench' THEN 1 ELSE 2 END,
+          SUM(COALESCE(CAST(pbs.minutes AS FLOAT), 0)) DESC
+      `);
+
+    if (res.recordset.length === 0) {
       return NextResponse.json(
-        { error: `NBA API returned ${resp.status}`, detail: body.slice(0, 200) },
-        { status: 502 }
+        { error: 'No box score data in database yet. The live ETL runs every 5 minutes.' },
+        { status: 404 }
       );
-    }
-
-    const data = await resp.json();
-    const game = data?.boxScoreTraditional;
-    if (!game) {
-      return NextResponse.json({ error: 'Unexpected NBA API shape', keys: Object.keys(data ?? {}) }, { status: 502 });
-    }
-
-    type PlayerRow = {
-      playerId: number;
-      playerName: string;
-      teamId: number;
-      teamAbbr: string;
-      pts: number; reb: number; ast: number; stl: number; blk: number; tov: number;
-      min: number; fg3m: number; fgm: number; fga: number; ftm: number; fta: number;
-    };
-
-    const players: PlayerRow[] = [];
-
-    for (const team of [game.homeTeam, game.awayTeam]) {
-      if (!team) continue;
-      const teamId   = Number(team.teamId);
-      const teamAbbr = String(team.teamTricode ?? '');
-
-      for (const player of (team.players ?? [])) {
-        // statistics is an array of per-period objects in V3.
-        // Each element has: period (int), clock, assists, points, etc.
-        const statsArr: any[] = Array.isArray(player.statistics)
-          ? player.statistics
-          : player.statistics != null ? [player.statistics] : [];
-
-        let pts = 0, reb = 0, ast = 0, stl = 0, blk = 0, tov = 0;
-        let min = 0, fg3m = 0, fgm = 0, fga = 0, ftm = 0, fta = 0;
-
-        for (const s of statsArr) {
-          pts  += Number(s.points           ?? s.pts  ?? 0);
-          reb  += Number(s.reboundsTotal    ?? s.reb  ?? 0);
-          ast  += Number(s.assists          ?? s.ast  ?? 0);
-          stl  += Number(s.steals           ?? s.stl  ?? 0);
-          blk  += Number(s.blocks           ?? s.blk  ?? 0);
-          tov  += Number(s.turnovers        ?? s.tov  ?? 0);
-          fg3m += Number(s.threePointersMade     ?? s.fg3m ?? 0);
-          fgm  += Number(s.fieldGoalsMade        ?? s.fgm  ?? 0);
-          fga  += Number(s.fieldGoalsAttempted   ?? s.fga  ?? 0);
-          ftm  += Number(s.freeThrowsMade        ?? s.ftm  ?? 0);
-          fta  += Number(s.freeThrowsAttempted   ?? s.fta  ?? 0);
-          min  += parseMinutes(s.clock ?? s.minutesCalculated);
-        }
-
-        players.push({
-          playerId:   Number(player.personId),
-          playerName: String(player.name ?? ''),
-          teamId,
-          teamAbbr,
-          pts, reb, ast, stl, blk, tov,
-          min: Math.round(min * 10) / 10,
-          fg3m, fgm, fga, ftm, fta,
-        });
-      }
     }
 
     return NextResponse.json({
       gameId,
-      gameStatusText: String(game.gameStatusText ?? ''),
-      players,
+      gameStatusText,
+      players: res.recordset,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
