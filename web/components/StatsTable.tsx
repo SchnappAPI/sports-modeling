@@ -40,11 +40,6 @@ function fmt(val: number | null | undefined, decimals = 1): string {
   return val.toFixed(decimals);
 }
 
-function fmtMade(made: number | null, att: number | null): string {
-  if (made == null || att == null) return '-';
-  return `${made.toFixed(1)}-${att.toFixed(1)}`;
-}
-
 const PERIOD_OPTIONS = [
   { label: 'Full', value: 'full' },
   { label: '1Q',   value: '1Q' },
@@ -93,7 +88,6 @@ function TeamStatsTable({
 }) {
   const searchParams = useSearchParams();
   const tab = searchParams.get('tab') ?? 'stats';
-  // Bench expanded by default so stats are visible without an extra tap.
   const [benchOpen, setBenchOpen] = useState(true);
   const [inactiveOpen, setInactiveOpen] = useState(false);
 
@@ -105,9 +99,9 @@ function TeamStatsTable({
   );
   const hasLineup = players.some((p) => p.starterStatus != null);
 
-  // compact:  Player GP MIN PTS 3PM REB AST PRA PR PA RA = 11 cols
-  // all-stats adds FG 3PA FT STL BLK TOV = +6 = 17 cols
-  const colSpanTotal = showAllStats ? 17 : 11;
+  // compact:   Player GP MIN PTS 3PM REB AST PRA PR PA RA = 11 cols
+  // all-stats: Player GP MIN PTS FGM FGA 3PM 3PA FTM FTA REB AST PRA PR PA RA STL BLK TOV = 21 cols
+  const colSpanTotal = showAllStats ? 21 : 11;
 
   const renderRow = (p: PlayerAvg, dimmed = false) => {
     const pra = (p.avgPts ?? 0) + (p.avgReb ?? 0) + (p.avgAst ?? 0);
@@ -129,14 +123,15 @@ function TeamStatsTable({
         <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
         {showAllStats ? (
           <>
-            {/* All Stats: FG (made-att), 3PM, 3PA (separate), FT (made-att) */}
-            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmtMade(p.avgFgm, p.avgFga)}</td>
+            {/* All Stats: FGM FGA 3PM 3PA FTM FTA — all separate columns */}
+            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avgFgm)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avgFga)}</td>
             <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avg3pm)}</td>
             <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avg3pa)}</td>
-            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmtMade(p.avgFtm, p.avgFta)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avgFtm)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avgFta)}</td>
           </>
         ) : (
-          /* Compact: avg 3PM only */
           <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avg3pm)}</td>
         )}
         <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
@@ -193,10 +188,12 @@ function TeamStatsTable({
             <th className="text-right py-1.5 px-2 font-medium">PTS</th>
             {showAllStats ? (
               <>
-                <th className="text-right py-1.5 px-2 font-medium">FG</th>
+                <th className="text-right py-1.5 px-2 font-medium">FGM</th>
+                <th className="text-right py-1.5 px-2 font-medium">FGA</th>
                 <th className="text-right py-1.5 px-2 font-medium">3PM</th>
                 <th className="text-right py-1.5 px-2 font-medium">3PA</th>
-                <th className="text-right py-1.5 px-2 font-medium">FT</th>
+                <th className="text-right py-1.5 px-2 font-medium">FTM</th>
+                <th className="text-right py-1.5 px-2 font-medium">FTA</th>
               </>
             ) : (
               <th className="text-right py-1.5 px-2 font-medium">3PM</th>

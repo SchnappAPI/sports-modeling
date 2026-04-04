@@ -118,10 +118,6 @@ function fmtMin(min: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-function fmtShoot(made: number, att: number): string {
-  return att === 0 ? '-' : `${made}-${att}`;
-}
-
 function getLine(propMap: PropMap, playerId: number, statKey: keyof PlayerTotals): number | null {
   const playerMap = propMap.get(playerId);
   if (!playerMap) return null;
@@ -217,12 +213,15 @@ function TeamBox({
         <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.pts, line('pts'))}`}>{t.pts}</td>
         {showAllStats ? (
           <>
-            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtShoot(t.fgm, t.fga)}</td>
-            <td className={`py-1.5 px-2 text-right whitespace-nowrap tabular-nums ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fg3a)}</td>
-            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtShoot(t.ftm, t.fta)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{t.fgm}</td>
+            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{t.fga}</td>
+            <td className={`py-1.5 px-2 text-right whitespace-nowrap tabular-nums ${statCls(t.fg3m, line('fg3m'))}`}>{t.fg3m}</td>
+            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{t.fg3a}</td>
+            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{t.ftm}</td>
+            <td className="py-1.5 px-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{t.fta}</td>
           </>
         ) : (
-          <td className={`py-1.5 px-2 text-right whitespace-nowrap tabular-nums ${statCls(t.fg3m, line('fg3m'))}`}>{fmtShoot(t.fg3m, t.fg3a)}</td>
+          <td className={`py-1.5 px-2 text-right whitespace-nowrap tabular-nums ${statCls(t.fg3m, line('fg3m'))}`}>{t.fg3m}</td>
         )}
         <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.reb, line('reb'))}`}>{t.reb}</td>
         <td className={`py-1.5 px-2 text-right whitespace-nowrap ${statCls(t.ast, line('ast'))}`}>{t.ast}</td>
@@ -252,7 +251,9 @@ function TeamBox({
     </tr>
   );
 
-  const colSpanTotal = showAllStats ? 15 : 11;
+  // compact:   Player MIN PTS 3PM REB AST PRA PR PA RA = 11 cols
+  // all-stats: Player MIN PTS FGM FGA 3PM 3PA FTM FTA REB AST PRA PR PA RA STL BLK TOV = 19 cols
+  const colSpanTotal = showAllStats ? 19 : 11;
 
   const starters = slots.filter((s) => s.starterStatus === 'Starter');
   const bench    = slots.filter(
@@ -270,12 +271,15 @@ function TeamBox({
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">PTS</th>
             {showAllStats ? (
               <>
-                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FG</th>
-                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3PT</th>
-                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FT</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FGM</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FGA</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3PM</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3PA</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FTM</th>
+                <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">FTA</th>
               </>
             ) : (
-              <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3PT</th>
+              <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">3PM</th>
             )}
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">REB</th>
             <th className="text-right py-1.5 px-2 font-medium whitespace-nowrap">AST</th>

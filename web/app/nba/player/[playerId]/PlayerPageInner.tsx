@@ -123,7 +123,7 @@ const MARKET_ABBR: Record<string, string> = {
   player_rebounds_assists_alternate:       'RA',
 };
 
-// Canonical display order for Today's Props strip — matches game log column order.
+// Canonical display order for Today's Props strip.
 const PROP_ORDER: string[] = [
   'player_points',
   'player_rebounds',
@@ -202,7 +202,6 @@ function buildGameSummaries(
         opponentAbbr: r.opponentAbbr,
         isHome:       r.isHome,
         dnp:          r.dnp,
-        // SQL returns 1/0 as integers; coerce to boolean here
         started:      r.started != null ? !!r.started : null,
         potentialAst: r.potentialAst ?? null,
         rebChances:   r.rebChances   ?? null,
@@ -338,11 +337,9 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   const stdPaired = pairRows(stdRows);
   const altPaired = pairRows(altRows);
 
-  // Collect all base markets present in the data
   const seen = new Set<string>();
   for (const r of grades) seen.add(baseMarket(r.marketKey));
 
-  // Sort by canonical PROP_ORDER; unknown markets go to the end
   const order = Array.from(seen).sort((a, b) => {
     const ai = PROP_ORDER.indexOf(a);
     const bi = PROP_ORDER.indexOf(b);
@@ -360,7 +357,6 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
     label: marketLabel(base),
     standardLines: sortPairs(stdPaired.get(base)),
     altLines:      sortPairs(altPaired.get(base)),
-  // Only show markets that have a standard posted line.
   })).filter((g) => g.standardLines.length > 0);
 }
 
@@ -463,7 +459,6 @@ function MarketPanel({
         />
       </div>
 
-      {/* Alt lines — horizontal chips in a fixed-height scrollable row */}
       {group.altLines.length > 0 && (
         <div className="mt-3 px-4">
           <div className="text-xs text-gray-600 mb-1.5">Alt lines</div>
@@ -812,10 +807,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     ...(oppParam ? [{ key: 'opp' as SplitKey, label: `vs ${oppParam}` }] : []),
   ];
 
-  // Compact: MIN PTS 3PM REB AST PRA PR PA RA
-  // All Stats: MIN PTS FG 3PM 3PA FT REB AST PRA PR PA RA STL BLK TOV
+  // Compact:   MIN PTS 3PM REB AST PRA PR PA RA
+  // All Stats: MIN PTS FGM FGA 3PM 3PA FTM FTA REB AST PRA PR PA RA STL BLK TOV
   const compactSplitHeaders  = ['MIN', 'PTS', '3PM', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA'];
-  const allStatsSplitHeaders = ['MIN', 'PTS', 'FG', '3PM', '3PA', 'FT', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'STL', 'BLK', 'TOV'];
+  const allStatsSplitHeaders = ['MIN', 'PTS', 'FGM', 'FGA', '3PM', '3PA', 'FTM', 'FTA', 'REB', 'AST', 'PRA', 'PR', 'PA', 'RA', 'STL', 'BLK', 'TOV'];
   const splitHeaders = showAllStats ? allStatsSplitHeaders : compactSplitHeaders;
 
   function renderSplitCells(s: SplitStats) {
@@ -828,19 +823,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         <>
           <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
           <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
-          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
-            {s.gp === 0 ? '-' : `${(s.fgm/s.gp).toFixed(1)}-${(s.fga/s.gp).toFixed(1)}`}
-          </td>
-          {/* 3PM and 3PA as separate columns in all-stats */}
-          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
-            {avg(s.fg3m, s.gp)}
-          </td>
-          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
-            {avg(s.fg3a, s.gp)}
-          </td>
-          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
-            {s.gp === 0 ? '-' : `${(s.ftm/s.gp).toFixed(1)}-${(s.fta/s.gp).toFixed(1)}`}
-          </td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{avg(s.fgm, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{avg(s.fga, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{avg(s.fg3m, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{avg(s.fg3a, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{avg(s.ftm, s.gp)}</td>
+          <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{avg(s.fta, s.gp)}</td>
           <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
           <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
           <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pra}</td>
@@ -857,10 +845,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       <>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{fmtMin(s.min, s.gp)}</td>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.pts, s.gp)}</td>
-        {/* Compact: avg 3PM only (plain number, no ratio) */}
-        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">
-          {avg(s.fg3m, s.gp)}
-        </td>
+        <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap tabular-nums">{avg(s.fg3m, s.gp)}</td>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.reb, s.gp)}</td>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{avg(s.ast, s.gp)}</td>
         <td className="px-2 py-2 text-right text-gray-300 whitespace-nowrap">{pra}</td>
@@ -1002,12 +987,15 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">PTS</th>
               {showAllStats ? (
                 <>
-                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FG</th>
-                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
-                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FT</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FGM</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FGA</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PM</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PA</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FTM</th>
+                  <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">FTA</th>
                 </>
               ) : (
-                <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PT</th>
+                <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap">3PM</th>
               )}
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="REB / REB Chances">REB</th>
               <th className="text-right px-2 py-1.5 font-medium whitespace-nowrap" title="AST / Potential AST">AST</th>
@@ -1030,18 +1018,19 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                 const m = Math.floor(min);
                 const s = Math.round((min - m) * 60);
                 const t = `${m}:${s.toString().padStart(2, '0')}`;
-                // started is already coerced to boolean in buildGameSummaries
                 return started === true ? `*${t}` : t;
               };
-              const fmtS = (made: number, att: number) =>
-                att === 0 ? '-' : `${made}-${att}`;
               const fmtPT = (actual: number, potential: number | null): string => {
                 if (potential == null) return String(actual);
                 return `${actual}-${Math.round(potential)}`;
               };
 
-              // Box score link for this game
               const gameHref = `/nba?gameId=${g.gameId}&tab=boxscore&date=${g.gameDate.slice(0, 10)}`;
+
+              // compact all-stats DNP colSpan: Date already a col, then Opp MIN PTS + shooting + REB AST PRA PR PA RA [STL BLK TOV]
+              // compact data cols after Date: Opp MIN PTS 3PM REB AST PRA PR PA RA = 10
+              // all-stats data cols after Date: Opp MIN PTS FGM FGA 3PM 3PA FTM FTA REB AST PRA PR PA RA STL BLK TOV = 18
+              const dnpColSpan = showAllStats ? 18 : 10;
 
               if (g.dnp) {
                 return (
@@ -1055,7 +1044,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                       </Link>
                     </td>
                     <td className="px-2 py-1.5 text-right text-gray-600 text-xs whitespace-nowrap">DNP</td>
-                    <td colSpan={showAllStats ? 12 : 9} />
+                    <td colSpan={dnpColSpan} />
                   </tr>
                 );
               }
@@ -1071,7 +1060,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const paLine   = getComboLineCls(g.gameId, g.pts + g.ast, ['player_points_assists', 'player_points_assists_alternate']);
               const raLine   = getComboLineCls(g.gameId, g.reb + g.ast, ['player_rebounds_assists', 'player_rebounds_assists_alternate']);
 
-              // Starter indicator: slightly brighter left border on starter rows
               const rowCls = g.started === true
                 ? 'border-b border-gray-800 border-l-2 border-l-blue-800'
                 : 'border-b border-gray-800';
@@ -1092,12 +1080,15 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${ptsLine}`}>{g.pts}</td>
                   {showAllStats ? (
                     <>
-                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.fgm, g.fga)}</td>
-                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{fmtS(g.fg3m, g.fg3a)}</td>
-                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{fmtS(g.ftm, g.fta)}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fgm}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fga}</td>
+                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fg3a}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.ftm}</td>
+                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fta}</td>
                     </>
                   ) : (
-                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{fmtS(g.fg3m, g.fg3a)}</td>
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
                   )}
                   <td className={`px-2 py-1.5 text-right whitespace-nowrap ${rebLine} tabular-nums`}>
                     {isFullGame ? fmtPT(g.reb, g.rebChances) : g.reb}
