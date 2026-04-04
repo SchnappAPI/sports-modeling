@@ -1,10 +1,8 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-
-const POLL_INTERVAL_MS = 30_000; // 30 seconds
 
 interface LivePlayer {
   playerId: number;
@@ -55,7 +53,6 @@ function TeamTable({
   gameId: string;
   selectedDate: string;
 }) {
-  const searchParams = useSearchParams();
   const hasLineup = players.some((p) => p.starterStatus != null);
 
   const starters = hasLineup
@@ -143,42 +140,26 @@ export default function LiveBoxScore({
   gameId: string;
   selectedDate: string;
 }) {
-  const [data, setData]               = useState<LiveData | null>(null);
-  const [loading, setLoading]         = useState(true);
-  const [error, setError]             = useState<string | null>(null);
-  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  async function fetchLive() {
-    try {
-      const r = await fetch(`/api/live-boxscore?gameId=${gameId}`, { cache: 'no-store' });
-      if (!r.ok) {
-        const body = await r.json().catch(() => ({}));
-        throw new Error(body.error ?? `HTTP ${r.status}`);
-      }
-      const json = await r.json();
-      setData(json);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-      setLastRefresh(new Date());
-    }
-  }
+  const [data, setData]       = useState<LiveData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState<string | null>(null);
 
   useEffect(() => {
-    fetchLive();
-    intervalRef.current = setInterval(fetchLive, POLL_INTERVAL_MS);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    setLoading(true);
+    setError(null);
+    fetch(`/api/live-boxscore?gameId=${gameId}`, { cache: 'no-store' })
+      .then(async (r) => {
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.error ?? `HTTP ${r.status}`);
+        }
+        return r.json();
+      })
+      .then((json) => setData(json))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setLoading(false));
   }, [gameId]);
 
-  const refreshStr = lastRefresh.toLocaleTimeString([], {
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  });
-
-  // Group players by team, preserving DB order (already sorted by team_id)
   const teams = data
     ? Array.from(new Map(data.players.map((p) => [p.teamAbbr, p.teamAbbr])).keys()).map((abbr) => ({
         abbr,
@@ -197,7 +178,7 @@ export default function LiveBoxScore({
         {data?.gameStatusText && (
           <span className="text-xs text-gray-400">{data.gameStatusText}</span>
         )}
-        <span className="text-xs text-gray-600 ml-1">Updated {refreshStr} · auto-refreshes every 30s</span>
+        <span className="text-xs text-gray-600 ml-1">Press Refresh Data to update</span>
       </div>
 
       {loading && <div className="text-sm text-gray-500">Loading...</div>}
