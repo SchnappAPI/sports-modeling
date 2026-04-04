@@ -1,34 +1,29 @@
 name: NBA Game Day
 
 # Consolidated intra-day workflow. Runs every 5 minutes during game hours.
-# Replaces: nba-live.yml, pregame-refresh.yml, lineup-poll.yml (intra-day).
+# Replaces the schedules of: nba-live.yml, pregame-refresh.yml, lineup-poll.yml.
 #
-# Every cycle (5 min):
-#   1. game_day_gate.py  -- query schedule, output has_pregame / has_live /
-#                           has_final / any_active flags
-#   2. nba_live.py       -- ALWAYS: update schedule status+scores via ScoreboardV3
-#                           GATED:  update box scores for in-progress games
+# Every cycle (~5 min):
+#   1. Gate script   -- checks DB for pre-game, live, newly-final games
+#   2. nba_live.py   -- always syncs schedule status/scores via ScoreboardV3
+#                       then upserts live box score rows for status=2 games
 #
-# Every third cycle (~15 min), when any game is pre-game or live:
-#   3. odds_etl upcoming -- refresh FanDuel lines for today
-#   4. grade_props intraday -- re-grade any moved standard lines
-#   5. lineup_poll      -- fetch lineups
+# Every third cycle (~15 min), when pre-game or live games exist:
+#   3. odds_etl upcoming  -- refresh today's FanDuel lines
+#   4. grade_props intraday -- re-grade moved standard lines
+#   5. lineup_poll        -- fetch projected/confirmed lineups
 #
-# When a game goes final and no grades exist for that date:
-#   6. odds_etl backfill (for that game date) + grade_props backfill
-#
-# Disabled: pregame-refresh.yml, nba-live.yml schedules (kept dispatch-only).
-# Kept:     odds-etl.yml nightly upcoming + grading.yml nightly backfill.
+# When a game flips to Final and has no grade rows yet:
+#   6. odds_etl backfill + mappings + grade_props backfill for that date
 
 on:
   schedule:
-    # Every 5 minutes, noon ET (16:00 UTC) through 2:00 AM ET (06:00 UTC)
-    - cron: '*/5 16-23 * * *'
-    - cron: '*/5 0-6  * * *'
+    - cron: '*/5 16-23 * * *'   # UTC 16:00-23:55 (noon-7:55 PM ET)
+    - cron: '*/5 0-6  * * *'    # UTC 00:00-06:00 (8 PM-2 AM ET)
   workflow_dispatch:
     inputs:
       skip_gate:
-        description: "Skip gate checks and run all steps"
+        description: "Set to 'true' to bypass gate and run all steps"
         required: false
         default: "false"
 
@@ -69,50 +64,66 @@ jobs:
         run: pip install -r etl/requirements.txt
 
       # -----------------------------------------------------------------------
-      # Gate: determine what's happening today
+      # Gate: outputs has_pregame, has_live, has_final, any_active, final_date
+      # Also compute run_mod (run_number % 3) to approximate every-15-min.
       # -----------------------------------------------------------------------
       - name: Game day gate
         id: gate
-        run: python etl/game_day_gate.py
+        run: |
+          python etl/game_day_gate.py
+          # run_number % 3: 0 = run odds+grading this cycle (every ~15 min)
+          MOD=$(( ${{ github.run_number }} % 3 ))
+          echo "run_mod=$MOD" >> $GITHUB_OUTPUT
 
       # -----------------------------------------------------------------------
-      # Step 1: Update schedule status + live box scores (always)
-      # nba_live.py: unconditionally calls ScoreboardV3 to sync status/scores,
-      # then gates internally on game_status=2 for box score upserts.
+      # Step 1: Schedule status + live box score
+      # Runs whenever today has any non-final game (pre-game or live).
+      # nba_live.py always calls ScoreboardV3 to flip statuses, then
+      # conditionally upserts box score rows for status=2 games.
       # -----------------------------------------------------------------------
       - name: Schedule status + live box score
-        if: steps.gate.outputs.has_pregame == 'true' || steps.gate.outputs.has_live == 'true' || github.event.inputs.skip_gate == 'true'
+        if: |
+          steps.gate.outputs.has_pregame == 'true' ||
+          steps.gate.outputs.has_live == 'true' ||
+          github.event.inputs.skip_gate == 'true'
         run: python etl/nba_live.py
 
       # -----------------------------------------------------------------------
-      # Step 2: Odds refresh + intraday grading (~every 15 min)
-      # Only when pre-game or live games exist.
-      # GitHub cron fires every 5 min; GITHUB_RUN_NUMBER mod 3 approximates
-      # every-15-min without a separate workflow.
+      # Step 2: Odds refresh + intraday grading
+      # Runs on every third 5-min cycle (~15 min) when games are active.
+      # Manual dispatch always runs this step.
       # -----------------------------------------------------------------------
       - name: Odds upcoming + intraday grading
         if: |
-          (steps.gate.outputs.any_active == 'true' || github.event.inputs.skip_gate == 'true') &&
-          (github.event_name == 'workflow_dispatch' || fromJSON(env.RUN_MOD) == 0)
-        env:
-          RUN_MOD: ${{ github.run_number % 3 }}
+          (
+            steps.gate.outputs.any_active == 'true' ||
+            github.event.inputs.skip_gate == 'true'
+          ) && (
+            github.event_name == 'workflow_dispatch' ||
+            steps.gate.outputs.run_mod == '0'
+          )
         run: |
           python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
           python grading/grade_props.py --mode intraday
 
       # -----------------------------------------------------------------------
-      # Step 3: Lineup poll (when any game is pre-game or live)
+      # Step 3: Lineup poll
+      # Runs every cycle when any game is pre-game or live.
       # -----------------------------------------------------------------------
       - name: Lineup poll
-        if: steps.gate.outputs.any_active == 'true' || github.event.inputs.skip_gate == 'true'
+        if: |
+          steps.gate.outputs.any_active == 'true' ||
+          github.event.inputs.skip_gate == 'true'
         run: python etl/lineup_poll.py --hours-ahead 6
 
       # -----------------------------------------------------------------------
       # Step 4: Backfill odds + grades for newly-final games
-      # Runs when gate detects status=3 games with no grade rows yet.
+      # Only fires when a game has just gone Final with no existing grades.
       # -----------------------------------------------------------------------
-      - name: Backfill odds for newly-final games
-        if: steps.gate.outputs.has_final == 'true' || github.event.inputs.skip_gate == 'true'
+      - name: Backfill odds + grades for newly-final games
+        if: |
+          steps.gate.outputs.has_final == 'true' ||
+          github.event.inputs.skip_gate == 'true'
         run: |
           DATE="${{ steps.gate.outputs.final_date }}"
           if [ -n "$DATE" ]; then
