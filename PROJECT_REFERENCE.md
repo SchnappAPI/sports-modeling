@@ -11,18 +11,21 @@
 
 ---
 
-## Current State (updated 2026-04-04 session 5)
+## Current State (updated 2026-04-04 session 7)
 
 **What is working:**
 - NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, grading all running.
 - Lineup poll: two-stage architecture. Stage 1 = official JSON (starters, 5 per team). Stage 2 = boxscorepreviewv3 (full roster). Both run every cycle. Full rosters (starters + bench + inactive) now written correctly.
 - Grading: all components live, Over + Under grades written daily. `grade_props.py` verified OK.
 - Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
-- Matchups tab live on game page: defense grid by G/F/C position groups, 7 stat columns, rank out of 30. Tap row to see today's active players. Player links carry gameId/tab/date.
+- Matchups tab live on game page: defense grid by G/F/C position groups, 7 stat columns, rank out of 30.
 - Player page game/team selector: game dropdown + team pill buttons to navigate without going back.
 - Player page lineup status badge: shows Starter/Bench/Inactive (Confirmed/Projected) when navigated from a game.
 - Today's Props strip: horizontal market cells, tap to expand dot plot + alt lines.
 - PWA active. Self-hosted runner live. Uptime Robot active. Refresh Data button live.
+- **Live box score: FULLY WORKING.** Flask runner on VM fetches CDN endpoint directly. Confirmed 36 players returned for both live games today (WAS@MIA Q4, SAC@LAL Q3). `/boxscore` endpoint on Flask returns correct player stats.
+- `runner.py` and `nba_live.py` both updated to use NBA CDN: `https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json`. No proxy needed for CDN. CDN response: top-level key `game`, `statistics` is a single dict per player (cumulative), not a list.
+- `nba_live.py` no longer writes live rows to DB (removed — not needed, had VARCHAR constraint issues with Unicode player names). Just verifies CDN availability and logs player counts.
 
 **Known issues:**
 - `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
@@ -68,10 +71,19 @@
 - Secrets: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD`, `NBA_PROXY_URL`, `ODDS_API_KEY`, `AZURE_STATIC_WEB_APPS_API_TOKEN_RED_SMOKE_0BBE1FB10`, `GITHUB_PAT`
 - Always fetch file SHA before `create_or_update_file`. Use `push_files` for multi-file atomic commits — BUT NEVER for Python files OR TSX files with non-ASCII Unicode characters. Both cause corruption. Use `create_or_update_file` for all Python files and any TSX with Unicode symbols.
 
+### Flask Runner on VM
+- `etl/runner.py` — lightweight Flask service on VM, port 5000. Systemd service: `schnapp-flask.service`.
+- Serves `/ping` (health) and `/boxscore?gameId=` (live player stats).
+- Auth: `X-Runner-Key: runner-Lake4971` header required.
+- **CDN endpoint (as of session 7):** `https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json`. No proxy needed. Response key: `game`. `statistics` per player is a single cumulative dict.
+- Previously used `stats.nba.com/stats/boxscoretraditionalv3` via Webshare proxy — abandoned because the endpoint returned homeTeam=null for in-progress games from VM IPs.
+- `NBA_PROXY_URL` remains in systemd env but is unused by runner.py.
+- Manual run env vars: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD` (from GitHub Actions secrets). Not set in systemd — only needed by nba_live.py for schedule updates.
+
 ### Active Workflows
 | Workflow | Trigger | Purpose |
 |----------|---------|--------|
-| `nba-game-day.yml` | Every 5 min UTC 16-23 + 0-6 | Live scores, odds refresh, grading, lineup poll |
+| `nba-game-day.yml` | Every 30 min UTC 0-6 + daily 09:30 | Live scores, odds refresh, grading, lineup poll |
 | `nba-etl.yml` | Daily UTC 09:00 | Box scores, PT stats, schedule, rosters |
 | `odds-etl.yml` | Daily UTC 10:00 | Today's FanDuel lines |
 | `grading.yml` | After odds-etl succeeds (workflow_run) | Grade today's props |
@@ -125,7 +137,7 @@
 - `nba.teams` — hardcoded static dict in ETL
 - `nba.players` — `player_id`, `player_name`, `team_id`, `team_tricode`, `roster_status` (1=active), `position`
 - `nba.daily_lineups` — keyed by `player_name` + `team_tricode`. No `player_id` or `team_id`. `starter_status` = 'Starter'/'Bench'/'Inactive'. Position values are full strings: PG, SG, SF, PF, C.
-- `nba.player_box_score_stats` — PK: `(game_id, player_id, period)`. Periods: '1Q','2Q','3Q','4Q','OT' only. Columns include `fg3a`. `minutes` is DECIMAL.
+- `nba.player_box_score_stats` — PK: `(game_id, player_id, period)`. Periods: '1Q','2Q','3Q','4Q','OT' only. Columns include `fg3a`. `minutes` is DECIMAL. Period column is VARCHAR(2) — do not insert values longer than 2 chars.
 - `nba.player_passing_stats` — `(player_id, game_date)`. `potential_ast`.
 - `nba.player_rebound_chances` — `(player_id, game_date)`. `reb_chances`.
 
@@ -161,8 +173,10 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 - Players: `playerindex` via proxy
 
 ### NBA Live ETL
-- `etl/nba_live.py` — two-phase: `update_schedule()` always runs (ScoreboardV3), `update_box_scores()` gates on status=2.
-- Workflow: `nba-game-day.yml` — every 5 min UTC 16:00–06:00
+- `etl/nba_live.py` — two-phase: `update_schedule()` always runs (ScoreboardV3 via proxy), `verify_live_box_scores()` logs CDN availability for in-progress games (no DB write).
+- Live box scores served directly from NBA CDN by Flask runner, not written to DB.
+- CDN endpoint: `https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json` — public, no proxy.
+- Workflow: `nba-game-day.yml`
 
 ### Odds ETL
 - Modes: `discover`, `probe`, `backfill`, `mappings`, `upcoming`
@@ -269,7 +283,7 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 - `/api/refresh-lines` POST — triggers `refresh-lines.yml` via GITHUB_PAT (no passcode)
 - `/api/refresh-data` POST — validates `ADMIN_REFRESH_CODE`, triggers `refresh-data.yml`
 - `/api/refresh-status?runId=` — polls workflow run status
-- `/api/live-boxscore?gameId=` — proxies BoxScoreTraditionalV3 from stats.nba.com server-side
+- `/api/live-boxscore?gameId=` — calls VM Flask at `http://20.109.181.21:5000/boxscore?gameId=`. Flask fetches CDN directly.
 
 ### Navigation
 - `/nba` — game strip + tabs
@@ -299,7 +313,7 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | FanDuel only | Most complete prop line coverage. |
 | Teams dict hardcoded | Eliminated HTTP dependency after proxy failures. |
 | `lineup_poll.py` standalone | `nba_etl.py` top-level argparse triggers on import. |
-| Live box score via DB, not direct browser call | Browser never hits stats.nba.com. |
+| Live box score via Flask CDN proxy, not DB | DB path had VARCHAR column constraints blocking Unicode player names; CDN is faster and always fresh. |
 | GITHUB_PAT in SWA app settings | SWA API routes cannot use build-time secrets. |
 | `getGrades` reads `dg.over_price` directly | Old `best_price` CTE join attached Over prices to Under rows, showing them in Over tab. |
 | `outcome_name` in daily_grades UNIQUE key (v3) | Allows Over + Under rows for same player/market/line. |
@@ -330,3 +344,6 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | posToGroup() maps PG/SG→G, SF/PF→F, C→C | position[0] gives P/S/C — none match G or F. Full position string mapping is required for lineup grouping in matchup-grid. |
 | Lineup poll Stage 2 always runs | Official JSON only has 5 starters per team. Skipping Stage 2 when Stage 1 has data left bench and inactive unwritten. |
 | Lineup poll PREVIEW_TIMEOUT=20s, no retry | 60s timeout × 3 retries × 3 games exceeded 5-minute refresh-data timeout. Single 20s attempt is sufficient — 404 on live games is expected and handled. |
+| CDN boxscore endpoint instead of BoxScoreTraditionalV3 | stats.nba.com V3 returned homeTeam=null for in-progress games from VM IPs even with proxy. CDN is public, no proxy, returns full cumulative player stats reliably. |
+| nba_live.py does not write live rows to DB | DB write required period='G' (4 chars, exceeded VARCHAR(2)) and player_name with Unicode caused truncation. Flask CDN path is strictly better — always fresh, no storage needed. |
+| period column is VARCHAR(2) | Valid values: '1Q','2Q','3Q','4Q','OT'. Do not insert longer strings. |
