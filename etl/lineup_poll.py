@@ -34,6 +34,7 @@ import sys
 import time
 import logging
 from datetime import date, datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import re
 
 import pandas as pd
@@ -64,6 +65,8 @@ log = logging.getLogger(__name__)
 
 PROXY_URL = __import__('os').environ.get("NBA_PROXY_URL")
 
+ET_TZ = ZoneInfo("America/New_York")
+
 # Only write 'Confirmed' when tip is this many minutes away or less.
 CONFIRMED_WINDOW_MINUTES = 90
 
@@ -74,6 +77,11 @@ CONFIRMED_WINDOW_MINUTES = 90
 _TIME_RE = re.compile(r"(\d{1,2}):(\d{2})\s*(am|pm)", re.IGNORECASE)
 
 def parse_game_start_utc(game_status_text):
+    """
+    Parse a game_status_text like '7:30 pm ET' into a UTC datetime for today.
+    Uses America/New_York to correctly handle EDT vs EST automatically.
+    Returns None if parsing fails.
+    """
     if not game_status_text:
         return None
     m = _TIME_RE.search(game_status_text)
@@ -87,11 +95,9 @@ def parse_game_start_utc(game_status_text):
             hour += 12
         elif ampm == "am" and hour == 12:
             hour = 0
-        today_et  = date.today()
-        et_offset = timedelta(hours=-4)
-        et_tz     = timezone(et_offset)
-        start_et  = datetime(today_et.year, today_et.month, today_et.day,
-                             hour, minute, tzinfo=et_tz)
+        today_et = datetime.now(ET_TZ).date()
+        start_et = datetime(today_et.year, today_et.month, today_et.day,
+                            hour, minute, tzinfo=ET_TZ)
         return start_et.astimezone(timezone.utc)
     except Exception:
         return None
@@ -101,9 +107,9 @@ def parse_game_start_utc(game_status_text):
 # Schedule query
 # ---------------------------------------------------------------------------
 def get_todays_nonfinal_games(engine, hours_ahead):
-    today   = date.today()
-    now_utc = datetime.now(timezone.utc)
-    cutoff  = now_utc + timedelta(hours=hours_ahead)
+    today_et = datetime.now(ET_TZ).date()
+    now_utc  = datetime.now(timezone.utc)
+    cutoff   = now_utc + timedelta(hours=hours_ahead)
 
     with engine.connect() as conn:
         rows = [
@@ -115,7 +121,7 @@ def get_todays_nonfinal_games(engine, hours_ahead):
                     "FROM nba.schedule "
                     "WHERE game_date = :today AND (game_status IS NULL OR game_status != 3)"
                 ),
-                {"today": today},
+                {"today": today_et},
             )
         ]
 
@@ -272,12 +278,12 @@ def main():
         log.info(f"No non-final games starting within {args.hours_ahead}h. Nothing to do.")
         return
 
-    game_start_map     = {r["game_id"]: r.get("start_utc") for r in qualified_games}
-    game_ids_to_update = set(game_start_map.keys())
+    game_start_map      = {r["game_id"]: r.get("start_utc") for r in qualified_games}
+    game_ids_to_update  = set(game_start_map.keys())
     log.info(f"{len(game_ids_to_update)} game(s) qualify for lineup refresh.")
 
-    today              = date.today()
-    now_utc            = datetime.now(timezone.utc)
+    today               = datetime.now(ET_TZ).date()
+    now_utc             = datetime.now(timezone.utc)
     confirmed_threshold = timedelta(minutes=CONFIRMED_WINDOW_MINUTES)
 
     # ------------------------------------------------------------------
@@ -342,7 +348,6 @@ def main():
         time.sleep(API_DELAY)
 
     if projected_rows:
-        # Clear ALL rows for these games — ensures no stale Confirmed rows survive.
         with engine.begin() as conn:
             for gid in needs_projected:
                 conn.execute(
