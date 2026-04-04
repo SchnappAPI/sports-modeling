@@ -93,7 +93,8 @@ function TeamStatsTable({
 }) {
   const searchParams = useSearchParams();
   const tab = searchParams.get('tab') ?? 'stats';
-  const [benchOpen, setBenchOpen] = useState(false);
+  // Bench expanded by default so stats are visible without an extra tap.
+  const [benchOpen, setBenchOpen] = useState(true);
   const [inactiveOpen, setInactiveOpen] = useState(false);
 
   const starters  = players.filter((p) => p.starterStatus === 'Starter');
@@ -129,14 +130,14 @@ function TeamStatsTable({
         {showAllStats ? (
           <>
             {/* All Stats: FG (made-att), 3PM, 3PA (separate), FT (made-att) */}
-            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avgFgm, p.avgFga)}</td>
-            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmt(p.avg3pm)}</td>
-            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmt(p.avg3pa)}</td>
-            <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmtMade(p.avgFtm, p.avgFta)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmtMade(p.avgFgm, p.avgFga)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avg3pm)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avg3pa)}</td>
+            <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmtMade(p.avgFtm, p.avgFta)}</td>
           </>
         ) : (
           /* Compact: avg 3PM only */
-          <td className="py-1.5 px-2 text-right text-gray-400 text-xs tabular-nums">{fmt(p.avg3pm)}</td>
+          <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avg3pm)}</td>
         )}
         <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgReb)}</td>
         <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgAst)}</td>
