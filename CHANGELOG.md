@@ -9,6 +9,17 @@
 
 ---
 
+## 2026-04-04
+
+### Grading | grading/grade_props.py — grade_date UTC midnight mismatch fix
+- Root cause: `run_upcoming` and `run_intraday` used `date.today()` which returns UTC date on GitHub Actions runners. When the pregame-refresh workflow fires after midnight UTC (still same NBA game night in ET), yesterday's late games received today's `grade_date`, causing At a Glance to show those games in tomorrow's dropdown.
+- Fix: added `today_et()` helper using `datetime.now(timezone.utc)` offset by -4h (EDT). Both `run_upcoming` and `run_intraday` now call `today_et()` instead of `str(date.today())`. Import updated to `from datetime import date, datetime, timezone, timedelta`.
+- Also manually deleted 2,647 misattributed rows from `common.daily_grades` for 2026-04-04 that belonged to 7 April 3rd games (game IDs: 0022501121, 0022501122, 0022501124, 0022501125, 0022501126, 0022501127, 0022501128).
+- At a Glance now shows only the 3 correct games for April 4th.
+- Do not revert to `date.today()` — runners are UTC and NBA season runs EDT (UTC-4).
+
+---
+
 ## 2026-04-03 (session close 4)
 
 ### UI | web/app/nba/player/[playerId]/PlayerPageInner.tsx — Today's Props horizontal strip + dot plot + alt line layout
