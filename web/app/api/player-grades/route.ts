@@ -5,14 +5,9 @@ import { getPool } from '@/lib/db';
 // Returns the canonical FanDuel posted line per game per market for a player.
 // Used by the player game log to colour-code stat values vs prop lines.
 //
-// For standard (non-alternate) markets we take the row with the lowest line
-// value. FanDuel's posted line is always the lowest standard line — bracket
-// lines written around it have higher values and must not shadow it.
-//
-// For alternate markets we fall back to grade_id ASC (earliest written) as a
-// stable tiebreaker, since alternate lines have no canonical "posted" concept.
-//
-// Only fanduel rows are returned. Rows without a game mapping are excluded.
+// Only standard (non-alternate) market rows are returned. There should be
+// exactly one standard row per player/game/market. Alternate market rows are
+// excluded because they are not the line being compared against in the game log.
 export async function GET(req: NextRequest) {
   const playerIdRaw = req.nextUrl.searchParams.get('playerId');
   if (!playerIdRaw) {
@@ -28,29 +23,16 @@ export async function GET(req: NextRequest) {
       .request()
       .input('playerId', mssql.Int, playerId)
       .query(
-        `WITH ranked AS (
-           SELECT
-             egm.game_id   AS gameId,
-             dg.market_key AS marketKey,
-             dg.line_value AS lineValue,
-             ROW_NUMBER() OVER (
-               PARTITION BY egm.game_id, dg.market_key
-               ORDER BY
-                 -- Standard markets: lowest line_value = the actual posted line.
-                 -- Bracket lines always have higher values and must be skipped.
-                 -- Alternate markets: grade_id ASC as a stable fallback.
-                 CASE WHEN dg.market_key NOT LIKE '%_alternate' THEN dg.line_value ELSE 9999 END ASC,
-                 dg.grade_id ASC
-             ) AS rn
-           FROM common.daily_grades dg
-           JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
-           WHERE dg.player_id     = @playerId
-             AND dg.bookmaker_key = 'fanduel'
-         )
-         SELECT gameId, marketKey, lineValue
-         FROM ranked
-         WHERE rn = 1
-         ORDER BY gameId, marketKey`
+        `SELECT
+           egm.game_id   AS gameId,
+           dg.market_key AS marketKey,
+           dg.line_value AS lineValue
+         FROM common.daily_grades dg
+         JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
+         WHERE dg.player_id     = @playerId
+           AND dg.bookmaker_key = 'fanduel'
+           AND dg.market_key NOT LIKE '%_alternate'
+         ORDER BY egm.game_id, dg.market_key`
       );
     return NextResponse.json({ grades: result.recordset });
   } catch (err) {
