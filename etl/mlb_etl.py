@@ -12,28 +12,19 @@ Load order (respects foreign key dependencies):
     6. mlb.player_season_batting  - Season cumulative batting snapshot. Truncate and reload.
     7. mlb.pitcher_season_stats   - Season cumulative pitching snapshot. Truncate and reload.
 
+Flags:
+    --backfill   Process historical seasons (2023, 2024, 2025) in addition to current.
+                 Default (no flag): current season only. Use for nightly runs.
+
 Source endpoint for box scores (steps 3-5):
     https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics
 
-    Using /withMetrics instead of the statsapi.boxscore_data wrapper gives us
-    access to liveData.boxscore.teams.{side}.players, which contains additional
-    per-batter fields not available in the summary endpoint:
-      fly_outs, ground_outs, air_outs, pop_outs, line_outs,
-      total_bases, games_played, plate_appearances
-
-    The migration script etl/mlb_batting_stats_migration.sql must be run once
-    before deploying this version to add those columns to the table.
-
 Teams and players are always fully rebuilt from the API. Foreign key constraints on
-the child tables (games, batting_stats, pitching_stats, season snapshots) have been
-dropped via drop_mlb_fk_constraints.sql, so teams and players can be reloaded without
+the child tables have been dropped, so teams and players can be reloaded without
 clearing box score history.
 
 Box score tables use upsert logic. Games already present in mlb.batting_stats are
 skipped, so only new games are fetched from the API on each run.
-
-Historical box score load: 2023, 2024, and current season.
-Season snapshot tables always reflect the current season only.
 
 Runs exclusively in GitHub Actions. Never run on a local machine.
 Credentials are injected as environment variables from GitHub Secrets.
@@ -43,7 +34,7 @@ import os
 import sys
 import time
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -320,13 +311,6 @@ def _clean_float(val):
 def parse_boxscore_from_json(game, game_json):
     """
     Extract pitcher IDs, batter rows, and pitcher rows from the full /withMetrics JSON.
-
-    Batting data sourced from liveData.boxscore.teams.{side}.players — richer than
-    the summary boxscore endpoint. Includes fly_outs, ground_outs, air_outs, pop_outs,
-    line_outs, total_bases, games_played, plate_appearances.
-
-    Pitching data sourced from liveData.boxscore.teams.{side}.pitchers list.
-
     Returns (away_starter_id, home_starter_id, batter_rows, pitcher_rows).
     """
     game_pk   = game["game_id"]
@@ -350,10 +334,9 @@ def parse_boxscore_from_json(game, game_json):
 
     for side_key, team_id, side_label in sides:
         side_data = live_boxscore.get(side_key, {})
-        players   = side_data.get("players", {})  # dict keyed by "ID{player_id}"
-        pitchers  = side_data.get("pitchers", [])  # list of player_id ints
+        players   = side_data.get("players", {})
+        pitchers  = side_data.get("pitchers", [])
 
-        # Starting pitcher = first pitcher_id in the list
         starter_id = pitchers[0] if pitchers else None
         if side_label == "A":
             away_starter_id = starter_id
@@ -364,7 +347,7 @@ def parse_boxscore_from_json(game, game_json):
         for player_key, player_data in players.items():
             batting_order = player_data.get("battingOrder")
             if batting_order is None:
-                continue  # pitchers and bench-only players have no batting order
+                continue
 
             stats   = player_data.get("stats", {}).get("batting", {})
             person  = player_data.get("person", {})
@@ -374,55 +357,50 @@ def parse_boxscore_from_json(game, game_json):
                 continue
 
             batter_rows.append({
-                "batter_game_id":  f"{pid}-{game_pk}-{team_id}",
-                "game_pk":         game_pk,
-                "game_date":       game_date,
-                "player_id":       pid,
-                "team_id":         team_id,
-                "side":            side_label,
-                "position":        pos.get("abbreviation"),
-                "batting_order":   safe_int(batting_order),
-                "games_played":    safe_int(stats.get("gamesPlayed")),
+                "batter_game_id":    f"{pid}-{game_pk}-{team_id}",
+                "game_pk":           game_pk,
+                "game_date":         game_date,
+                "player_id":         pid,
+                "team_id":           team_id,
+                "side":              side_label,
+                "position":          pos.get("abbreviation"),
+                "batting_order":     safe_int(batting_order),
+                "games_played":      safe_int(stats.get("gamesPlayed")),
                 "plate_appearances": safe_int(stats.get("plateAppearances")),
-                "at_bats":         safe_int(stats.get("atBats")),
-                "runs":            safe_int(stats.get("runs")),
-                "hits":            safe_int(stats.get("hits")),
-                "doubles":         safe_int(stats.get("doubles")),
-                "triples":         safe_int(stats.get("triples")),
-                "home_runs":       safe_int(stats.get("homeRuns")),
-                "total_bases":     safe_int(stats.get("totalBases")),
-                "rbi":             safe_int(stats.get("rbi")),
-                "stolen_bases":    safe_int(stats.get("stolenBases")),
-                "walks":           safe_int(stats.get("baseOnBalls")),
+                "at_bats":           safe_int(stats.get("atBats")),
+                "runs":              safe_int(stats.get("runs")),
+                "hits":              safe_int(stats.get("hits")),
+                "doubles":           safe_int(stats.get("doubles")),
+                "triples":           safe_int(stats.get("triples")),
+                "home_runs":         safe_int(stats.get("homeRuns")),
+                "total_bases":       safe_int(stats.get("totalBases")),
+                "rbi":               safe_int(stats.get("rbi")),
+                "stolen_bases":      safe_int(stats.get("stolenBases")),
+                "walks":             safe_int(stats.get("baseOnBalls")),
                 "intentional_walks": safe_int(stats.get("intentionalWalks")),
-                "strikeouts":      safe_int(stats.get("strikeOuts")),
-                "hit_by_pitch":    safe_int(stats.get("hitByPitch")),
-                "left_on_base":    safe_int(stats.get("leftOnBase")),
-                "sac_bunts":       safe_int(stats.get("sacBunts")),
-                "sac_flies":       safe_int(stats.get("sacFlies")),
-                "fly_outs":        safe_int(stats.get("flyOuts")),
-                "ground_outs":     safe_int(stats.get("groundOuts")),
-                "air_outs":        safe_int(stats.get("airOuts")),
-                "pop_outs":        safe_int(stats.get("popOuts")),
-                "line_outs":       safe_int(stats.get("lineOuts")),
-                "batting_avg":     _clean_float(stats.get("avg")),
-                "obp":             _clean_float(stats.get("obp")),
-                "slg":             _clean_float(stats.get("slg")),
-                "ops":             _clean_float(stats.get("ops")),
+                "strikeouts":        safe_int(stats.get("strikeOuts")),
+                "hit_by_pitch":      safe_int(stats.get("hitByPitch")),
+                "left_on_base":      safe_int(stats.get("leftOnBase")),
+                "sac_bunts":         safe_int(stats.get("sacBunts")),
+                "sac_flies":         safe_int(stats.get("sacFlies")),
+                "fly_outs":          safe_int(stats.get("flyOuts")),
+                "ground_outs":       safe_int(stats.get("groundOuts")),
+                "air_outs":          safe_int(stats.get("airOuts")),
+                "pop_outs":          safe_int(stats.get("popOuts")),
+                "line_outs":         safe_int(stats.get("lineOuts")),
+                "batting_avg":       _clean_float(stats.get("avg")),
+                "obp":               _clean_float(stats.get("obp")),
+                "slg":               _clean_float(stats.get("slg")),
+                "ops":               _clean_float(stats.get("ops")),
             })
 
         # --- Pitchers ---
-        # Pitcher stats are in the same players dict, but we use the pitchers list
-        # to identify who pitched and in what order.
         for pid in pitchers:
             pkey  = f"ID{pid}"
             pdata = players.get(pkey, {})
             if not pdata:
                 continue
             stats = pdata.get("stats", {}).get("pitching", {})
-
-            note = pdata.get("gameStatus", {})
-            # Determine if starter (first in list) for the note field
             is_starter = (pid == starter_id)
 
             pitcher_rows.append({
@@ -485,7 +463,7 @@ def load_games_and_box_scores(engine, seasons, team_abbr):
         batch_size   = 100
 
         for i, game in enumerate(new_games, 1):
-            game_pk = game["game_id"]
+            game_pk   = game["game_id"]
             game_json = fetch_game_json(game_pk)
             if game_json is None:
                 log.warning("Skipping game_pk %d: /withMetrics returned no data.", game_pk)
@@ -526,7 +504,7 @@ def load_games_and_box_scores(engine, seasons, team_abbr):
 # ---------------------------------------------------------------------------
 
 def load_player_season_batting(engine, season):
-    current_year = datetime.utcnow().year
+    current_year = datetime.now(timezone.utc).year
     if season > current_year:
         log.info("Season %d has not started yet, skipping player season batting snapshot.", season)
         return
@@ -601,7 +579,7 @@ def load_player_season_batting(engine, season):
 # ---------------------------------------------------------------------------
 
 def load_pitcher_season_stats(engine, season):
-    current_year = datetime.utcnow().year
+    current_year = datetime.now(timezone.utc).year
     if season > current_year:
         log.info("Season %d has not started yet, skipping pitcher season stats snapshot.", season)
         return
@@ -704,14 +682,22 @@ def load_pitcher_season_stats(engine, season):
 # ---------------------------------------------------------------------------
 
 def main():
-    log.info("=== MLB ETL started ===")
+    backfill = "--backfill" in sys.argv
+
+    log.info("=== MLB ETL started (backfill=%s) ===", backfill)
     engine = get_engine()
-    current_season     = date.today().year
-    historical_seasons = [2023, 2024, 2025, current_season]
+    current_season = date.today().year
+
+    if backfill:
+        box_score_seasons = [2023, 2024, 2025, current_season]
+        player_seasons    = [2023, 2024, 2025, current_season]
+    else:
+        box_score_seasons = [current_season]
+        player_seasons    = [current_season]
 
     team_abbr = load_teams(engine, season=current_season)
-    load_players(engine, seasons=historical_seasons)
-    load_games_and_box_scores(engine, historical_seasons, team_abbr)
+    load_players(engine, seasons=player_seasons)
+    load_games_and_box_scores(engine, box_score_seasons, team_abbr)
     load_player_season_batting(engine, season=current_season)
     load_pitcher_season_stats(engine, season=current_season)
 
