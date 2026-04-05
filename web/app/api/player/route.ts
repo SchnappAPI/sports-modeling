@@ -60,9 +60,15 @@ export async function GET(req: NextRequest) {
       lastOppTeamId = schedResult.recordset[0]?.oppTeamId ?? null;
     }
 
-    // If a gameId was provided, look up this player's lineup status for that game.
+    // If a gameId was provided, look up this player's lineup entry for that game.
+    // lineupPosition: the specific position assigned for today's game (PG/SG/SF/PF/C).
+    //   For starters this comes from the official NBA lineup JSON (precise).
+    //   For bench players it comes from boxscorepreviewv3 (may be null).
+    // When lineupPosition is present, use it for matchup defense lookups instead of
+    // the compound position from nba.players (e.g. prefer 'SG' over 'G-F').
     let gameLineupStatus: string | null = null;
     let gameStarterStatus: string | null = null;
+    let gameLineupPosition: string | null = null;
     if (gameId && playerInfo?.playerName) {
       const lineupResult = await pool
         .request()
@@ -71,28 +77,31 @@ export async function GET(req: NextRequest) {
         .query(`
           SELECT
             lineup_status  AS lineupStatus,
-            starter_status AS starterStatus
+            starter_status AS starterStatus,
+            position       AS lineupPosition
           FROM nba.daily_lineups
           WHERE game_id    = @gameId
             AND player_name = @playerName
         `);
       const lineupRow = lineupResult.recordset[0] ?? null;
-      gameLineupStatus   = lineupRow?.lineupStatus   ?? null;
-      gameStarterStatus  = lineupRow?.starterStatus  ?? null;
+      gameLineupStatus   = lineupRow?.lineupStatus    ?? null;
+      gameStarterStatus  = lineupRow?.starterStatus   ?? null;
+      gameLineupPosition = lineupRow?.lineupPosition  ?? null;
     }
 
     return NextResponse.json({
-      playerId:         pid,
+      playerId:           pid,
       lastN,
       sport,
       log,
-      playerName:       playerInfo?.playerName   ?? null,
-      teamId:           playerInfo?.teamId        ?? null,
-      teamAbbr:         playerInfo?.teamAbbr      ?? null,
-      position:         playerInfo?.position      ?? null,
+      playerName:         playerInfo?.playerName   ?? null,
+      teamId:             playerInfo?.teamId        ?? null,
+      teamAbbr:           playerInfo?.teamAbbr      ?? null,
+      position:           playerInfo?.position      ?? null,
       lastOppTeamId,
       gameLineupStatus,
       gameStarterStatus,
+      gameLineupPosition,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
