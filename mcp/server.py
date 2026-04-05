@@ -30,9 +30,12 @@ GH_PAT      = os.environ.get("GH_PAT", "")
 GITHUB_REPO = "SchnappAPI/sports-modeling"
 GITHUB_API  = "https://api.github.com"
 
+# host and port must be set on the constructor in mcp 1.9.0, not passed to run()
 mcp = FastMCP(
     name="schnapp-ops",
     instructions="Operational tools for schnapp.bet: Flask service management, live NBA data, and GitHub Actions workflow control.",
+    host="127.0.0.1",
+    port=8000,
 )
 
 
@@ -171,4 +174,4 @@ def workflow_status(workflow_filename: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="127.0.0.1", port=8000)
+    mcp.run(transport="streamable-http")
