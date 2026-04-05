@@ -75,8 +75,7 @@ async function fetchGames(date: string): Promise<Game[]> {
 }
 
 // Pick the best game to auto-select from a sorted list.
-// Prefers: live (status 2) > pre-game (status 1) > first finished (status 3).
-// This prevents landing on a finished game when upcoming games exist.
+// Prefers: live (status 2) > pre-game (status 1) > finished (status 3).
 function pickDefaultGame(sorted: Game[]): Game | undefined {
   return (
     sorted.find((g) => g.gameStatus === 2) ??
@@ -93,73 +92,29 @@ export default function NbaPageInner() {
   const isDemo   = mode === 'demo';
   const demoDate = demoDates.nba;
 
-  const urlDate  = searchParams.get('date');
-  const urlGameId = searchParams.get('gameId');
+  const urlDate   = searchParams.get('date');
   const defaultDate = isDemo && demoDate ? demoDate : todayLocal();
   const [selectedDate, setSelectedDate] = useState<string>(urlDate ?? defaultDate);
-  const [games, setGames] = useState<Game[]>([]);
+  const [games, setGames]     = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
-  const [loadingWord] = useState(() => randomLoadingWord());
-  const [error, setError] = useState<string | null>(null);
+  const [loadingWord]         = useState(() => randomLoadingWord());
+  const [error, setError]     = useState<string | null>(null);
 
-  // Only suppress the fallback + smart-select when the user has explicitly
-  // navigated to a date AND a game via UI interaction (not initial page load).
+  // Set to true when the user explicitly taps a game or navigates dates.
+  // Prevents auto-select from overriding an intentional selection.
   const isExplicitSelection = useRef<boolean>(false);
 
   const activeGameId = searchParams.get('gameId');
   const activeGame   = games.find((g) => g.gameId === activeGameId) ?? null;
-
   const effectiveDate = isDemo && demoDate ? demoDate : selectedDate;
 
   async function loadGames() {
-    if (isDemo) {
-      setLoading(true);
-      setError(null);
-      setGames([]);
-      try {
-        const raw = await fetchGames(effectiveDate);
-        const sorted = sortGames(raw.map((g) => ({
-          ...g,
-          gameStatusText: (g.gameStatus == null || g.gameStatus === 1)
-            ? convertEtToCt(g.gameStatusText)
-            : g.gameStatusText,
-        })));
-        setGames(sorted);
-        const currentGameId = searchParams.get('gameId');
-        const stillValid = sorted.some((g) => g.gameId === currentGameId);
-        if (sorted.length > 0 && !stillValid) {
-          const pick = pickDefaultGame(sorted);
-          if (pick) router.replace(`/nba?gameId=${pick.gameId}&date=${effectiveDate}`);
-        }
-      } catch (err: any) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-      return;
-    }
-
     setLoading(true);
     setError(null);
     setGames([]);
 
     try {
-      let raw = await fetchGames(effectiveDate);
-      let usedDate = effectiveDate;
-
-      // If today has no games and this was not an explicit user navigation,
-      // fall back to yesterday. Handles the window between local midnight and
-      // when nba-etl populates today's schedule (runs at 9am UTC / 3am CT).
-      if (raw.length === 0 && !isExplicitSelection.current) {
-        const yesterday = shiftDate(effectiveDate, -1);
-        const fallback = await fetchGames(yesterday);
-        if (fallback.length > 0) {
-          raw = fallback;
-          usedDate = yesterday;
-          setSelectedDate(yesterday);
-          router.replace(`/nba?date=${yesterday}`);
-        }
-      }
+      const raw = await fetchGames(effectiveDate);
 
       const sorted = sortGames(raw.map((g) => ({
         ...g,
@@ -167,26 +122,29 @@ export default function NbaPageInner() {
           ? convertEtToCt(g.gameStatusText)
           : g.gameStatusText,
       })));
+
       setGames(sorted);
+
+      if (sorted.length === 0) return;
 
       const currentGameId = searchParams.get('gameId');
       const currentGame   = sorted.find((g) => g.gameId === currentGameId);
 
-      // Always replace if:
-      // 1. No gameId in URL, or gameId not in today's games (stale from another date)
-      // 2. Not an explicit user selection AND the current game is finished while
-      //    pre-game or live games exist on this date (NBA stores late-night games
-      //    under the next calendar date, so finished games appear alongside
-      //    tonight's upcoming games — always prefer the upcoming ones)
-      const hasUpcoming = sorted.some((g) => g.gameStatus == null || g.gameStatus === 1 || g.gameStatus === 2);
-      const currentIsFinished = currentGame?.gameStatus === 3;
+      // Re-select when:
+      // - No valid game is selected for this date
+      // - Not an explicit user selection and the selected game is finished
+      //   while upcoming/live games exist (avoids landing on a final when
+      //   tonight's games are available)
+      const hasUpcoming = sorted.some(
+        (g) => g.gameStatus == null || g.gameStatus === 1 || g.gameStatus === 2
+      );
       const shouldReplace =
         !currentGame ||
-        (!isExplicitSelection.current && currentIsFinished && hasUpcoming);
+        (!isExplicitSelection.current && currentGame.gameStatus === 3 && hasUpcoming);
 
-      if (sorted.length > 0 && shouldReplace) {
+      if (shouldReplace) {
         const pick = pickDefaultGame(sorted);
-        if (pick) router.replace(`/nba?gameId=${pick.gameId}&date=${usedDate}`);
+        if (pick) router.replace(`/nba?gameId=${pick.gameId}&date=${effectiveDate}`);
       }
     } catch (err: any) {
       setError(err.message);
@@ -299,7 +257,12 @@ export default function NbaPageInner() {
             gameStatus={activeGame.gameStatus}
           />
         ) : (
-          !loading && <div className="py-6 text-sm text-gray-500">Select a game above.</div>
+          !loading && games.length === 0 && (
+            <div className="py-6 text-sm text-gray-500">No games scheduled for this date.</div>
+          )
+        )}
+        {!loading && games.length > 0 && !activeGame && (
+          <div className="py-6 text-sm text-gray-500">Select a game above.</div>
         )}
       </div>
     </div>
