@@ -90,7 +90,8 @@ interface GameSummary {
 
 interface PlayerInfo {
   oppTeamId: number | null;
-  position: string | null;
+  position: string | null;           // from nba.players — may be compound e.g. G-F
+  gameLineupPosition: string | null; // from daily_lineups for today's game — PG/SG/SF/PF/C
   playerName: string | null;
   teamId: number | null;
   gameLineupStatus: string | null;
@@ -846,7 +847,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [log, setLog]               = useState<GameLogRow[]>([]);
   const [grades, setGrades]         = useState<GradeLine[]>([]);
   const [playerInfo, setPlayerInfo] = useState<PlayerInfo>({
-    oppTeamId: null, position: null, playerName: null, teamId: null,
+    oppTeamId: null, position: null, gameLineupPosition: null,
+    playerName: null, teamId: null,
     gameLineupStatus: null, gameStarterStatus: null,
   });
   const [loading, setLoading]       = useState(true);
@@ -895,7 +897,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     setError(null);
     setLog([]);
     setGrades([]);
-    setPlayerInfo({ oppTeamId: null, position: null, playerName: null, teamId: null, gameLineupStatus: null, gameStarterStatus: null });
+    setPlayerInfo({
+      oppTeamId: null, position: null, gameLineupPosition: null,
+      playerName: null, teamId: null,
+      gameLineupStatus: null, gameStarterStatus: null,
+    });
     setSelectedPeriods(new Set());
     setTeamPlayers([]);
     setVsOppOnly(false);
@@ -915,12 +921,13 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         setGrades(gradeData.grades ?? []);
 
         const info: PlayerInfo = {
-          playerName:        playerData.playerName        ?? null,
-          position:          playerData.position          ?? null,
-          oppTeamId:         playerData.lastOppTeamId     ?? null,
-          teamId:            playerData.teamId            ?? null,
-          gameLineupStatus:  playerData.gameLineupStatus  ?? null,
-          gameStarterStatus: playerData.gameStarterStatus ?? null,
+          playerName:         playerData.playerName         ?? null,
+          position:           playerData.position           ?? null,
+          gameLineupPosition: playerData.gameLineupPosition ?? null,
+          oppTeamId:          playerData.lastOppTeamId      ?? null,
+          teamId:             playerData.teamId             ?? null,
+          gameLineupStatus:   playerData.gameLineupStatus   ?? null,
+          gameStarterStatus:  playerData.gameStarterStatus  ?? null,
         };
         setPlayerInfo(info);
 
@@ -1013,6 +1020,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const teamGameCount = useMemo(() => new Set(summaries.map((s) => s.gameId)).size, [summaries]);
   const playedCount   = useMemo(() => summaries.filter((s) => !s.dnp).length, [summaries]);
 
+  // Resolve position for matchup defense: prefer lineup position (game-specific,
+  // precise PG/SG/SF/PF/C) over canonical player position (may be compound G-F etc.)
+  const matchupPosition = playerInfo.gameLineupPosition ?? playerInfo.position;
+
   function togglePeriod(p: QuarterKey) {
     setSelectedPeriods((prev) => {
       const next = new Set(prev);
@@ -1050,7 +1061,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     return gm ? Array.from(gm.keys())[0] : undefined;
   }, [gradeMap, backGameId]);
 
-  const showMatchup = playerInfo.oppTeamId != null && playerInfo.position != null;
+  const showMatchup = playerInfo.oppTeamId != null && matchupPosition != null;
 
   if (loading) return <div className="px-4 py-6 text-sm text-gray-500">Loading...</div>;
   if (error)   return <div className="px-4 py-6 text-sm text-red-400">Error: {error}</div>;
@@ -1193,11 +1204,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         </table>
       </div>
 
-      {/* Matchup defense */}
+      {/* Matchup defense — uses lineup position when available (more precise),
+          falls back to player's canonical position from nba.players */}
       {showMatchup && (
         <MatchupDefense
           oppTeamId={playerInfo.oppTeamId!}
-          position={playerInfo.position!}
+          position={matchupPosition!}
           highlightMarket={todayMarket}
         />
       )}
