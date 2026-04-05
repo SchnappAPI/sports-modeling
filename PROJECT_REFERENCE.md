@@ -11,7 +11,7 @@
 
 ---
 
-## Current State (updated 2026-04-04 session 7)
+## Current State (updated 2026-04-04 session 8)
 
 **What is working:**
 - NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, grading all running.
@@ -23,9 +23,7 @@
 - Player page lineup status badge: shows Starter/Bench/Inactive (Confirmed/Projected) when navigated from a game.
 - Today's Props strip: horizontal market cells, tap to expand dot plot + alt lines.
 - PWA active. Self-hosted runner live. Uptime Robot active. Refresh Data button live.
-- **Live box score: FULLY WORKING.** Flask runner on VM fetches CDN endpoint directly. Confirmed 36 players returned for both live games today (WAS@MIA Q4, SAC@LAL Q3). `/boxscore` endpoint on Flask returns correct player stats.
-- `runner.py` and `nba_live.py` both updated to use NBA CDN: `https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json`. No proxy needed for CDN. CDN response: top-level key `game`, `statistics` is a single dict per player (cumulative), not a list.
-- `nba_live.py` no longer writes live rows to DB (removed — not needed, had VARCHAR constraint issues with Unicode player names). Just verifies CDN availability and logs player counts.
+- Live box score fully working. Flask runner fetches NBA CDN, returns 36 players with correct stats. Score header in Live tab shows AWY score vs HME score + period/clock, refreshes every 30s. Green dot on players currently on court.
 
 **Known issues:**
 - `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
@@ -39,8 +37,10 @@
 - VM resize pending — downsize to B1s_v2 after trial credits expire.
 - Odds backfill: confirm run 23916639705 completion, then run mappings (mode=mappings, sport=nba).
 - At a Glance duplicate prop rows: standard vs alt market keys both abbreviating to same label in UI.
+- **CRITICAL PENDING:** `nba-game-day.yml` cron gap — 22:00-23:59 UTC (5-7pm ET) not covered, so evening tip-offs like DET@PHI at 6pm CT won't flip to Live automatically. Must manually tap Refresh Data after tip-off, or fix the cron. Fix not yet committed.
 
 **Next up:**
+- Fix `nba-game-day.yml` cron gap: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`. Edit directly on GitHub.com in `.github/workflows/nba-game-day.yml`.
 - Confirm odds backfill run 23916639705 status. If complete, run NBA mappings (mode=mappings, sport=nba).
 - At a Glance duplicate prop row fix (display layer — market key abbreviation collision).
 - Re-enable PasscodeGate (BYPASS = false) before sharing with users.
@@ -73,17 +73,17 @@
 
 ### Flask Runner on VM
 - `etl/runner.py` — lightweight Flask service on VM, port 5000. Systemd service: `schnapp-flask.service`.
-- Serves `/ping` (health) and `/boxscore?gameId=` (live player stats).
+- Serves `/ping` (health) and `/boxscore?gameId=` (live player stats + score).
 - Auth: `X-Runner-Key: runner-Lake4971` header required.
-- **CDN endpoint (as of session 7):** `https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json`. No proxy needed. Response key: `game`. `statistics` per player is a single cumulative dict.
-- Previously used `stats.nba.com/stats/boxscoretraditionalv3` via Webshare proxy — abandoned because the endpoint returned homeTeam=null for in-progress games from VM IPs.
+- CDN endpoint: `https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json`. No proxy needed. Response key: `game`. `statistics` per player is a single cumulative dict.
+- Response includes: `gameStatusText`, `homeScore`, `awayScore`, `homeTeamAbbr`, `awayTeamAbbr`, `players[]`. Each player has `starter` (bool), `oncourt` (bool).
 - `NBA_PROXY_URL` remains in systemd env but is unused by runner.py.
-- Manual run env vars: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD` (from GitHub Actions secrets). Not set in systemd — only needed by nba_live.py for schedule updates.
+- Manual run env vars needed for `nba_live.py` only: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD`.
 
 ### Active Workflows
 | Workflow | Trigger | Purpose |
 |----------|---------|--------|
-| `nba-game-day.yml` | Every 30 min UTC 0-6 + daily 09:30 | Live scores, odds refresh, grading, lineup poll |
+| `nba-game-day.yml` | 09:30 UTC daily + every 30 min 00:00-06:00 UTC | Live scores, odds refresh, grading, lineup poll |
 | `nba-etl.yml` | Daily UTC 09:00 | Box scores, PT stats, schedule, rosters |
 | `odds-etl.yml` | Daily UTC 10:00 | Today's FanDuel lines |
 | `grading.yml` | After odds-etl succeeds (workflow_run) | Grade today's props |
@@ -265,6 +265,11 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 - `oddsFilterActive` = `minOdds > ODDS_MIN` (-1000). Do not change this condition.
 - Over/Under toggle filters on `r.outcomeName`.
 - Refresh Data button (RefreshDataButton component) requires admin passcode.
+
+**Live tab (`LiveBoxScore.tsx`):**
+- Score header at top: AWY abbr + score (left), pulsing Live dot + period/clock (center), HME abbr + score (right). Leading score brighter.
+- Player rows: green dot on `oncourt` players. `starter` boolean from CDN (not from DB lineup).
+- Starters/Bench sections based on CDN `starter` field. Refreshes every 30s.
 
 **Matchups tab (`MatchupGrid.tsx` + `/api/matchup-grid`):**
 - Two defense panels side by side (away defense left, home defense right).
