@@ -90,8 +90,8 @@ interface GameSummary {
 
 interface PlayerInfo {
   oppTeamId: number | null;
-  position: string | null;           // from nba.players — may be compound e.g. G-F
-  gameLineupPosition: string | null; // from daily_lineups for today's game — PG/SG/SF/PF/C
+  position: string | null;           // from nba.players -- may be compound e.g. G-F
+  gameLineupPosition: string | null; // from daily_lineups for today's game -- PG/SG/SF/PF/C
   playerName: string | null;
   teamId: number | null;
   gameLineupStatus: string | null;
@@ -861,7 +861,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
   const isFullGame = selectedPeriods.size === 0;
 
-  // Derive the player's own team tricode from todayGames + playerInfo.teamId
+  // Derive player's own team tricode from todayGames + playerInfo.teamId
   const playerTeamTricode = useMemo(() => {
     if (!playerInfo.teamId || todayGames.length === 0) return null;
     for (const g of todayGames) {
@@ -873,6 +873,13 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
   // Team primary color for the left border accent on the header
   const teamColor = playerTeamTricode ? getTeamPrimary(playerTeamTricode) : null;
+
+  // Position used for matchup defense lookup:
+  // Prefer gameLineupPosition (game-specific PG/SG/SF/PF/C from daily_lineups)
+  // over the canonical position from nba.players (may be compound e.g. G-F).
+  // This ensures starters get their exact positional role for tonight's game,
+  // while bench players without a lineup position fall back to their canonical value.
+  const matchupPosition = playerInfo.gameLineupPosition ?? playerInfo.position;
 
   // Fetch today's games for the game/team selector
   useEffect(() => {
@@ -1019,10 +1026,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
   const teamGameCount = useMemo(() => new Set(summaries.map((s) => s.gameId)).size, [summaries]);
   const playedCount   = useMemo(() => summaries.filter((s) => !s.dnp).length, [summaries]);
-
-  // Resolve position for matchup defense: prefer lineup position (game-specific,
-  // precise PG/SG/SF/PF/C) over canonical player position (may be compound G-F etc.)
-  const matchupPosition = playerInfo.gameLineupPosition ?? playerInfo.position;
 
   function togglePeriod(p: QuarterKey) {
     setSelectedPeriods((prev) => {
@@ -1204,8 +1207,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         </table>
       </div>
 
-      {/* Matchup defense — uses lineup position when available (more precise),
-          falls back to player's canonical position from nba.players */}
+      {/* Matchup defense:
+          Uses gameLineupPosition when available (precise PG/SG/SF/PF/C for tonight's game).
+          Falls back to nba.players position (may be compound G-F etc.) for bench players
+          or when navigating to a player page without a gameId context. */}
       {showMatchup && (
         <MatchupDefense
           oppTeamId={playerInfo.oppTeamId!}
