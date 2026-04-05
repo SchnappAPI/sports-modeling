@@ -4,3 +4,4 @@ pandas==3.0.2
 numpy==2.4.4
 requests==2.33.1
 nba_api==1.11.4
+mlb-statsapi==1.7.2
