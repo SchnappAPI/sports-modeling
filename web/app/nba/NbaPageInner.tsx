@@ -74,6 +74,17 @@ async function fetchGames(date: string): Promise<Game[]> {
   return data.games ?? [];
 }
 
+// Pick the best game to auto-select from a sorted list.
+// Prefers: live (status 2) > pre-game (status 1) > first finished (status 3).
+// This prevents landing on a finished game when upcoming games exist.
+function pickDefaultGame(sorted: Game[]): Game | undefined {
+  return (
+    sorted.find((g) => g.gameStatus === 2) ??
+    sorted.find((g) => g.gameStatus == null || g.gameStatus === 1) ??
+    sorted[0]
+  );
+}
+
 export default function NbaPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -82,7 +93,8 @@ export default function NbaPageInner() {
   const isDemo   = mode === 'demo';
   const demoDate = demoDates.nba;
 
-  const urlDate = searchParams.get('date');
+  const urlDate  = searchParams.get('date');
+  const urlGameId = searchParams.get('gameId');
   const defaultDate = isDemo && demoDate ? demoDate : todayLocal();
   const [selectedDate, setSelectedDate] = useState<string>(urlDate ?? defaultDate);
   const [games, setGames] = useState<Game[]>([]);
@@ -90,10 +102,9 @@ export default function NbaPageInner() {
   const [loadingWord] = useState(() => randomLoadingWord());
   const [error, setError] = useState<string | null>(null);
 
-  // Track whether the current load was triggered by an explicit user date selection.
-  // On explicit selection, no fallback. On default load (no urlDate), fall back to
-  // yesterday if today has no games (handles the overnight NBA game-day rollover gap).
-  const isExplicitSelection = useRef<boolean>(urlDate != null);
+  // Only suppress the fallback + smart-select when the user has explicitly
+  // navigated to a date AND a game via UI interaction (not initial page load).
+  const isExplicitSelection = useRef<boolean>(false);
 
   const activeGameId = searchParams.get('gameId');
   const activeGame   = games.find((g) => g.gameId === activeGameId) ?? null;
@@ -117,7 +128,8 @@ export default function NbaPageInner() {
         const currentGameId = searchParams.get('gameId');
         const stillValid = sorted.some((g) => g.gameId === currentGameId);
         if (sorted.length > 0 && !stillValid) {
-          router.replace(`/nba?gameId=${sorted[0].gameId}&date=${effectiveDate}`);
+          const pick = pickDefaultGame(sorted);
+          if (pick) router.replace(`/nba?gameId=${pick.gameId}&date=${effectiveDate}`);
         }
       } catch (err: any) {
         setError(err.message);
@@ -135,10 +147,9 @@ export default function NbaPageInner() {
       let raw = await fetchGames(effectiveDate);
       let usedDate = effectiveDate;
 
-      // If today has no games and this was not an explicit user selection,
-      // fall back to yesterday. This handles the window between local midnight
-      // and when the NBA ETL populates today's schedule (runs at 9am UTC).
-      // The date picker updates to reflect the fallback so it is not misleading.
+      // If today has no games and this was not an explicit user navigation,
+      // fall back to yesterday. Handles the window between local midnight and
+      // when nba-etl populates today's schedule (runs at 9am UTC / 3am CT).
       if (raw.length === 0 && !isExplicitSelection.current) {
         const yesterday = shiftDate(effectiveDate, -1);
         const fallback = await fetchGames(yesterday);
@@ -157,10 +168,25 @@ export default function NbaPageInner() {
           : g.gameStatusText,
       })));
       setGames(sorted);
+
       const currentGameId = searchParams.get('gameId');
-      const stillValid = sorted.some((g) => g.gameId === currentGameId);
-      if (sorted.length > 0 && !stillValid) {
-        router.replace(`/nba?gameId=${sorted[0].gameId}&date=${usedDate}`);
+      const currentGame   = sorted.find((g) => g.gameId === currentGameId);
+
+      // Always replace if:
+      // 1. No gameId in URL, or gameId not in today's games (stale from another date)
+      // 2. Not an explicit user selection AND the current game is finished while
+      //    pre-game or live games exist on this date (NBA stores late-night games
+      //    under the next calendar date, so finished games appear alongside
+      //    tonight's upcoming games — always prefer the upcoming ones)
+      const hasUpcoming = sorted.some((g) => g.gameStatus == null || g.gameStatus === 1 || g.gameStatus === 2);
+      const currentIsFinished = currentGame?.gameStatus === 3;
+      const shouldReplace =
+        !currentGame ||
+        (!isExplicitSelection.current && currentIsFinished && hasUpcoming);
+
+      if (sorted.length > 0 && shouldReplace) {
+        const pick = pickDefaultGame(sorted);
+        if (pick) router.replace(`/nba?gameId=${pick.gameId}&date=${usedDate}`);
       }
     } catch (err: any) {
       setError(err.message);
@@ -172,6 +198,7 @@ export default function NbaPageInner() {
   useEffect(() => { loadGames(); }, [effectiveDate]);
 
   function handleSelectGame(gameId: string) {
+    isExplicitSelection.current = true;
     const params = new URLSearchParams();
     params.set('gameId', gameId);
     params.set('date', effectiveDate);
