@@ -4,24 +4,22 @@ nba_live.py
 Intra-day NBA updater. Called by nba-game-day.yml on every cycle.
 
 Two responsibilities:
-  1. update_schedule()  -- Always runs. Calls ScoreboardV3 to sync
-                           game_status / scores for ALL today's games.
+  1. update_schedule()  -- Always runs. Fetches the public CDN scoreboard
+                           to sync game_status / scores for ALL today's games.
                            This is what flips status 1->2->3 in the DB.
+                           No proxy required -- CDN is public.
 
   2. update_box_scores() -- Gates on game_status=2 (in-progress).
                             Calls NBA CDN for each live game and logs player
-                            counts. DB write is skipped — the Flask runner
+                            counts. DB write is skipped -- the Flask runner
                             serves live box scores directly from CDN to the UI.
 
-CDN endpoint (public, no proxy):
-  https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json
-  Top-level key: "game" (not "boxScoreTraditional")
-  statistics: single dict per player (cumulative game total)
+CDN endpoints (both public, no proxy):
+  Scoreboard: https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json
+  Box score:  https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json
 
-Proxy
------
-ScoreboardV3 still requires the Webshare rotating residential proxy.
-CDN boxscore endpoint is public and requires no proxy.
+Box score top-level key: "game"
+statistics: single dict per player (cumulative game total)
 """
 
 import os
@@ -40,8 +38,6 @@ from etl.nba_etl import (
     get_engine,
     safe_int,
     safe_str,
-    NBA_HEADERS,
-    get_proxies,
     API_DELAY,
     RETRY_COUNT,
     RETRY_WAIT,
@@ -53,6 +49,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+CDN_SCOREBOARD = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
 
 
 # ---------------------------------------------------------------------------
@@ -87,29 +85,31 @@ def _request(url, params, label, proxies=None, headers=None):
 
 def update_schedule(engine):
     """
-    Call ScoreboardV3 for today and update game_status, game_status_text,
+    Fetch the public CDN scoreboard and update game_status, game_status_text,
     home_score, and away_score for every game in nba.schedule.
-    Runs unconditionally — this is what drives status transitions.
+
+    Uses todaysScoreboard_00.json -- no proxy, no special headers required.
+    Response shape: scoreboard.games[] with gameId, gameStatus, gameStatusText,
+    homeTeam.score, awayTeam.score (identical field names to ScoreboardV3).
     """
-    today  = date.today()
-    url    = "https://stats.nba.com/stats/scoreboardv3"
-    params = {"GameDate": today.strftime("%m/%d/%Y"), "LeagueID": "00"}
-    data   = _request(url, params, f"ScoreboardV3 {today}",
-                      proxies=get_proxies(), headers=NBA_HEADERS)
+    data = _request(CDN_SCOREBOARD, None, "CDN scoreboard")
     if data is None:
-        log.warning("ScoreboardV3 call failed — schedule not updated this cycle.")
+        log.warning("CDN scoreboard fetch failed -- schedule not updated this cycle.")
         return 0
 
     try:
         games = data["scoreboard"]["games"]
     except (KeyError, TypeError) as exc:
-        log.warning(f"ScoreboardV3 unexpected shape: {exc}")
+        log.warning(f"CDN scoreboard unexpected shape: {exc}")
         return 0
+
+    today_str = date.today().isoformat()
+    log.info(f"CDN scoreboard returned {len(games)} game(s) for {today_str}")
 
     updated = 0
     with engine.begin() as conn:
         for g in games:
-            gid  = safe_str(g.get("gameId"))
+            gid = safe_str(g.get("gameId"))
             if not gid:
                 continue
             home = g.get("homeTeam", {})
@@ -154,12 +154,12 @@ def get_live_game_ids(engine):
 def verify_live_box_scores(engine):
     """
     Verify CDN box score availability for in-progress games.
-    Does not write to DB — the Flask runner serves live box scores
+    Does not write to DB -- the Flask runner serves live box scores
     directly from CDN to the UI on each request.
     """
     live_ids = get_live_game_ids(engine)
     if not live_ids:
-        log.info("No in-progress games — box score check skipped.")
+        log.info("No in-progress games -- box score check skipped.")
         return 0
 
     log.info(f"{len(live_ids)} in-progress game(s): {live_ids}")
@@ -189,7 +189,7 @@ def verify_live_box_scores(engine):
 def main():
     engine = get_engine()
 
-    # Step 1: always update schedule status/scores
+    # Step 1: always update schedule status/scores via CDN (no proxy needed)
     update_schedule(engine)
 
     # Step 2: verify live box score CDN availability (no DB write)
