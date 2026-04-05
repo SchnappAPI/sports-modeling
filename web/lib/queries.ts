@@ -25,6 +25,8 @@ export interface GameRow {
   awayTeamAbbr: string;
   homeTeamName: string;
   awayTeamName: string;
+  homeScore: number | null;
+  awayScore: number | null;
   spread: number | null;
   total: number | null;
 }
@@ -83,6 +85,8 @@ export async function getGames(sport: string, date: string): Promise<GameRow[]> 
          at.team_tricode    AS awayTeamAbbr,
          ht.team_name       AS homeTeamName,
          at.team_name       AS awayTeamName,
+         s.home_score       AS homeScore,
+         s.away_score       AS awayScore,
          bl.spread          AS spread,
          bl.total           AS total
        FROM nba.schedule s
