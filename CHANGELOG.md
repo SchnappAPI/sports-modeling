@@ -9,6 +9,22 @@
 
 ---
 
+## 2026-04-05 (session 3)
+
+### UI | web/components/GameStrip.tsx — live and final scores added to game cards
+- Added `homeScore: number | null`, `awayScore: number | null`, `period?: number | null`, `gameClock?: string | null` to the `Game` interface.
+- For live and final games where scores are non-null: score layout replaces the matchup row. Shows `awayScore awayAbbr @ homeAbbr homeScore`. Leading score renders brighter (`text-gray-100`), trailing dimmer (`text-gray-500`). Home team wins ties for brightness.
+- For upcoming games (status 1 or null): unchanged — shows `AWY @ HME` matchup and spread/total row below.
+- For live/final with scores: spread/total row is hidden (replaced by scores).
+- No changes to `NbaPageInner.tsx` or the API layer — both already passed scores through. The gap was only in the component.
+- Do not revert to spread-only display for live/final games.
+
+### Infra | odds-etl.yml — NBA mappings triggered after confirmed backfill completion
+- Odds backfill run 23916639705 confirmed `status: completed, conclusion: success` (completed 2026-04-02).
+- NBA mappings dispatched via `odds-etl.yml` with `mode=mappings, sport=nba`.
+
+---
+
 ## 2026-04-05 (session 2)
 
 ### ETL | etl/nba_live.py — replaced ScoreboardV3 proxy call with CDN scoreboard
