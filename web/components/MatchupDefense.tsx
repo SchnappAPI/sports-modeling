@@ -11,8 +11,8 @@ interface StatLine {
 interface MatchupData {
   oppTeamId: number;
   oppTeamAbbr: string;
-  position: string;    // raw position passed in (e.g. 'SG' or 'G-F')
-  posGroup: string;    // resolved group used for the query: 'G' | 'F' | 'C'
+  position: string;
+  posGroup: string;
   gamesDefended: number;
   pts: StatLine;
   reb: StatLine;
@@ -23,7 +23,6 @@ interface MatchupData {
   tov: StatLine;
 }
 
-// Maps the grading market key to the stat field in MatchupData.
 export const MARKET_TO_STAT: Record<string, keyof MatchupData> = {
   player_points:             'pts',
   player_points_alternate:   'pts',
@@ -40,7 +39,6 @@ export const MARKET_TO_STAT: Record<string, keyof MatchupData> = {
   player_turnovers:          'tov',
 };
 
-// Maps posGroup (G/F/C) to a readable label for the subtitle.
 const POS_GROUP_LABEL: Record<string, string> = {
   G: 'Guards',
   F: 'Forwards',
@@ -54,7 +52,6 @@ const STAT_LABELS: { key: keyof MatchupData; label: string }[] = [
   { key: 'ast',  label: 'AST' },
   { key: 'stl',  label: 'STL' },
   { key: 'blk',  label: 'BLK' },
-  { key: 'tov',  label: 'TOV' },
 ];
 
 function ordinal(n: number): string {
@@ -112,9 +109,6 @@ export default function MatchupDefense({ oppTeamId, position, highlightMarket }:
     : null;
   const headlineMeta = headlineStat ? matchupLabel(headlineStat.rank) : null;
 
-  // Use posGroup for the label (e.g. 'Guards') rather than the raw position
-  // string (e.g. 'G-F') so it describes the comparison pool, not the player's
-  // compound designation.
   const posLabel = POS_GROUP_LABEL[data.posGroup ?? ''] ?? data.posGroup ?? data.position;
 
   return (

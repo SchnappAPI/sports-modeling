@@ -3,10 +3,6 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 interface StatLine {
   avg: number;
   rank: number;
@@ -54,7 +50,6 @@ const STATS: Array<{ key: keyof PosData; label: string }> = [
   { key: 'fg3m', label: '3PM' },
   { key: 'stl',  label: 'STL' },
   { key: 'blk',  label: 'BLK' },
-  { key: 'tov',  label: 'TOV' },
 ];
 
 function rankBg(rank: number): string {
@@ -71,10 +66,6 @@ function rankLabel(rank: number): string {
   if (rank === 3) return '3rd';
   return `${rank}th`;
 }
-
-// ---------------------------------------------------------------------------
-// Single team defense panel
-// ---------------------------------------------------------------------------
 
 function TeamDefensePanel({
   team,
@@ -101,7 +92,7 @@ function TeamDefensePanel({
 
       <div
         className="grid text-xs text-gray-500 font-medium mb-1 px-1"
-        style={{ gridTemplateColumns: '60px repeat(7, 1fr)' }}
+        style={{ gridTemplateColumns: '60px repeat(6, 1fr)' }}
       >
         <div />
         {STATS.map((s) => (
@@ -122,7 +113,7 @@ function TeamDefensePanel({
                 'w-full grid items-center text-xs rounded py-1.5 px-1 transition-colors hover:bg-gray-800/60',
                 isExpanded ? 'bg-gray-800/60' : '',
               ].join(' ')}
-              style={{ gridTemplateColumns: '60px repeat(7, 1fr)' }}
+              style={{ gridTemplateColumns: '60px repeat(6, 1fr)' }}
             >
               <div className="text-left">
                 <span className="text-gray-400 font-medium">{pos}</span>
@@ -202,10 +193,6 @@ function TeamDefensePanel({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
-
 export default function MatchupGrid({
   gameId,
   homeTeamAbbr,
@@ -238,7 +225,6 @@ export default function MatchupGrid({
   if (error)   return <div className="py-6 text-sm text-red-400">Error: {error}</div>;
   if (!data)   return null;
 
-  // Away team's players face the home defense, home team's players face the away defense
   const playersVsHomeDefense = data.lineup[awayTeamAbbr] ?? {};
   const playersVsAwayDefense = data.lineup[homeTeamAbbr] ?? {};
 
