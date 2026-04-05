@@ -20,14 +20,21 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ sport, date, games: [], note: 'only nba supported' });
   }
 
-  // For today's date, try the CDN via Flask for live scores and status.
-  // Only use CDN data when it has at least one live or upcoming game —
-  // if everything is Final the NBA game-day file has not rolled over yet
-  // and the DB has the correct upcoming schedule for tonight.
-  // For historical dates always use the DB.
+  // The DB (nba.schedule) is always the source of truth for the game list.
+  // Game dates are normalized to Central time by the ETL so they match exactly
+  // what the UI requests. DB is used for all dates including today.
+  //
+  // For today only, we additionally fetch the CDN scoreboard and overlay
+  // live scores/status onto any games that are currently in progress (status 2).
+  // The CDN is never used to determine the game list — only to update scores
+  // for games already in the DB that are currently live.
+  const games = await getGames(sport, date).catch((err) => {
+    throw new Error(err instanceof Error ? err.message : String(err));
+  });
+
   const isToday = date === todayCT();
 
-  if (isToday) {
+  if (isToday && games.length > 0) {
     try {
       const res = await fetch(`${RUNNER_URL}/scoreboard`, {
         headers: { 'X-Runner-Key': RUNNER_KEY },
@@ -35,47 +42,33 @@ export async function GET(req: NextRequest) {
       });
       if (res.ok) {
         const data = await res.json();
-        const cdnGames: any[] = data.games ?? [];
-
-        // Gate: only trust CDN when it has live (2) or upcoming (1) games.
-        // All-Final means the CDN is still showing yesterday's completed games
-        // and has not yet published tonight's schedule.
-        const hasActive = cdnGames.some(
-          (g: any) => g.gameStatus === 1 || g.gameStatus === 2
-        );
-
-        if (hasActive) {
-          const games = cdnGames.map((g: any) => ({
-            gameId:         g.gameId,
-            gameDate:       date,
-            gameStatus:     g.gameStatus,
-            gameStatusText: g.gameStatusText,
-            homeTeamId:     g.homeTeamId,
-            awayTeamId:     g.awayTeamId,
-            homeTeamAbbr:   g.homeTeamAbbr,
-            awayTeamAbbr:   g.awayTeamAbbr,
-            homeTeamName:   g.homeTeamAbbr,
-            awayTeamName:   g.awayTeamAbbr,
-            homeScore:      g.homeScore,
-            awayScore:      g.awayScore,
-            spread:         null,
-            total:          null,
-          }));
-          return NextResponse.json({ sport, date, games, source: 'cdn' });
+        const cdnByGameId = new Map<string, any>();
+        for (const g of (data.games ?? [])) {
+          cdnByGameId.set(g.gameId, g);
         }
-        // CDN is all-Final — fall through to DB
+
+        // Overlay CDN status/scores onto DB games that are live.
+        // Only update games that exist in the DB for today's date —
+        // CDN games that don't match a DB game ID are ignored entirely.
+        const merged = games.map((g) => {
+          const cdn = cdnByGameId.get(g.gameId);
+          if (!cdn) return g;
+          // Only overlay if CDN shows this game as live or has a more recent status
+          return {
+            ...g,
+            gameStatus:     cdn.gameStatus     ?? g.gameStatus,
+            gameStatusText: cdn.gameStatusText ?? g.gameStatusText,
+            homeScore:      cdn.homeScore      ?? g.homeScore,
+            awayScore:      cdn.awayScore      ?? g.awayScore,
+          };
+        });
+
+        return NextResponse.json({ sport, date, games: merged, source: 'db+cdn' });
       }
     } catch {
-      // Flask unreachable — fall through to DB
+      // Flask unreachable — return DB data as-is
     }
   }
 
-  // DB path: historical dates, CDN all-Final, or Flask unreachable.
-  try {
-    const games = await getGames(sport, date);
-    return NextResponse.json({ sport, date, games, source: 'db' });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  return NextResponse.json({ sport, date, games, source: 'db' });
 }
