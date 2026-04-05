@@ -6,35 +6,38 @@ const POS_GROUPS = ['G', 'F', 'C'] as const;
 type PosGroup = typeof POS_GROUPS[number];
 
 // Map full position strings to canonical group.
-// Falls back to 'G' for null or unrecognized values so no active player is silently dropped.
+// Handles NBA playerindex compound values: G, G-F, F, F-G, F-C, C, C-F, PG, SG, SF, PF.
+// Uses first component of compound positions so primary role drives the bucket.
+// e.g. F-G (primarily forward who plays guard) -> F, G-F -> G, C-F -> C.
 function posToGroup(pos: string | null): PosGroup {
   if (!pos) return 'G';
   const p = pos.toUpperCase().trim();
   if (p === 'PG' || p === 'SG' || p === 'G') return 'G';
   if (p === 'SF' || p === 'PF' || p === 'F') return 'F';
   if (p === 'C') return 'C';
-  // Handle compound positions like 'G-F', 'F-C' — use first component
+  // Compound positions — split on '-' and use first component
   const first = p.split('-')[0].trim();
   if (first === 'PG' || first === 'SG' || first === 'G') return 'G';
   if (first === 'SF' || first === 'PF' || first === 'F') return 'F';
   if (first === 'C') return 'C';
-  return 'G'; // fallback — better to show under G than to drop silently
+  return 'G';
 }
 
-// SQL equivalent of posToGroup — maps full position strings to G/F/C.
-// LEFT(position, 1) is WRONG: PG->P, SG->S, SF->S, PF->P, none match G/F.
-// This expression is used inline in CTEs that operate on nba.players.position.
-const POS_GROUP_SQL = `
-  CASE
-    WHEN p.position IN ('PG','SG','G') THEN 'G'
-    WHEN p.position IN ('SF','PF','F') THEN 'F'
-    WHEN p.position = 'C'             THEN 'C'
-    WHEN LEFT(p.position,2) IN ('PG','SG')        THEN 'G'
-    WHEN LEFT(p.position,2) IN ('SF','PF')        THEN 'F'
-    WHEN LEFT(p.position,1) = 'C'                 THEN 'C'
-    ELSE 'G'
-  END
-`;
+// SQL CASE expression equivalent to posToGroup().
+// Exact matches first, then LEFT(1) catches compound values like G-F, F-G, F-C, C-F.
+// LEFT(2) checks are intentionally omitted — they only match PG/SG/SF/PF which
+// are already covered by the exact IN() checks above them.
+// Must be repeated in pos_filtered, all_teams_defense SELECT, and GROUP BY.
+// Swap alias p -> p2 where needed.
+const POS_CASE = (col: string) => `CASE
+  WHEN ${col} IN ('PG','SG','G') THEN 'G'
+  WHEN ${col} IN ('SF','PF','F') THEN 'F'
+  WHEN ${col} = 'C'             THEN 'C'
+  WHEN LEFT(${col},1) = 'G'    THEN 'G'
+  WHEN LEFT(${col},1) = 'F'    THEN 'F'
+  WHEN LEFT(${col},1) = 'C'    THEN 'C'
+  ELSE 'G'
+END`;
 
 interface StatLine {
   avg: number;
@@ -107,6 +110,9 @@ export async function GET(req: NextRequest) {
 
     const { homeTeamId, awayTeamId, homeAbbr, awayAbbr } = gameRes.recordset[0];
 
+    const pCase  = POS_CASE('p.position');
+    const p2Case = POS_CASE('p2.position');
+
     const defRes = await pool.request()
       .input('homeTeamId', mssql.BigInt, homeTeamId)
       .input('awayTeamId', mssql.BigInt, awayTeamId)
@@ -144,15 +150,7 @@ export async function GET(req: NextRequest) {
         pos_filtered AS (
           SELECT
             gt.*,
-            CASE
-              WHEN p.position IN ('PG','SG','G') THEN 'G'
-              WHEN p.position IN ('SF','PF','F') THEN 'F'
-              WHEN p.position = 'C'             THEN 'C'
-              WHEN LEFT(p.position,2) IN ('PG','SG') THEN 'G'
-              WHEN LEFT(p.position,2) IN ('SF','PF') THEN 'F'
-              WHEN LEFT(p.position,1) = 'C'          THEN 'C'
-              ELSE 'G'
-            END AS pos_group
+            ${pCase} AS pos_group
           FROM game_totals gt
           JOIN nba.players p ON p.player_id = gt.player_id
           WHERE p.position IS NOT NULL
@@ -176,15 +174,7 @@ export async function GET(req: NextRequest) {
         all_teams_defense AS (
           SELECT
             gt2.opp_team_id,
-            CASE
-              WHEN p2.position IN ('PG','SG','G') THEN 'G'
-              WHEN p2.position IN ('SF','PF','F') THEN 'F'
-              WHEN p2.position = 'C'             THEN 'C'
-              WHEN LEFT(p2.position,2) IN ('PG','SG') THEN 'G'
-              WHEN LEFT(p2.position,2) IN ('SF','PF') THEN 'F'
-              WHEN LEFT(p2.position,1) = 'C'          THEN 'C'
-              ELSE 'G'
-            END AS pos_group,
+            ${p2Case} AS pos_group,
             AVG(CAST(gt2.pts  AS FLOAT)) AS avg_pts,
             AVG(CAST(gt2.reb  AS FLOAT)) AS avg_reb,
             AVG(CAST(gt2.ast  AS FLOAT)) AS avg_ast,
@@ -213,16 +203,7 @@ export async function GET(req: NextRequest) {
           ) gt2
           JOIN nba.players p2 ON p2.player_id = gt2.player_id
           WHERE p2.position IS NOT NULL
-          GROUP BY gt2.opp_team_id,
-            CASE
-              WHEN p2.position IN ('PG','SG','G') THEN 'G'
-              WHEN p2.position IN ('SF','PF','F') THEN 'F'
-              WHEN p2.position = 'C'             THEN 'C'
-              WHEN LEFT(p2.position,2) IN ('PG','SG') THEN 'G'
-              WHEN LEFT(p2.position,2) IN ('SF','PF') THEN 'F'
-              WHEN LEFT(p2.position,1) = 'C'          THEN 'C'
-              ELSE 'G'
-            END
+          GROUP BY gt2.opp_team_id, ${p2Case}
         ),
         ranked AS (
           SELECT
@@ -255,18 +236,21 @@ export async function GET(req: NextRequest) {
         WHERE tpd.pos_group IN ('G', 'F', 'C')
       `);
 
-    // Lineup query: join to nba.players to get the canonical position from
-    // nba.players.position, which is always a clean PG/SG/SF/PF/C value.
-    // nba.daily_lineups.position can contain nulls or non-standard strings
-    // from the preview endpoint — using nba.players as the source of truth
-    // ensures posToGroup() in TypeScript gets a clean value to work with.
+    // Lineup query: hybrid position resolution.
+    // Starters: use dl.position (game-specific from official NBA lineup JSON — PG/SG/SF/PF/C).
+    // Bench: use p.position from nba.players (canonical, may be compound like G-F).
+    // posToGroup() in TypeScript then maps both correctly to G/F/C.
     const lineupRes = await pool.request()
       .input('gameId', mssql.VarChar, gameId)
       .query<LineupPlayer & { teamTricode: string }>(`
         SELECT
-          p.player_id       AS playerId,
-          dl.player_name    AS playerName,
-          COALESCE(p.position, dl.position) AS position,
+          p.player_id    AS playerId,
+          dl.player_name AS playerName,
+          CASE
+            WHEN dl.starter_status = 'Starter' AND dl.position IS NOT NULL
+              THEN dl.position
+            ELSE COALESCE(p.position, dl.position)
+          END            AS position,
           dl.starter_status AS starterStatus,
           dl.lineup_status  AS lineupStatus,
           dl.team_tricode   AS teamTricode
@@ -302,7 +286,6 @@ export async function GET(req: NextRequest) {
     }
 
     // Build lineup keyed by teamTricode -> posGroup -> players[]
-    // posToGroup() never returns null — unknown positions fall back to 'G'
     const lineupByTeam: Record<string, Record<string, LineupPlayer[]>> = {};
     for (const row of lineupRes.recordset) {
       const tc = row.teamTricode;
