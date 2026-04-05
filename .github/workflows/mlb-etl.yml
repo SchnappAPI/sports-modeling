@@ -3,7 +3,16 @@ name: MLB Nightly ETL
 on:
   schedule:
     - cron: '0 9 * * *'   # UTC 09:00 = 03:00 CST / 04:00 CDT
-  workflow_dispatch:       # Manual trigger for backfill and testing
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Include historical seasons (2023-2025)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -23,4 +32,9 @@ jobs:
         run: echo "$HOME/venv/bin" >> $GITHUB_PATH
 
       - name: Run MLB ETL
-        run: python etl/mlb_etl.py
+        run: |
+          if [ "${{ github.event.inputs.backfill }}" = "true" ]; then
+            python etl/mlb_etl.py --backfill
+          else
+            python etl/mlb_etl.py
+          fi
