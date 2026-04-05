@@ -11,7 +11,7 @@
 
 ---
 
-## Current State (updated 2026-04-05 session 2)
+## Current State (updated 2026-04-05 session 3)
 
 **What is working:**
 - NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, grading all running.
@@ -25,9 +25,10 @@
 - Live box score fully working. Flask runner fetches NBA CDN, returns 36 players with correct stats. Score header in Live tab shows AWY score vs HME score + period/clock, refreshes every 30s. Green dot on players currently on court.
 - Flask runner: `/scoreboard` route returns today's game statuses from CDN without DB round trip. `/boxscore` route serves live player stats. `/ping` health check. All confirmed working via MCP.
 - Game strip for today: served via Flask CDN path — no DB, no cron dependency, always live-accurate. Fallback to DB if Flask unreachable.
-- Historical game strip: DB path now returns `homeScore`/`awayScore` from `nba.schedule`.
+- Game strip scores: live and final games now show scores in the card (awayScore @ homeScore, leading score brighter). Upcoming games still show spread/total. Historical game strip returns scores from DB.
 - Game status tracking: `nba_live.py` uses `todaysScoreboard_00.json` CDN — no proxy dependency.
 - Schnapp Ops MCP: 6 tools working. `live_scoreboard` confirmed returning correct game data.
+- Odds backfill run 23916639705 confirmed complete. NBA mappings dispatched (mode=mappings, sport=nba).
 
 **Known issues:**
 - `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
@@ -39,13 +40,11 @@
 - Game log prop coloring may use wrong line if alt line appears in gradeMap before standard line.
 - `dev` branch has stale merge conflict on `PlayerPageInner.tsx`. Close PR #29 without merging.
 - VM resize pending — downsize to B1s_v2 after trial credits expire.
-- Odds backfill: confirm run 23916639705 completion, then run mappings (mode=mappings, sport=nba).
 - At a Glance duplicate prop rows: standard vs alt market keys both abbreviating to same label in UI.
-- **PENDING:** `nba-game-day.yml` cron gap — 22:00-23:59 UTC (5-7pm ET) not covered. Game strip now unaffected (uses Flask CDN). But odds/grading/lineup still miss this window. Fix: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`.
+- **PENDING:** `nba-game-day.yml` cron gap — 22:00-23:59 UTC (5-7pm ET) not covered. Game strip now unaffected (uses Flask CDN). But odds/grading/lineup still miss this window. Fix: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`. Edit directly on GitHub.com.
 
 **Next up:**
 - Fix `nba-game-day.yml` cron gap: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`. Edit directly on GitHub.com.
-- Confirm odds backfill run 23916639705 status. If complete, run NBA mappings (mode=mappings, sport=nba).
 - At a Glance duplicate prop row fix (display layer — market key abbreviation collision).
 - Re-enable PasscodeGate (BYPASS = false) before sharing with users.
 - MLB ETL wiring, web views, grading backfill.
@@ -288,6 +287,12 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 - Player rows: green dot on `oncourt` players. `starter` boolean from CDN (not from DB lineup).
 - Starters/Bench sections based on CDN `starter` field. Refreshes every 30s.
 
+**Game strip (`GameStrip.tsx`):**
+- Live/Final with scores: shows `awayScore awayAbbr @ homeAbbr homeScore`. Leading score `text-gray-100`, trailing `text-gray-500`. Home wins ties for brightness.
+- Upcoming: shows `AWY @ HME` matchup row + spread/total row below.
+- `Game` interface includes `homeScore`, `awayScore`, `period`, `gameClock` (all nullable).
+- Do not revert to spread-only display for live/final games.
+
 **Matchups tab (`MatchupGrid.tsx` + `/api/matchup-grid`):**
 - Two defense panels side by side (away defense left, home defense right).
 - Rows: G / F / C position groups. Columns: PTS, REB, AST, 3PM, STL, BLK, TOV.
@@ -374,6 +379,7 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | CDN scoreboard replaces ScoreboardV3 in nba_live.py | todaysScoreboard_00.json is public CDN, no proxy. ScoreboardV3 required Webshare proxy — any proxy hiccup broke game status tracking. Same data, better reliability. |
 | /api/games uses Flask CDN for today, DB for historical | Flask /scoreboard returns live CDN data with no DB round trip — eliminates cron gap problem for game strip. Historical dates still need DB (CDN only has today). 5s timeout with DB fallback. |
 | homeScore/awayScore added to GameRow and getGames | nba.schedule already stored scores from nba_live.py writes. They were never returned to the app. Historical game strip now shows final scores. |
+| GameStrip shows scores not odds for live/final games | Spread and total are null for today (Flask path has no odds data). Scores are the useful signal during and after games. |
 | MCP auth via Cloudflare tunnel, not bearer token | claude.ai connector UI only supports OAuth fields, not arbitrary bearer tokens. Cloudflare tunnel credential already secures the endpoint — adding a bearer token layer is redundant. |
 | GH_PAT not GITHUB_PAT as secret name | GitHub reserves the GITHUB_ prefix for built-in secrets. Workflow inputs are also not masked in logs — always use repo secrets for tokens. |
 | Player headshot from CDN, client-side only | No ETL needed. URL pattern is `cdn.nba.com/headshots/nba/latest/260x190/{player_id}.png`. CDN returns silhouette placeholder for missing players — no error handling required. |
