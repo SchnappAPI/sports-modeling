@@ -17,7 +17,8 @@ name: NBA Game Day
 on:
   schedule:
     - cron: '30 9 * * *'        # UTC 09:30 daily — overnight backfill
-    - cron: '*/30 0-6 * * *'    # UTC 00:00-06:00 — late-game backfill
+    - cron: '*/15 0-6 * * *'    # UTC 00:00-06:00 — late-game backfill
+    - cron: '*/15 22-23 * * *'
   workflow_dispatch:
     inputs:
       skip_gate:
