@@ -1,7 +1,5 @@
 """
-db_inventory.py — diagnostic script placeholder.
-Replace this content with whatever query you need to run, then trigger
-db_inventory.yml via workflow_dispatch.
+db_inventory.py — temporary: list all columns in mlb.batting_stats and mlb.pitching_stats
 """
 import os
 import pyodbc
@@ -26,7 +24,16 @@ CONN_STR = (
 conn   = pyodbc.connect(CONN_STR)
 cursor = conn.cursor()
 
-cursor.execute("SELECT 'DB connection OK' AS status")
-print(cursor.fetchone()[0])
+for table in ("batting_stats", "pitching_stats"):
+    cursor.execute("""
+        SELECT COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = ?
+        ORDER BY ORDINAL_POSITION
+    """, table)
+    rows = cursor.fetchall()
+    print(f"\n=== mlb.{table} ({len(rows)} columns) ===")
+    for r in rows:
+        print(f"  {r[0]}  ({r[1]})")
 
 conn.close()
