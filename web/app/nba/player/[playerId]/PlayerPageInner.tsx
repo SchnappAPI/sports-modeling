@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import MatchupDefense from '@/components/MatchupDefense';
+import { getTeamPrimary } from '@/lib/teams';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -218,6 +219,25 @@ function LineupStatusBadge({
     <span className={`text-xs border rounded px-1.5 py-0.5 leading-none ${cls}`}>
       {label}
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Player headshot
+// ---------------------------------------------------------------------------
+
+function PlayerHeadshot({ playerId, size = 36 }: { playerId: string; size?: number }) {
+  const [visible, setVisible] = useState(true);
+  if (!visible) return null;
+  return (
+    <img
+      src={`https://cdn.nba.com/headshots/nba/latest/260x190/${playerId}.png`}
+      alt=""
+      width={size}
+      height={Math.round(size * 190 / 260)}
+      onError={() => setVisible(false)}
+      style={{ borderRadius: '50%', objectFit: 'cover', objectPosition: 'top', flexShrink: 0 }}
+    />
   );
 }
 
@@ -769,7 +789,6 @@ function GameTeamSelector({
         onChange={(e) => {
           const g = games.find((x) => x.gameId === e.target.value);
           if (!g) return;
-          // Navigate to current player but with new gameId
           router.push(`/nba/player/${currentPlayerId}?${buildParams(g.gameId, currentPlayerId)}`);
         }}
         className="bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1 outline-none cursor-pointer"
@@ -787,14 +806,14 @@ function GameTeamSelector({
         disabled={loadingTeam !== null}
         className="px-2.5 py-1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
       >
-        {loadingTeam === activeGame.awayTeamId ? '…' : activeGame.awayTeamAbbr}
+        {loadingTeam === activeGame.awayTeamId ? '...' : activeGame.awayTeamAbbr}
       </button>
       <button
         onClick={() => navigateToTeam(activeGame.homeTeamId, activeGame.gameId)}
         disabled={loadingTeam !== null}
         className="px-2.5 py-1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
       >
-        {loadingTeam === activeGame.homeTeamId ? '…' : activeGame.homeTeamAbbr}
+        {loadingTeam === activeGame.homeTeamId ? '...' : activeGame.homeTeamAbbr}
       </button>
     </div>
   );
@@ -839,6 +858,19 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [todayGames, setTodayGames] = useState<TodayGame[]>([]);
 
   const isFullGame = selectedPeriods.size === 0;
+
+  // Derive the player's own team tricode from todayGames + playerInfo.teamId
+  const playerTeamTricode = useMemo(() => {
+    if (!playerInfo.teamId || todayGames.length === 0) return null;
+    for (const g of todayGames) {
+      if (g.homeTeamId === playerInfo.teamId) return g.homeTeamAbbr.toLowerCase();
+      if (g.awayTeamId === playerInfo.teamId) return g.awayTeamAbbr.toLowerCase();
+    }
+    return null;
+  }, [playerInfo.teamId, todayGames]);
+
+  // Team primary color for the left border accent on the header
+  const teamColor = playerTeamTricode ? getTeamPrimary(playerTeamTricode) : null;
 
   // Fetch today's games for the game/team selector
   useEffect(() => {
@@ -1079,8 +1111,14 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   return (
     <div className="flex flex-col min-h-screen">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap">
+      <div
+        className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap"
+        style={teamColor ? { borderLeftWidth: 3, borderLeftColor: teamColor, borderLeftStyle: 'solid' } : undefined}
+      >
         <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm flex-none">&#8592;</Link>
+
+        {/* Headshot */}
+        <PlayerHeadshot playerId={playerId} size={32} />
 
         {/* Player name / team dropdown */}
         {teamPlayers.length > 0 ? (
