@@ -9,6 +9,30 @@
 
 ---
 
+## 2026-04-04 (session 8)
+
+### ETL | etl/runner.py — added homeScore, awayScore, homeTeamAbbr, awayTeamAbbr to /boxscore response
+- CDN response already contains `homeTeam.score` and `awayTeam.score`. Now extracted and returned.
+- `homeTeamAbbr` and `awayTeamAbbr` added alongside scores for use in the UI score header.
+- No changes to player data shape.
+
+### UI | web/components/LiveBoxScore.tsx — live score header added
+- Added `ScoreHeader` component displayed above the player tables.
+- Shows: away team abbr + score (left), pulsing red Live dot + period/clock text (center), home team abbr + score (right).
+- Leading team's score renders brighter (`text-gray-100`), trailing team dimmed (`text-gray-400`).
+- Scores and clock refresh every 30 seconds with the rest of the poll.
+- Also switched `starter` detection from `starterStatus === 'Starter'` (old DB-backed field) to `p.starter` boolean (from CDN via Flask). Added green dot indicator for `oncourt` players.
+- `LiveData` interface updated with `homeTeamAbbr`, `awayTeamAbbr`, `homeScore`, `awayScore`.
+
+### Infra | .github/workflows/nba-game-day.yml — cron gap identified, fix NOT yet committed
+- Current schedule only covers 09:30 UTC daily + 00:00-06:00 UTC every 30 min.
+- Gap: 22:00-23:59 UTC (5-7pm ET) — evening tip-offs like DET@PHI at 6pm CT are not caught automatically.
+- Fix required: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`.
+- NOT committed this session. Must be done manually on GitHub.com or via next session.
+- Do not forget this fix — without it, Live tab won't appear for evening games unless Refresh Data is tapped manually after tip-off.
+
+---
+
 ## 2026-04-04 (session 7)
 
 ### ETL | etl/nba_live.py — switched to NBA CDN endpoint, removed DB write for live box scores
@@ -336,7 +360,7 @@
 - Toggle button right-aligned in period filter bar.
 
 ### API | web/app/api/team-averages/route.ts — avgFtm, avgFta
-- Added `AVG(CAST(r.ftm AS FLOAT)) AS avgFtm` and `AVG(CAST(r.fta AS FLOAT)) AS avgFta` to SELECT.
+- Added `AVG(CAST(r.ftm AS FLOAT)) AS avgFtm` and `AVG(CAST(r.fta AS FLOAT)) AS avgFtm` to SELECT.
 - Required by StatsTable FT column in all-stats mode.
 
 ### UI | web/components/MatchupDefense.tsx — column order
