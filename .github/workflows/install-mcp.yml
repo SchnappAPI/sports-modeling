@@ -16,7 +16,7 @@ jobs:
           ~/mcp-venv/bin/pip install --quiet --upgrade pip
           ~/mcp-venv/bin/pip install --quiet -r mcp/requirements.txt
           echo "MCP venv ready"
-          ~/mcp-venv/bin/python -c "from mcp.server.fastmcp import FastMCP; mcp = FastMCP('test'); app = mcp.http_app(); print('FastMCP http_app OK')"
+          ~/mcp-venv/bin/python -c "from mcp.server.fastmcp import FastMCP; mcp = FastMCP('test'); print('FastMCP import OK')"
 
       - name: Write systemd service file
         env:
@@ -34,7 +34,7 @@ jobs:
           Type=simple
           User=schnapp-admin
           WorkingDirectory=/home/schnapp-admin/actions-runner/_work/sports-modeling/sports-modeling
-          ExecStart=/home/schnapp-admin/mcp-venv/bin/uvicorn mcp.server:app --host 127.0.0.1 --port 8000
+          ExecStart=/home/schnapp-admin/mcp-venv/bin/python mcp/server.py
           Environment="MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}"
           Environment="RUNNER_API_KEY=${RUNNER_API_KEY}"
           Environment="GH_PAT=${GH_PAT}"
@@ -73,6 +73,6 @@ jobs:
       - name: Smoke test MCP server
         run: |
           sleep 2
-          STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/)
-          echo "MCP server HTTP status: $STATUS"
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/mcp)
+          echo "MCP server HTTP status: $STATUS (expect 405 or 200 — both mean server is up)"
           echo "Installation complete. Next step: set up Cloudflare Tunnel (see mcp/README.md)"

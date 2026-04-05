@@ -3,7 +3,7 @@ schnapp_mcp/server.py
 
 Remote MCP server for schnapp.bet operational tools.
 Runs on the schnapp-runner VM alongside the Flask runner.
-Exposed to Claude via Cloudflare Tunnel.
+Exposed to Claude via Cloudflare Tunnel at https://mcp.schnapp.bet/mcp
 
 Tools:
   flask_status     -- Is the Flask service running?
@@ -13,8 +13,9 @@ Tools:
   workflow_trigger -- Trigger a GitHub Actions workflow by filename.
   workflow_status  -- Check the last run status of a workflow.
 
-Start: uvicorn mcp.server:app --host 127.0.0.1 --port 8000
+Start: python mcp/server.py
 Managed by: systemd (schnapp-mcp.service)
+Transport: streamable-http on port 8000
 """
 
 import os
@@ -33,9 +34,6 @@ mcp = FastMCP(
     name="schnapp-ops",
     instructions="Operational tools for schnapp.bet: Flask service management, live NBA data, and GitHub Actions workflow control.",
 )
-
-# Expose ASGI app for uvicorn
-app = mcp.http_app()
 
 
 # ---------------------------------------------------------------------------
@@ -170,3 +168,7 @@ def workflow_status(workflow_filename: str) -> dict:
         "url": r.get("html_url"),
         "triggered_by": r.get("event"),
     }
+
+
+if __name__ == "__main__":
+    mcp.run(transport="streamable-http", host="127.0.0.1", port=8000)
