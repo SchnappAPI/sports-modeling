@@ -3,11 +3,13 @@
 -- Adds enhanced hitting box score columns to mlb.batting_stats.
 -- Sourced from liveData.boxscore.teams.{side}.players in the /withMetrics endpoint.
 -- Safe to run multiple times: each ALTER uses IF NOT EXISTS guard via INFORMATION_SCHEMA check.
--- Run once manually via a GitHub Actions dispatch before deploying the updated mlb_etl.py.
---
--- Columns added (matching fnGetHittingBoxScore.pq fields not in the original schema):
---   fly_outs, ground_outs, air_outs, pop_outs, line_outs,
---   total_bases, games_played, plate_appearances
+
+-- intentional_walks
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'batting_stats' AND COLUMN_NAME = 'intentional_walks'
+)
+    ALTER TABLE mlb.batting_stats ADD intentional_walks INT NULL;
 
 -- fly_outs
 IF NOT EXISTS (
