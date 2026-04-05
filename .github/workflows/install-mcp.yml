@@ -1,0 +1,81 @@
+name: Install MCP Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      mcp_auth_token:
+        description: 'Bearer token Claude will use to authenticate (choose something strong)'
+        required: true
+        type: string
+
+jobs:
+  install:
+    runs-on: [self-hosted, schnapp-runner]
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Create MCP venv and install dependencies
+        run: |
+          python3 -m venv ~/mcp-venv
+          ~/mcp-venv/bin/pip install --quiet --upgrade pip
+          ~/mcp-venv/bin/pip install --quiet -r mcp/requirements.txt
+          echo "MCP venv ready"
+
+      - name: Write systemd service file
+        env:
+          MCP_AUTH_TOKEN: ${{ inputs.mcp_auth_token }}
+          RUNNER_API_KEY: runner-Lake4971
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+        run: |
+          sudo tee /etc/systemd/system/schnapp-mcp.service > /dev/null << EOF
+          [Unit]
+          Description=Schnapp MCP Server
+          After=network.target schnapp-flask.service
+          Wants=schnapp-flask.service
+
+          [Service]
+          Type=simple
+          User=schnapp-admin
+          WorkingDirectory=/home/schnapp-admin/actions-runner/_work/sports-modeling/sports-modeling
+          ExecStart=/home/schnapp-admin/mcp-venv/bin/uvicorn mcp.server:mcp --host 127.0.0.1 --port 8000
+          Environment="MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}"
+          Environment="RUNNER_API_KEY=${RUNNER_API_KEY}"
+          Environment="GITHUB_PAT=${GITHUB_PAT}"
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+      - name: Enable and start MCP service
+        run: |
+          sudo systemctl daemon-reload
+          sudo systemctl enable schnapp-mcp.service
+          sudo systemctl restart schnapp-mcp.service
+          sleep 3
+          sudo systemctl status schnapp-mcp.service --no-pager
+
+      - name: Install Cloudflare tunnel binary
+        run: |
+          if ! command -v cloudflared &> /dev/null; then
+            curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-main.gpg
+            echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
+            sudo apt-get update -qq
+            sudo apt-get install -y cloudflared
+            echo "cloudflared installed: $(cloudflared --version)"
+          else
+            echo "cloudflared already installed: $(cloudflared --version)"
+          fi
+
+      - name: Add MCP service to sudoers
+        run: |
+          echo 'schnapp-admin ALL=(ALL) NOPASSWD: /bin/systemctl restart schnapp-mcp.service, /bin/systemctl status schnapp-mcp.service, /bin/systemctl restart schnapp-flask.service, /bin/systemctl status schnapp-flask.service' | sudo tee /etc/sudoers.d/schnapp-services
+
+      - name: Smoke test MCP server
+        run: |
+          sleep 2
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/)
+          echo "MCP server HTTP status: $STATUS"
+          echo "Installation complete. Next step: set up Cloudflare Tunnel (see mcp/README.md)"
