@@ -9,6 +9,78 @@
 
 ---
 
+## 2026-04-05
+
+### ETL | etl/nba_live.py — replaced ScoreboardV3 proxy call with CDN scoreboard
+- `update_schedule()` now fetches `https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json` instead of `stats.nba.com/stats/scoreboardv3` via Webshare proxy.
+- CDN endpoint is public, no proxy, no special headers. Response shape is identical: `scoreboard.games[]` with `gameId`, `gameStatus`, `gameStatusText`, `homeTeam.score`, `awayTeam.score`.
+- `get_proxies` and `NBA_HEADERS` imports removed from this file — no longer needed.
+- Eliminates proxy dependency for game status tracking entirely. Any proxy hiccup no longer breaks game status transitions.
+- Do not revert to ScoreboardV3 — CDN is faster, always available, and proxy-free.
+
+### ETL | etl/runner.py — added /scoreboard route
+- New `/scoreboard` GET endpoint fetches `todaysScoreboard_00.json` from CDN and returns a trimmed game list.
+- Returns per game: `gameId`, `gameStatus`, `gameStatusText`, `period`, `gameClock`, `homeTeamId`, `homeTeamAbbr`, `homeScore`, `awayTeamId`, `awayTeamAbbr`, `awayScore`.
+- Requires `X-Runner-Key` auth header same as `/boxscore`.
+- Enables the web app to get live game statuses directly from the VM without a DB round trip.
+- Runner was restarted via the new `restart-flask.yml` workflow to pick up this change.
+
+### Infra | .github/workflows/restart-flask.yml — NEW workflow
+- `workflow_dispatch` only. Runs on `[self-hosted, schnapp-runner]`.
+- Steps: restart `schnapp-flask.service`, wait 3s, check status, smoke test `/ping`.
+- Allows Flask restart from GitHub Actions UI or GitHub mobile app without SSH.
+- Sudoers rule updated to allow passwordless `systemctl restart/status` for both Flask and MCP services.
+
+### UI | web/lib/teams.ts — NEW static team colors file
+- All 30 NBA teams keyed by lowercase tricode. Contains `teamId`, `teamCity`, `teamName`, `conference`, `division`, `colors` (primaryLight/Dark, secondaryLight/Dark, tertiaryLight/Dark).
+- Exports `getTeamInfo(tricode)`, `getTeamPrimary(tricode)`, `getTeamSecondary(tricode)`.
+- No ETL needed — static data from NBA core-api team details endpoint captured 2026-04-05.
+- Used by player page header for team color accent and headshot.
+
+### UI | web/app/nba/player/[playerId]/PlayerPageInner.tsx — headshot + team color accent + lineup position fix
+- Added `PlayerHeadshot` component: fetches `https://cdn.nba.com/headshots/nba/latest/260x190/{playerId}.png`, hides on `onError`. Small circular image in the page header.
+- Added team color left border on the header div using `getTeamPrimary()`. Color derived by matching `playerInfo.teamId` against `todayGames`. Only shows when player has a game today.
+- Added `gameLineupPosition` to `PlayerInfo` interface. Resolved position for `MatchupDefense` now prefers `gameLineupPosition` (precise PG/SG/SF/PF/C from today's lineup) over `playerInfo.position` (compound value like G-F from nba.players).
+- `matchupPosition = gameLineupPosition ?? position` — cleaner apples-to-apples defense comparison.
+- Team pill loading placeholders changed from `…` (em dash) to `...` (ASCII) to avoid push_files Unicode corruption risk.
+
+### API | web/app/api/player/route.ts — added gameLineupPosition to response
+- Lineup query now also fetches `dl.position AS lineupPosition` from `nba.daily_lineups`.
+- Returns `gameLineupPosition` in the response alongside existing `gameLineupStatus` and `gameStarterStatus`.
+- Starters get precise game-specific position (PG/SG/SF/PF/C from official NBA lineup JSON). Bench players may get null (falls back to nba.players.position).
+
+### API | web/app/api/matchup-grid/route.ts — fixed compound position grouping + hybrid lineup position
+- Replaced all `LEFT(position, 1)` and `LEFT(position, 2)` CASE expressions with correct logic using `LEFT(position, 1) IN ('G','F','C')` after exact IN() matches.
+- Fixes: `F-G` was falling through to `ELSE 'G'` (wrong). Now `LEFT('F-G', 1) = 'F'` correctly maps to F.
+- Lineup query updated to use hybrid position: starters get `dl.position` (game-specific, precise), bench players get `COALESCE(p.position, dl.position)` (canonical from nba.players).
+- This is the apples-to-apples fix — an F-G player defending against F defense stats, not G.
+- Bug was present since the matchup grid was built. The position grouping for defense stats was completely wrong for G and F rows (all P/S values from LEFT(1) never matched 'G' or 'F').
+- Do not revert to LEFT(position, 1) or LEFT(position, 2) approaches.
+
+### Infra | mcp/ — NEW Schnapp Ops MCP server
+- `mcp/server.py`: FastMCP server with 6 tools: `flask_status`, `flask_restart`, `live_scoreboard`, `live_boxscore`, `workflow_trigger`, `workflow_status`.
+- `mcp/requirements.txt`: `mcp==1.9.0`, `requests==2.33.1`.
+- Runs as `schnapp-mcp.service` systemd service on the VM, port 8000, bound to 127.0.0.1.
+- Exposed via Cloudflare Tunnel at `https://mcp.schnapp.bet/mcp`. Tunnel ID: `6725bd14-5cd9-480a-8420-618f50e96b69`. DNS CNAME `mcp.schnapp.bet` created automatically.
+- Added as custom connector in claude.ai Settings > Connectors. All 6 tools confirmed working via live test (`flask_status` returned correct systemd output).
+- `GH_PAT` and `MCP_AUTH_TOKEN` stored as GitHub Actions repo secrets (not `GITHUB_PAT` — reserved namespace).
+- Key lesson: `host`/`port` must be passed to `FastMCP()` constructor in mcp==1.9.0, not to `mcp.run()`. `mcp.run(transport="streamable-http")` with no host/port arg is the correct call pattern.
+- Key lesson: workflow input fields are NOT masked in logs — use repo secrets for tokens, never workflow_dispatch inputs.
+
+### Infra | .github/workflows/install-mcp.yml — NEW workflow
+- Installs MCP server on the VM: creates `~/mcp-venv`, installs deps, writes systemd service file, enables and starts `schnapp-mcp.service`, installs `cloudflared` binary, updates sudoers.
+- `workflow_dispatch` only. Reads `MCP_AUTH_TOKEN` and `GH_PAT` from repo secrets (never from inputs).
+- Re-run this workflow after any change to `mcp/server.py` to redeploy the service.
+
+### Docs | session notes — CDN scoreboard, MCP, matchup position fixes
+- Confirmed `todaysScoreboard_00.json` CDN endpoint is accessible from GitHub Actions and VM with no proxy or auth. Same CDN domain as boxscore endpoint.
+- `core-api.nba.com` (gamecardfeed, rollingschedule, team details) returns 403 from non-browser clients. Do not attempt to use these from Actions or VM.
+- Player headshots: `https://cdn.nba.com/headshots/nba/latest/260x190/{player_id}.png` — CDN returns silhouette placeholder for missing players, no error handling needed.
+- Remote MCP via claude.ai connector UI does not support bearer token auth — only OAuth client ID/secret fields. Token auth is redundant anyway since the Cloudflare tunnel credential already secures access.
+- Claude mobile app supports remote MCP connectors added via claude.ai — tools available from phone once connector is configured.
+
+---
+
 ## 2026-04-04 (session 8)
 
 ### ETL | etl/runner.py — added homeScore, awayScore, homeTeamAbbr, awayTeamAbbr to /boxscore response
