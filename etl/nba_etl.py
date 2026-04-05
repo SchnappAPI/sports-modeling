@@ -61,7 +61,7 @@ import math
 import os
 import time
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 from collections import defaultdict
 
 import pandas as pd
@@ -88,6 +88,13 @@ RETRY_COUNT            = 3
 RETRY_WAIT_TIMEOUT     = 30
 RETRY_WAIT_500         = 60
 PT_STATS_BETWEEN_DELAY = 5
+
+# Central time: CDT (UTC-5) applies Mar-Nov, CST (UTC-6) applies Nov-Mar.
+# We use a fixed UTC-5 offset (CDT) since the NBA season runs Oct-Jun and
+# nearly all late-night games that cross midnight UTC occur during CDT.
+# A game at 10pm CT = 3am UTC next day would be stored under the correct
+# CT date rather than the following calendar date.
+CT_OFFSET = timezone(timedelta(hours=-5))
 
 NBA_HEADERS = {
     "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -597,7 +604,7 @@ def load_schedule(engine, season):
     for gd_block in data.get("leagueSchedule", {}).get("gameDates", []):
         raw_date = gd_block.get("gameDate", "")
         try:
-            game_date = datetime.strptime(raw_date[:10], "%m/%d/%Y").date()
+            block_date = datetime.strptime(raw_date[:10], "%m/%d/%Y").date()
         except (ValueError, TypeError):
             continue
 
@@ -625,6 +632,21 @@ def load_schedule(engine, season):
                 home_id = None
             if away_id == 0:
                 away_id = None
+
+            # Derive game_date from gameDateTimeUTC converted to Central time.
+            # The NBA's scheduleleaguev2 block date uses Eastern time, which can
+            # differ from Central time for late-night games. A 10pm CT tip-off
+            # (3am UTC next day) would be stored under the wrong date if we used
+            # the block date. Converting UTC -> CT gives the correct local date.
+            # Falls back to the block date if gameDateTimeUTC is absent.
+            game_date = block_date
+            utc_str = safe_str(g.get("gameDateTimeUTC"))
+            if utc_str:
+                try:
+                    utc_dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
+                    game_date = utc_dt.astimezone(CT_OFFSET).date()
+                except (ValueError, AttributeError):
+                    pass
 
             row = {
                 "game_id":           safe_str(g.get("gameId")),
@@ -903,9 +925,6 @@ def fetch_lineups_for_game_date(game_date):
                 pos    = safe_str(p.get("position"))
                 roster = safe_str(p.get("rosterStatus"))
                 lineup = safe_str(p.get("lineupStatus")) or ""
-                # Use lineupStatus to detect game-night unavailability regardless
-                # of rosterStatus. Active roster players listed Out, Inactive, or
-                # Not With Team must not appear as Bench in the UI.
                 if any(kw in lineup.lower() for kw in INACTIVE_LINEUP_KEYWORDS):
                     starter = "Inactive"
                 elif pos:
