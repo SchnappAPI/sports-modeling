@@ -9,6 +9,70 @@
 
 ---
 
+## 2026-04-05 (session 2)
+
+### ETL | etl/nba_live.py — replaced ScoreboardV3 proxy call with CDN scoreboard
+- `update_schedule()` now fetches `https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json` instead of `stats.nba.com/stats/scoreboardv3` via Webshare proxy.
+- CDN endpoint is public, no proxy, no special headers. Response shape is identical: `scoreboard.games[]` with `gameId`, `gameStatus`, `gameStatusText`, `homeTeam.score`, `awayTeam.score`.
+- `get_proxies` and `NBA_HEADERS` imports removed from this file — no longer needed here.
+- Eliminates proxy dependency for game status tracking entirely.
+- Do not revert to ScoreboardV3 — CDN is faster, always available, and proxy-free.
+
+### ETL | etl/runner.py — added /scoreboard route
+- New `/scoreboard` GET endpoint fetches `todaysScoreboard_00.json` from CDN and returns trimmed game list.
+- Returns per game: `gameId`, `gameStatus`, `gameStatusText`, `period`, `gameClock`, `homeTeamId`, `homeTeamAbbr`, `homeScore`, `awayTeamId`, `awayTeamAbbr`, `awayScore`.
+- Requires `X-Runner-Key` auth header same as `/boxscore`.
+- Enables `/api/games` to bypass the DB entirely for today's games.
+- Runner was updated via `git pull` on the VM and restarted. Confirmed live via MCP `live_scoreboard` tool.
+
+### API | web/app/api/games/route.ts — Flask CDN path for today, DB for historical
+- Today's date: calls Flask `/scoreboard` (live CDN, no DB, no cron dependency). 5s timeout with silent fallback to DB if Flask unreachable.
+- Any other date: queries DB via `getGames()` as before.
+- Eliminates the cron gap problem for the game strip — status is always current regardless of when `nba-game-day.yml` last ran.
+- Historical scores now also returned via DB path (see queries.ts change below).
+- `todayET()` helper computes today's date in ET (NBA calendar day) rather than UTC, avoiding midnight boundary issues.
+- Flask response mapped to `GameRow` shape. `homeTeamName`/`awayTeamName` fall back to abbr (Flask does not have team names). Spread/total are null for today via Flask path.
+- Do not revert to DB-only for today — the CDN path is strictly better for live accuracy.
+
+### API | web/lib/queries.ts — added homeScore/awayScore to GameRow and getGames
+- `GameRow` interface: added `homeScore: number | null` and `awayScore: number | null`.
+- `getGames` SQL: added `s.home_score AS homeScore` and `s.away_score AS awayScore` to SELECT.
+- These columns are written by `nba_live.py` every cycle and persist after games go Final.
+- Historical game pages can now show final scores in the game strip.
+
+### UI | web/lib/teams.ts — NEW static team colors file
+- All 30 NBA teams keyed by lowercase tricode. Contains `teamId`, `teamCity`, `teamName`, `conference`, `division`, `colors` (primaryLight/Dark, secondaryLight/Dark, tertiaryLight/Dark).
+- Exports `getTeamInfo(tricode)`, `getTeamPrimary(tricode)`, `getTeamSecondary(tricode)`.
+- No ETL needed — static data from NBA core-api team details endpoint.
+- Used by player page header for team color accent.
+
+### UI | web/app/nba/player/[playerId]/PlayerPageInner.tsx — headshot + team color + lineup position
+- Added `PlayerHeadshot` component: fetches `https://cdn.nba.com/headshots/nba/latest/260x190/{playerId}.png`, hides on `onError`.
+- Added team color left border on header using `getTeamPrimary()`. Derived from `todayGames` + `playerInfo.teamId`.
+- Added `gameLineupPosition` to `PlayerInfo` interface. `matchupPosition = gameLineupPosition ?? position` used for `MatchupDefense`. Prefers precise PG/SG/SF/PF/C from today's lineup over compound G-F from nba.players.
+- Team pill loading placeholders use `...` (ASCII) not `…` to avoid push_files Unicode corruption.
+
+### API | web/app/api/player/route.ts — added gameLineupPosition to response
+- Lineup query now fetches `dl.position AS lineupPosition` from `nba.daily_lineups`.
+- Returns `gameLineupPosition` alongside `gameLineupStatus` and `gameStarterStatus`.
+- Starters get precise game-specific position. Bench may get null (falls back to nba.players.position).
+
+### API | web/app/api/matchup-grid/route.ts — fixed compound position grouping + hybrid lineup position
+- Replaced all `LEFT(position, 1)` CASE expressions with correct `POS_CASE()` helper.
+- Exact IN() matches for PG/SG/SF/PF/C/G/F first, then `LEFT(col,1) IN ('G','F','C')` for compounds.
+- Fixes: `F-G` was falling to `ELSE 'G'` (wrong). Now maps correctly to F via `LEFT('F-G',1) = 'F'`.
+- Lineup query: starters use `dl.position` (game-specific), bench uses `COALESCE(p.position, dl.position)`.
+- This is the apples-to-apples fix — primary position drives the defense bucket, not first character of compound.
+- Do not revert to LEFT(position,1) or LEFT(position,2) for grouping.
+
+### Docs | session notes — architecture clarification
+- Game strip for today now served entirely by Flask/CDN. `nba-game-day.yml` cron gap no longer affects game strip status accuracy.
+- `nba-game-day.yml` still needed for: odds ETL, grading, lineup poll, DB schedule writes (required for historical queries, matchup grid, player game log).
+- Cron gap fix (`*/15 22-23 * * *` in `nba-game-day.yml`) is still pending — matters for odds/grading/lineup during that window, not game strip.
+- Historical games get scores from `nba.schedule.home_score`/`away_score` via DB path in `/api/games`.
+
+---
+
 ## 2026-04-05
 
 ### ETL | etl/nba_live.py — replaced ScoreboardV3 proxy call with CDN scoreboard
@@ -101,7 +165,7 @@
 - Gap: 22:00-23:59 UTC (5-7pm ET) — evening tip-offs like DET@PHI at 6pm CT are not caught automatically.
 - Fix required: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`.
 - NOT committed this session. Must be done manually on GitHub.com or via next session.
-- Do not forget this fix — without it, Live tab won't appear for evening games unless Refresh Data is tapped manually after tip-off.
+- Do not forget this fix — without it, odds/grading/lineup won't run for evening games until 7pm ET cron kicks in.
 
 ---
 
