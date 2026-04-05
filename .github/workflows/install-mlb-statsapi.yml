@@ -1,0 +1,17 @@
+name: Install MLB statsapi on runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  install:
+    runs-on: [self-hosted, schnapp-runner]
+    steps:
+      - name: Activate venv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Install mlb-statsapi
+        run: pip install mlb-statsapi==1.7.2
+
+      - name: Verify
+        run: python -c "import statsapi; print('statsapi OK')"
