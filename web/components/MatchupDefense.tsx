@@ -11,7 +11,8 @@ interface StatLine {
 interface MatchupData {
   oppTeamId: number;
   oppTeamAbbr: string;
-  position: string;
+  position: string;    // raw position passed in (e.g. 'SG' or 'G-F')
+  posGroup: string;    // resolved group used for the query: 'G' | 'F' | 'C'
   gamesDefended: number;
   pts: StatLine;
   reb: StatLine;
@@ -23,7 +24,6 @@ interface MatchupData {
 }
 
 // Maps the grading market key to the stat field in MatchupData.
-// Used to highlight the most relevant stat for the player's active prop.
 export const MARKET_TO_STAT: Record<string, keyof MatchupData> = {
   player_points:             'pts',
   player_points_alternate:   'pts',
@@ -40,7 +40,13 @@ export const MARKET_TO_STAT: Record<string, keyof MatchupData> = {
   player_turnovers:          'tov',
 };
 
-// Order matches game log column order: PTS, 3PT, REB, AST, STL, BLK, TOV
+// Maps posGroup (G/F/C) to a readable label for the subtitle.
+const POS_GROUP_LABEL: Record<string, string> = {
+  G: 'Guards',
+  F: 'Forwards',
+  C: 'Centers',
+};
+
 const STAT_LABELS: { key: keyof MatchupData; label: string }[] = [
   { key: 'pts',  label: 'PTS' },
   { key: 'fg3m', label: '3PM' },
@@ -58,8 +64,6 @@ function ordinal(n: number): string {
   return `${n}${s[v] || 'th'}`;
 }
 
-// Rank 1 = most allowed = favorable for overs.
-// Green: ranks 1-10, Yellow: 11-20, Red: 21-30.
 function rankColor(rank: number): string {
   if (rank <= 10) return 'text-green-400';
   if (rank <= 20) return 'text-yellow-400';
@@ -75,7 +79,7 @@ function matchupLabel(rank: number): { label: string; cls: string } {
 interface Props {
   oppTeamId: number;
   position: string;
-  highlightMarket?: string;  // active prop market key — highlights the relevant stat
+  highlightMarket?: string;
 }
 
 export default function MatchupDefense({ oppTeamId, position, highlightMarket }: Props) {
@@ -103,11 +107,15 @@ export default function MatchupDefense({ oppTeamId, position, highlightMarket }:
   if (error)   return <div className="px-4 py-3 text-xs text-red-500">Matchup unavailable</div>;
   if (!data)   return null;
 
-  // Headline line for the highlighted stat
   const headlineStat = highlightStat && typeof data[highlightStat] === 'object'
     ? data[highlightStat] as StatLine
     : null;
   const headlineMeta = headlineStat ? matchupLabel(headlineStat.rank) : null;
+
+  // Use posGroup for the label (e.g. 'Guards') rather than the raw position
+  // string (e.g. 'G-F') so it describes the comparison pool, not the player's
+  // compound designation.
+  const posLabel = POS_GROUP_LABEL[data.posGroup ?? ''] ?? data.posGroup ?? data.position;
 
   return (
     <div className="border-t border-gray-800 px-4 py-3">
@@ -116,7 +124,7 @@ export default function MatchupDefense({ oppTeamId, position, highlightMarket }:
           vs {data.oppTeamAbbr} Defense
         </span>
         <span className="text-xs text-gray-600">
-          {data.position} position &middot; {data.gamesDefended} games this season
+          vs {posLabel} &middot; {data.gamesDefended} games this season
         </span>
         {headlineMeta && headlineStat && (
           <span className={`text-xs font-semibold ml-auto ${headlineMeta.cls}`}>
@@ -142,7 +150,6 @@ export default function MatchupDefense({ oppTeamId, position, highlightMarket }:
             </tr>
           </thead>
           <tbody>
-            {/* Averages row */}
             <tr>
               {STAT_LABELS.map(({ key }) => {
                 const s = data[key] as StatLine;
@@ -158,7 +165,6 @@ export default function MatchupDefense({ oppTeamId, position, highlightMarket }:
                 );
               })}
             </tr>
-            {/* Rank row */}
             <tr>
               {STAT_LABELS.map(({ key }) => {
                 const s = data[key] as StatLine;
