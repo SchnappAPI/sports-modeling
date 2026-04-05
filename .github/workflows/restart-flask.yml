@@ -1,0 +1,21 @@
+name: Restart Flask Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  restart:
+    runs-on: [self-hosted, schnapp-runner]
+    steps:
+      - name: Restart schnapp-flask service
+        run: sudo systemctl restart schnapp-flask.service
+
+      - name: Verify service is running
+        run: |
+          sleep 3
+          sudo systemctl status schnapp-flask.service --no-pager
+
+      - name: Smoke test /ping
+        run: |
+          curl -sf http://localhost:5000/ping || (echo "Flask ping failed" && exit 1)
+          echo "Flask is up and responding"
