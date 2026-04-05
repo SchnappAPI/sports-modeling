@@ -2,17 +2,23 @@
 runner.py
 
 Lightweight Flask proxy that runs as a persistent service on the schnapp-runner VM.
-Fetches live NBA box scores from the public CDN endpoint (no proxy needed).
+Fetches live NBA data from public CDN endpoints (no proxy needed).
 
 Endpoints:
   GET /ping                        -- health check, returns {"ok": true}
+  GET /scoreboard                  -- today's game statuses from CDN (no DB round trip)
   GET /boxscore?gameId=<game_id>   -- returns live player stats for a game
 
-CDN endpoint: https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json
-Top-level key: "game" (not "boxScoreTraditional")
+CDN endpoints (both public, no proxy required):
+  Scoreboard: https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json
+  Box score:  https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json
+
+Box score top-level key: "game"
 statistics: single dict per player (cumulative), not a list
 
-Response includes: gameStatusText, homeScore, awayScore, homeTeamAbbr, awayTeamAbbr, players[]
+Scoreboard response per game:
+  gameId, gameStatus (1=pre/2=live/3=final), gameStatusText, period, gameClock,
+  homeTeamId, homeTeamAbbr, homeScore, awayTeamId, awayTeamAbbr, awayScore
 
 Start manually:  source ~/venv/bin/activate && python etl/runner.py
 Managed by:      systemd (schnapp-flask.service)
@@ -36,7 +42,8 @@ log = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-RUNNER_KEY = os.environ.get("RUNNER_API_KEY", "runner-Lake4971")
+RUNNER_KEY        = os.environ.get("RUNNER_API_KEY", "runner-Lake4971")
+CDN_SCOREBOARD    = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
 
 
 def check_auth():
@@ -61,6 +68,46 @@ def parse_minutes(clock: str) -> float:
 @app.route("/ping")
 def ping():
     return jsonify({"ok": True})
+
+
+@app.route("/scoreboard")
+def scoreboard():
+    auth_error = check_auth()
+    if auth_error:
+        return auth_error
+
+    try:
+        resp = requests.get(CDN_SCOREBOARD, timeout=10)
+        if resp.status_code != 200:
+            log.warning(f"CDN scoreboard returned {resp.status_code}")
+            return jsonify({"error": f"CDN returned {resp.status_code}"}), 502
+        data = resp.json()
+    except requests.Timeout:
+        return jsonify({"error": "CDN timed out"}), 504
+    except Exception as exc:
+        log.error(f"scoreboard fetch failed: {exc}")
+        return jsonify({"error": str(exc)}), 500
+
+    raw_games = data.get("scoreboard", {}).get("games", [])
+    games = []
+    for g in raw_games:
+        home = g.get("homeTeam", {})
+        away = g.get("awayTeam", {})
+        games.append({
+            "gameId":         str(g.get("gameId", "")),
+            "gameStatus":     int(g.get("gameStatus", 1)),
+            "gameStatusText": str(g.get("gameStatusText", "")),
+            "period":         int(g.get("period", 0)),
+            "gameClock":      str(g.get("gameClock", "")),
+            "homeTeamId":     int(home.get("teamId", 0)),
+            "homeTeamAbbr":   str(home.get("teamTricode", "")),
+            "homeScore":      int(home.get("score", 0) or 0),
+            "awayTeamId":     int(away.get("teamId", 0)),
+            "awayTeamAbbr":   str(away.get("teamTricode", "")),
+            "awayScore":      int(away.get("score", 0) or 0),
+        })
+
+    return jsonify({"games": games})
 
 
 @app.route("/boxscore")
@@ -138,5 +185,5 @@ def boxscore():
 
 
 if __name__ == "__main__":
-    log.info("Starting runner on port 5000 (CDN endpoint, no proxy needed)")
+    log.info("Starting runner on port 5000 (CDN endpoints, no proxy needed)")
     app.run(host="0.0.0.0", port=5000, debug=False)
