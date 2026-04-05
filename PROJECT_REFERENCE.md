@@ -11,22 +11,23 @@
 
 ---
 
-## Current State (updated 2026-04-05)
+## Current State (updated 2026-04-05 session 2)
 
 **What is working:**
 - NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, grading all running.
 - Lineup poll: two-stage architecture. Stage 1 = official JSON (starters, 5 per team). Stage 2 = boxscorepreviewv3 (full roster). Both run every cycle. Full rosters (starters + bench + inactive) now written correctly.
 - Grading: all components live, Over + Under grades written daily. `grade_props.py` verified OK.
 - Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
-- Matchups tab live on game page: defense grid by G/F/C position groups, 7 stat columns, rank out of 30. Position grouping fixed — compound positions (F-G, G-F, C-F) now correctly mapped using LEFT(1) logic.
+- Matchups tab live on game page: defense grid by G/F/C position groups, 7 stat columns, rank out of 30. Position grouping fixed — compound positions (F-G, G-F, C-F) now correctly mapped using LEFT(1) logic. Lineup hybrid position: starters use game-specific PG/SG/SF/PF/C, bench uses canonical position from nba.players.
 - Player page: headshot from CDN, team color left border accent, lineup position used for matchup defense (precise PG/SG/SF/PF/C over compound G-F values).
 - Today's Props strip: horizontal market cells, tap to expand dot plot + alt lines.
 - PWA active. Self-hosted runner live. Uptime Robot active. Refresh Data button live.
 - Live box score fully working. Flask runner fetches NBA CDN, returns 36 players with correct stats. Score header in Live tab shows AWY score vs HME score + period/clock, refreshes every 30s. Green dot on players currently on court.
-- Flask runner: new `/scoreboard` route returns today's game statuses from CDN without DB round trip.
-- Game status tracking: `nba_live.py` now uses `todaysScoreboard_00.json` CDN endpoint — no proxy dependency for game status transitions.
-- Schnapp Ops MCP server: running on VM at port 8000, exposed via Cloudflare Tunnel at `https://mcp.schnapp.bet/mcp`. Connected as custom connector in claude.ai. All 6 tools verified working: `flask_status`, `flask_restart`, `live_scoreboard`, `live_boxscore`, `workflow_trigger`, `workflow_status`.
-- Remote operations: Flask restart via `restart-flask.yml` workflow (GitHub Actions UI or mobile app). Code changes via claude.ai browser on mobile (GitHub MCP available). No SSH or laptop required for operational tasks.
+- Flask runner: `/scoreboard` route returns today's game statuses from CDN without DB round trip. `/boxscore` route serves live player stats. `/ping` health check. All confirmed working via MCP.
+- Game strip for today: served via Flask CDN path — no DB, no cron dependency, always live-accurate. Fallback to DB if Flask unreachable.
+- Historical game strip: DB path now returns `homeScore`/`awayScore` from `nba.schedule`.
+- Game status tracking: `nba_live.py` uses `todaysScoreboard_00.json` CDN — no proxy dependency.
+- Schnapp Ops MCP: 6 tools working. `live_scoreboard` confirmed returning correct game data.
 
 **Known issues:**
 - `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
@@ -40,18 +41,16 @@
 - VM resize pending — downsize to B1s_v2 after trial credits expire.
 - Odds backfill: confirm run 23916639705 completion, then run mappings (mode=mappings, sport=nba).
 - At a Glance duplicate prop rows: standard vs alt market keys both abbreviating to same label in UI.
-- **CRITICAL PENDING:** `nba-game-day.yml` cron gap — 22:00-23:59 UTC (5-7pm ET) not covered, so evening tip-offs won't flip to Live automatically. Fix: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`.
-- MCP server `MCP_AUTH_TOKEN` was briefly exposed in a workflow log (run 1 of install-mcp.yml). Token was rotated and re-stored as a repo secret before the MCP server was connected. The exposed token was never used by any client.
+- **PENDING:** `nba-game-day.yml` cron gap — 22:00-23:59 UTC (5-7pm ET) not covered. Game strip now unaffected (uses Flask CDN). But odds/grading/lineup still miss this window. Fix: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`.
 
 **Next up:**
-- Fix `nba-game-day.yml` cron gap: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`. Edit directly on GitHub.com in `.github/workflows/nba-game-day.yml`.
+- Fix `nba-game-day.yml` cron gap: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`. Edit directly on GitHub.com.
 - Confirm odds backfill run 23916639705 status. If complete, run NBA mappings (mode=mappings, sport=nba).
 - At a Glance duplicate prop row fix (display layer — market key abbreviation collision).
 - Re-enable PasscodeGate (BYPASS = false) before sharing with users.
 - MLB ETL wiring, web views, grading backfill.
 - NFL/MLB run_mappings branches in odds_etl.py.
 - Downsize schnapp-runner VM to B1s_v2 after free trial credits expire.
-- Consider adding `/api/live-scoreboard` Next.js route that proxies through the VM `/scoreboard` endpoint to give the web app direct CDN game status without DB.
 
 ---
 
@@ -81,19 +80,15 @@
 - Serves `/ping` (health), `/scoreboard` (today's game statuses from CDN), `/boxscore?gameId=` (live player stats + score).
 - Auth: `X-Runner-Key: runner-Lake4971` header required on all endpoints.
 - CDN endpoints (both public, no proxy): scoreboard `todaysScoreboard_00.json`, boxscore `boxscore_{game_id}.json`.
-- Response includes: `gameStatusText`, `homeScore`, `awayScore`, `homeTeamAbbr`, `awayTeamAbbr`, `players[]`. Each player has `starter` (bool), `oncourt` (bool).
+- `/scoreboard` response per game: `gameId`, `gameStatus`, `gameStatusText`, `period`, `gameClock`, `homeTeamId`, `homeTeamAbbr`, `homeScore`, `awayTeamId`, `awayTeamAbbr`, `awayScore`.
+- `/boxscore` response includes: `gameStatusText`, `homeScore`, `awayScore`, `homeTeamAbbr`, `awayTeamAbbr`, `players[]`. Each player has `starter` (bool), `oncourt` (bool).
 - `NBA_PROXY_URL` remains in systemd env but is unused by runner.py.
 
 ### MCP Server on VM
 - `mcp/server.py` — FastMCP server, port 8000, bound to 127.0.0.1. Systemd service: `schnapp-mcp.service`.
 - Tools: `flask_status`, `flask_restart`, `live_scoreboard`, `live_boxscore`, `workflow_trigger`, `workflow_status`.
-- Exposed via Cloudflare Tunnel: `https://mcp.schnapp.bet/mcp`. Tunnel: `schnapp-mcp` (ID: `6725bd14-5cd9-480a-8420-618f50e96b69`).
-- Cloudflare service: `cloudflared.service` (systemd), config at `/etc/cloudflared/config.yml`.
-- Connected as custom connector in claude.ai: `Schnapp Ops`. All 6 tools confirmed working.
+- Exposed via Cloudflare Tunnel: `https://mcp.schnapp.bet/mcp`. Connected as "Schnapp Ops" in claude.ai.
 - MCP venv: `~/mcp-venv`. Re-run `install-mcp.yml` after any change to `mcp/server.py`.
-- Key: `host`/`port` must be passed to `FastMCP()` constructor in mcp==1.9.0, not to `mcp.run()`.
-- Key: `GH_PAT` secret name used (not `GITHUB_PAT` — reserved by GitHub). `MCP_AUTH_TOKEN` stored as repo secret.
-- Auth: claude.ai connector UI only supports OAuth fields, not bearer token. Auth is handled by Cloudflare tunnel credential instead (sufficient).
 
 ### Active Workflows
 | Workflow | Trigger | Purpose |
@@ -149,11 +144,11 @@
 - No `FullGame` period — always SUM quarters for game totals.
 
 ### NBA Tables
-- `nba.schedule` — USE THIS for game queries. ALL games regardless of status. home/away scores updated live.
+- `nba.schedule` — USE THIS for game queries. ALL games regardless of status. home/away scores updated live by nba_live.py.
 - `nba.games` — completed games only (box score ETL source). Populated for `game_date <= today` and `game_status = 3`.
 - `nba.teams` — hardcoded static dict in ETL
 - `nba.players` — `player_id`, `player_name`, `team_id`, `team_tricode`, `roster_status` (1=active), `position` (may be compound: G-F, F-G, C-F, F-C)
-- `nba.daily_lineups` — keyed by `player_name` + `team_tricode`. No `player_id` or `team_id`. `starter_status` = 'Starter'/'Bench'/'Inactive'. Position values are full strings: PG, SG, SF, PF, C (from official lineup JSON for starters).
+- `nba.daily_lineups` — keyed by `player_name` + `team_tricode`. No `player_id` or `team_id`. `starter_status` = 'Starter'/'Bench'/'Inactive'. Position values are full strings: PG, SG, SF, PF, C (from official lineup JSON for starters). Historical data preserved — DELETE only runs for games in current poll cycle.
 - `nba.player_box_score_stats` — PK: `(game_id, player_id, period)`. Periods: '1Q','2Q','3Q','4Q','OT' only. Columns include `fg3a`. `minutes` is DECIMAL. Period column is VARCHAR(2) — do not insert values longer than 2 chars.
 - `nba.player_passing_stats` — `(player_id, game_date)`. `potential_ast`.
 - `nba.player_rebound_chances` — `(player_id, game_date)`. `reb_chances`.
@@ -194,6 +189,11 @@ Desired keys → existing keys (SELECT DISTINCT) → missing set → process old
 - Schedule source: `https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json` — public, no proxy, no auth. Replaced ScoreboardV3 via proxy.
 - Live box scores served directly from NBA CDN by Flask runner, not written to DB.
 - Workflow: `nba-game-day.yml`
+
+### Games API — today vs historical
+- `/api/games?date=today` — calls Flask `/scoreboard` (CDN, live, no DB). Falls back to DB in 5s if Flask unreachable.
+- `/api/games?date=other` — queries `nba.schedule` via `getGames()`. Returns `homeScore`/`awayScore` from DB.
+- `todayET()` in route computes today's NBA calendar date in ET to avoid UTC midnight boundary issues.
 
 ### Odds ETL
 - Modes: `discover`, `probe`, `backfill`, `mappings`, `upcoming`
@@ -299,6 +299,7 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 
 ### API Routes
 - `/api/ping` — public (anonymous). SELECT 1. Used by Uptime Robot for DB keep-alive.
+- `/api/games?date=` — today: Flask CDN path (live, no DB). Other dates: DB path with scores.
 - `/api/grades?date=&gameId=` — reads `dg.outcome_name` + `dg.over_price` directly
 - `/api/team-averages` — returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`, `avgFtm`, `avgFta` plus standard stats
 - `/api/contextual?oppTeamId=&position=` — defense ranks. Rank 1 = most allowed.
@@ -371,7 +372,10 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | nba_live.py does not write live rows to DB | DB write required period='G' (4 chars, exceeded VARCHAR(2)) and player_name with Unicode caused truncation. Flask CDN path is strictly better — always fresh, no storage needed. |
 | period column is VARCHAR(2) | Valid values: '1Q','2Q','3Q','4Q','OT'. Do not insert longer strings. |
 | CDN scoreboard replaces ScoreboardV3 in nba_live.py | todaysScoreboard_00.json is public CDN, no proxy. ScoreboardV3 required Webshare proxy — any proxy hiccup broke game status tracking. Same data, better reliability. |
+| /api/games uses Flask CDN for today, DB for historical | Flask /scoreboard returns live CDN data with no DB round trip — eliminates cron gap problem for game strip. Historical dates still need DB (CDN only has today). 5s timeout with DB fallback. |
+| homeScore/awayScore added to GameRow and getGames | nba.schedule already stored scores from nba_live.py writes. They were never returned to the app. Historical game strip now shows final scores. |
 | MCP auth via Cloudflare tunnel, not bearer token | claude.ai connector UI only supports OAuth fields, not arbitrary bearer tokens. Cloudflare tunnel credential already secures the endpoint — adding a bearer token layer is redundant. |
 | GH_PAT not GITHUB_PAT as secret name | GitHub reserves the GITHUB_ prefix for built-in secrets. Workflow inputs are also not masked in logs — always use repo secrets for tokens. |
 | Player headshot from CDN, client-side only | No ETL needed. URL pattern is `cdn.nba.com/headshots/nba/latest/260x190/{player_id}.png`. CDN returns silhouette placeholder for missing players — no error handling required. |
 | gameLineupPosition preferred over nba.players.position for matchup defense | Starters get precise PG/SG/SF/PF/C from official NBA lineup JSON. nba.players.position may be compound (G-F) which is less precise for defense bucket matching. |
+| nba.daily_lineups preserves historical data | DELETE only runs for games in the current poll cycle (non-final games). Final game rows persist. Starter/bench split for defense analysis is possible from this table. |
