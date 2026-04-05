@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import GameStrip, { type Game } from '@/components/GameStrip';
@@ -67,6 +67,13 @@ function shiftDate(dateStr: string, days: number): string {
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
 }
 
+async function fetchGames(date: string): Promise<Game[]> {
+  const res = await fetch(`/api/games?sport=nba&date=${date}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data: { games: Game[] } = await res.json();
+  return data.games ?? [];
+}
+
 export default function NbaPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -83,38 +90,83 @@ export default function NbaPageInner() {
   const [loadingWord] = useState(() => randomLoadingWord());
   const [error, setError] = useState<string | null>(null);
 
+  // Track whether the current load was triggered by an explicit user date selection.
+  // On explicit selection, no fallback. On default load (no urlDate), fall back to
+  // yesterday if today has no games (handles the overnight NBA game-day rollover gap).
+  const isExplicitSelection = useRef<boolean>(urlDate != null);
+
   const activeGameId = searchParams.get('gameId');
   const activeGame   = games.find((g) => g.gameId === activeGameId) ?? null;
 
   const effectiveDate = isDemo && demoDate ? demoDate : selectedDate;
 
-  function loadGames() {
-    setLoading(true);
-    setError(null);
-    setGames([]);
-    fetch(`/api/games?sport=nba&date=${effectiveDate}`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data: { games: Game[] }) => {
-        const converted = (data.games ?? []).map((g) => ({
+  async function loadGames() {
+    if (isDemo) {
+      setLoading(true);
+      setError(null);
+      setGames([]);
+      try {
+        const raw = await fetchGames(effectiveDate);
+        const sorted = sortGames(raw.map((g) => ({
           ...g,
-          gameStatusText:
-            (g.gameStatus == null || g.gameStatus === 1)
-              ? convertEtToCt(g.gameStatusText)
-              : g.gameStatusText,
-        }));
-        const sorted = sortGames(converted);
+          gameStatusText: (g.gameStatus == null || g.gameStatus === 1)
+            ? convertEtToCt(g.gameStatusText)
+            : g.gameStatusText,
+        })));
         setGames(sorted);
         const currentGameId = searchParams.get('gameId');
         const stillValid = sorted.some((g) => g.gameId === currentGameId);
         if (sorted.length > 0 && !stillValid) {
           router.replace(`/nba?gameId=${sorted[0].gameId}&date=${effectiveDate}`);
         }
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
+      } catch (err: any) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setGames([]);
+
+    try {
+      let raw = await fetchGames(effectiveDate);
+      let usedDate = effectiveDate;
+
+      // If today has no games and this was not an explicit user selection,
+      // fall back to yesterday. This handles the window between local midnight
+      // and when the NBA ETL populates today's schedule (runs at 9am UTC).
+      // The date picker updates to reflect the fallback so it is not misleading.
+      if (raw.length === 0 && !isExplicitSelection.current) {
+        const yesterday = shiftDate(effectiveDate, -1);
+        const fallback = await fetchGames(yesterday);
+        if (fallback.length > 0) {
+          raw = fallback;
+          usedDate = yesterday;
+          setSelectedDate(yesterday);
+          router.replace(`/nba?date=${yesterday}`);
+        }
+      }
+
+      const sorted = sortGames(raw.map((g) => ({
+        ...g,
+        gameStatusText: (g.gameStatus == null || g.gameStatus === 1)
+          ? convertEtToCt(g.gameStatusText)
+          : g.gameStatusText,
+      })));
+      setGames(sorted);
+      const currentGameId = searchParams.get('gameId');
+      const stillValid = sorted.some((g) => g.gameId === currentGameId);
+      if (sorted.length > 0 && !stillValid) {
+        router.replace(`/nba?gameId=${sorted[0].gameId}&date=${usedDate}`);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => { loadGames(); }, [effectiveDate]);
@@ -130,6 +182,7 @@ export default function NbaPageInner() {
 
   function applyDate(newDate: string) {
     if (isDemo) return;
+    isExplicitSelection.current = true;
     setSelectedDate(newDate);
     router.replace(`/nba?date=${newDate}`);
   }
