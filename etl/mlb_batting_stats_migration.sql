@@ -1,7 +1,6 @@
 -- mlb_batting_stats_migration.sql
 --
--- Adds enhanced hitting box score columns to mlb.batting_stats.
--- Sourced from liveData.boxscore.teams.{side}.players in the /withMetrics endpoint.
+-- Adds columns to mlb.batting_stats that were missing from the original table definition.
 -- Safe to run multiple times: each ALTER uses IF NOT EXISTS guard via INFORMATION_SCHEMA check.
 
 -- intentional_walks
@@ -10,6 +9,27 @@ IF NOT EXISTS (
     WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'batting_stats' AND COLUMN_NAME = 'intentional_walks'
 )
     ALTER TABLE mlb.batting_stats ADD intentional_walks INT NULL;
+
+-- hit_by_pitch
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'batting_stats' AND COLUMN_NAME = 'hit_by_pitch'
+)
+    ALTER TABLE mlb.batting_stats ADD hit_by_pitch INT NULL;
+
+-- sac_bunts
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'batting_stats' AND COLUMN_NAME = 'sac_bunts'
+)
+    ALTER TABLE mlb.batting_stats ADD sac_bunts INT NULL;
+
+-- sac_flies
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'batting_stats' AND COLUMN_NAME = 'sac_flies'
+)
+    ALTER TABLE mlb.batting_stats ADD sac_flies INT NULL;
 
 -- fly_outs
 IF NOT EXISTS (
