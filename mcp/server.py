@@ -25,7 +25,7 @@ from mcp.server.fastmcp import FastMCP
 
 RUNNER_KEY  = os.environ.get("RUNNER_API_KEY", "runner-Lake4971")
 FLASK_BASE  = "http://localhost:5000"
-GITHUB_PAT  = os.environ.get("GITHUB_PAT", "")
+GH_PAT      = os.environ.get("GH_PAT", "")
 GITHUB_REPO = "SchnappAPI/sports-modeling"
 GITHUB_API  = "https://api.github.com"
 
@@ -48,7 +48,7 @@ def _flask_headers():
 
 def _github_headers():
     return {
-        "Authorization": f"Bearer {GITHUB_PAT}",
+        "Authorization": f"Bearer {GH_PAT}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
@@ -129,8 +129,8 @@ def live_boxscore(game_id: str) -> dict:
 @mcp.tool()
 def workflow_trigger(workflow_filename: str, ref: str = "main") -> dict:
     """Trigger a GitHub Actions workflow. workflow_filename e.g. 'restart-flask.yml'"""
-    if not GITHUB_PAT:
-        return {"error": "GITHUB_PAT not configured"}
+    if not GH_PAT:
+        return {"error": "GH_PAT not configured"}
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/actions/workflows/{workflow_filename}/dispatches"
     resp = requests.post(url, headers=_github_headers(), json={"ref": ref}, timeout=15)
     if resp.status_code == 204:
@@ -141,8 +141,8 @@ def workflow_trigger(workflow_filename: str, ref: str = "main") -> dict:
 @mcp.tool()
 def workflow_status(workflow_filename: str) -> dict:
     """Get the last run status of a GitHub Actions workflow."""
-    if not GITHUB_PAT:
-        return {"error": "GITHUB_PAT not configured"}
+    if not GH_PAT:
+        return {"error": "GH_PAT not configured"}
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/actions/workflows/{workflow_filename}/runs"
     resp = requests.get(url, headers=_github_headers(), params={"per_page": 1}, timeout=15)
     if resp.status_code != 200:

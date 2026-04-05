@@ -22,7 +22,7 @@ jobs:
         env:
           MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
           RUNNER_API_KEY: runner-Lake4971
-          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           cat > /tmp/schnapp-mcp.service << EOF
           [Unit]
@@ -37,7 +37,7 @@ jobs:
           ExecStart=/home/schnapp-admin/mcp-venv/bin/uvicorn mcp.server:app --host 127.0.0.1 --port 8000
           Environment="MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}"
           Environment="RUNNER_API_KEY=${RUNNER_API_KEY}"
-          Environment="GITHUB_PAT=${GITHUB_PAT}"
+          Environment="GH_PAT=${GH_PAT}"
           Restart=always
           RestartSec=5
 
