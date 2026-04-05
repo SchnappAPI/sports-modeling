@@ -2,6 +2,45 @@ import mssql from 'mssql';
 import { getPool } from './db';
 
 // ---------------------------------------------------------------------------
+// Position helpers
+// ---------------------------------------------------------------------------
+
+// Resolves any position string to a canonical G/F/C group.
+// Handles: PG, SG, G, G-F -> 'G'
+//          SF, PF, F, F-G, F-C -> 'F'
+//          C, C-F -> 'C'
+// Uses primary position (first component of compound values).
+export function posToGroup(pos: string | null): 'G' | 'F' | 'C' | null {
+  if (!pos) return null;
+  const p = pos.toUpperCase().trim();
+  if (p === 'PG' || p === 'SG' || p === 'G') return 'G';
+  if (p === 'SF' || p === 'PF' || p === 'F') return 'F';
+  if (p === 'C') return 'C';
+  const first = p.split('-')[0].trim();
+  if (first === 'PG' || first === 'SG' || first === 'G') return 'G';
+  if (first === 'SF' || first === 'PF' || first === 'F') return 'F';
+  if (first === 'C') return 'C';
+  return null;
+}
+
+// SQL CASE expression that maps nba.players.position to G/F/C.
+// Handles standard values (PG, SG, SF, PF, C) and NBA playerindex
+// compound values (G, G-F, F, F-G, F-C, C-F) using first component.
+// Replace the table alias prefix if needed (default is 'p').
+export function posCaseSql(alias = 'p'): string {
+  const col = `${alias}.position`;
+  return `CASE
+    WHEN ${col} IN ('PG','SG','G') THEN 'G'
+    WHEN ${col} IN ('SF','PF','F') THEN 'F'
+    WHEN ${col} = 'C'             THEN 'C'
+    WHEN LEFT(${col},1) = 'G'    THEN 'G'
+    WHEN LEFT(${col},1) = 'F'    THEN 'F'
+    WHEN LEFT(${col},1) = 'C'    THEN 'C'
+    ELSE NULL
+  END`;
+}
+
+// ---------------------------------------------------------------------------
 // Ping
 // ---------------------------------------------------------------------------
 
@@ -109,9 +148,8 @@ export interface RosterRow {
   playerName: string;
   teamAbbr: string;
   position: string | null;
-  // 'Starter' | 'Bench' | 'Inactive' — replaces the old boolean isStarter
   starterStatus: string | null;
-  lineupStatus: string | null;  // 'Confirmed' | 'Projected' | null
+  lineupStatus: string | null;
 }
 
 export async function getRoster(gameId: string): Promise<RosterRow[]> {
@@ -121,12 +159,12 @@ export async function getRoster(gameId: string): Promise<RosterRow[]> {
     .input('gameId', mssql.VarChar, gameId)
     .query<RosterRow>(
       `SELECT
-         p.player_id                                    AS playerId,
-         dl.player_name                                 AS playerName,
-         dl.team_tricode                                AS teamAbbr,
-         dl.position                                    AS position,
-         dl.starter_status                              AS starterStatus,
-         dl.lineup_status                               AS lineupStatus
+         p.player_id       AS playerId,
+         dl.player_name    AS playerName,
+         dl.team_tricode   AS teamAbbr,
+         dl.position       AS position,
+         dl.starter_status AS starterStatus,
+         dl.lineup_status  AS lineupStatus
        FROM nba.daily_lineups dl
        LEFT JOIN nba.players p ON p.player_name = dl.player_name
        WHERE dl.game_id = @gameId
@@ -553,6 +591,7 @@ export interface MatchupDefenseRow {
   oppTeamId: number;
   oppTeamAbbr: string;
   position: string;
+  posGroup: string;
   pts: MatchupStatLine;
   reb: MatchupStatLine;
   ast: MatchupStatLine;
@@ -562,18 +601,22 @@ export interface MatchupDefenseRow {
   tov: MatchupStatLine;
 }
 
+// position: the raw position string from either daily_lineups (preferred) or nba.players.
+// Returns stats for all players whose position resolves to the same G/F/C group.
+// The posGroup used for the query is returned in the response so the UI can display it.
 export async function getMatchupDefense(
   oppTeamId: number,
   position: string
 ): Promise<MatchupDefenseRow | null> {
   const pool = await getPool();
 
-  const posGroup =
-    position.startsWith('G') ? 'G' :
-    position.startsWith('F') ? 'F' :
-    position.startsWith('C') ? 'C' : null;
-
+  const posGroup = posToGroup(position);
   if (!posGroup) return null;
+
+  // Build the SQL CASE filter: matches all positions that resolve to posGroup.
+  // This is correct for all values: PG/SG -> G, SF/PF -> F, C -> C,
+  // and compound values G-F -> G, F-G -> F, C-F -> C, etc.
+  const posFilterSql = posCaseSql('p');
 
   const result = await pool
     .request()
@@ -614,19 +657,20 @@ export async function getMatchupDefense(
          SELECT gt.*
          FROM game_totals gt
          JOIN nba.players p ON p.player_id = gt.player_id
-         WHERE LEFT(p.position, 1) = @posGroup
+         WHERE p.position IS NOT NULL
+           AND (${posFilterSql}) = @posGroup
        ),
        team_defense AS (
          SELECT
            opp_team_id,
-           COUNT(*)                    AS games_defended,
-           AVG(CAST(pts  AS FLOAT))    AS avg_pts,
-           AVG(CAST(reb  AS FLOAT))    AS avg_reb,
-           AVG(CAST(ast  AS FLOAT))    AS avg_ast,
-           AVG(CAST(stl  AS FLOAT))    AS avg_stl,
-           AVG(CAST(blk  AS FLOAT))    AS avg_blk,
-           AVG(CAST(fg3m AS FLOAT))    AS avg_fg3m,
-           AVG(CAST(tov  AS FLOAT))    AS avg_tov
+           COUNT(*)                 AS games_defended,
+           AVG(CAST(pts  AS FLOAT)) AS avg_pts,
+           AVG(CAST(reb  AS FLOAT)) AS avg_reb,
+           AVG(CAST(ast  AS FLOAT)) AS avg_ast,
+           AVG(CAST(stl  AS FLOAT)) AS avg_stl,
+           AVG(CAST(blk  AS FLOAT)) AS avg_blk,
+           AVG(CAST(fg3m AS FLOAT)) AS avg_fg3m,
+           AVG(CAST(tov  AS FLOAT)) AS avg_tov
          FROM pos_filtered
          GROUP BY opp_team_id
        ),
@@ -662,12 +706,14 @@ export async function getMatchupDefense(
   if (result.recordset.length === 0) return null;
   const row = result.recordset[0];
 
-  const line = (avg: number, rank: number, gd: number): MatchupStatLine => ({ avg, rank, gamesDefended: gd });
+  const line = (avg: number, rank: number, gd: number): MatchupStatLine =>
+    ({ avg, rank, gamesDefended: gd });
+
   return {
-    oppTeamId:   row.oppTeamId,
-    oppTeamAbbr: row.oppTeamAbbr,
+    oppTeamId:     row.oppTeamId,
+    oppTeamAbbr:   row.oppTeamAbbr,
     position,
-    gamesDefended: row.gamesDefended,
+    posGroup,
     pts:  line(row.avg_pts,  row.rank_pts,  row.gamesDefended),
     reb:  line(row.avg_reb,  row.rank_reb,  row.gamesDefended),
     ast:  line(row.avg_ast,  row.rank_ast,  row.gamesDefended),
@@ -675,5 +721,5 @@ export async function getMatchupDefense(
     blk:  line(row.avg_blk,  row.rank_blk,  row.gamesDefended),
     fg3m: line(row.avg_fg3m, row.rank_fg3m, row.gamesDefended),
     tov:  line(row.avg_tov,  row.rank_tov,  row.gamesDefended),
-  } as MatchupDefenseRow;
+  };
 }
