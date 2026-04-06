@@ -92,11 +92,8 @@ function TeamStatsTable({
   const [inactiveOpen, setInactiveOpen] = useState(false);
 
   const starters  = players.filter((p) => p.starterStatus === 'Starter');
-  const bench     = players.filter((p) => p.starterStatus === 'Bench');
+  const bench     = players.filter((p) => p.starterStatus !== 'Starter' && p.starterStatus !== 'Inactive');
   const inactive  = players.filter((p) => p.starterStatus === 'Inactive');
-  const noLineup  = players.filter(
-    (p) => p.starterStatus == null || (p.starterStatus !== 'Starter' && p.starterStatus !== 'Bench' && p.starterStatus !== 'Inactive')
-  );
   const hasLineup = players.some((p) => p.starterStatus != null);
 
   // compact:   Player GP MIN PTS 3PM REB AST PRA PR PA RA = 11 cols
@@ -218,7 +215,6 @@ function TeamStatsTable({
             <>
               {starters.map((p) => renderRow(p))}
               {bench.length > 0 && collapsibleSection('Bench', bench.length, benchOpen, () => setBenchOpen((o) => !o), bench)}
-              {noLineup.length > 0 && collapsibleSection('Bench', noLineup.length, benchOpen, () => setBenchOpen((o) => !o), noLineup)}
               {inactive.length > 0 && collapsibleSection('Inactive', inactive.length, inactiveOpen, () => setInactiveOpen((o) => !o), inactive, true)}
             </>
           ) : (
