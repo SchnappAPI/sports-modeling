@@ -12,6 +12,8 @@ Tools:
   live_boxscore    -- Live player stats for a specific game.
   workflow_trigger -- Trigger a GitHub Actions workflow by filename.
   workflow_status  -- Check the last run status of a workflow.
+  shell_exec       -- Run an arbitrary shell command on the VM.
+  read_file        -- Read a file from the VM filesystem.
 
 Start: python mcp/server.py
 Managed by: systemd (schnapp-mcp.service)
@@ -27,13 +29,14 @@ from mcp.server.fastmcp import FastMCP
 RUNNER_KEY  = os.environ.get("RUNNER_API_KEY", "runner-Lake4971")
 FLASK_BASE  = "http://localhost:5000"
 GH_PAT      = os.environ.get("GH_PAT", "")
+MCP_TOKEN   = os.environ.get("MCP_AUTH_TOKEN", "")
 GITHUB_REPO = "SchnappAPI/sports-modeling"
 GITHUB_API  = "https://api.github.com"
 
 # host and port must be set on the constructor in mcp 1.9.0, not passed to run()
 mcp = FastMCP(
     name="schnapp-ops",
-    instructions="Operational tools for schnapp.bet: Flask service management, live NBA data, and GitHub Actions workflow control.",
+    instructions="Operational tools for schnapp.bet: Flask service management, live NBA data, GitHub Actions workflow control, and VM shell access.",
     host="127.0.0.1",
     port=8000,
 )
@@ -55,9 +58,14 @@ def _github_headers():
     }
 
 
-def _run(cmd: list[str]) -> tuple[int, str]:
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return result.returncode, (result.stdout + result.stderr).strip()
+
+
+def _check_token(token: str) -> bool:
+    """Verify the caller supplied the correct MCP_AUTH_TOKEN."""
+    return bool(MCP_TOKEN) and token == MCP_TOKEN
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +179,65 @@ def workflow_status(workflow_filename: str) -> dict:
         "url": r.get("html_url"),
         "triggered_by": r.get("event"),
     }
+
+
+@mcp.tool()
+def shell_exec(command: str, token: str, timeout: int = 60) -> dict:
+    """
+    Run an arbitrary shell command on the VM as the schnapp-mcp service user.
+    Requires the MCP_AUTH_TOKEN for authorization.
+    command: shell command string to execute (runs via bash -c)
+    token: must match MCP_AUTH_TOKEN environment variable
+    timeout: max seconds to wait (default 60, max 300)
+    """
+    if not _check_token(token):
+        return {"error": "Unauthorized: invalid token"}
+    timeout = min(int(timeout), 300)
+    try:
+        result = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout.strip()[:10000],
+            "stderr": result.stderr.strip()[:2000],
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": f"Command timed out after {timeout}s"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def read_file(path: str, token: str, tail: int = 0) -> dict:
+    """
+    Read a file from the VM filesystem.
+    Requires the MCP_AUTH_TOKEN for authorization.
+    path: absolute path to the file
+    token: must match MCP_AUTH_TOKEN environment variable
+    tail: if > 0, return only the last N lines (like tail -n)
+    """
+    if not _check_token(token):
+        return {"error": "Unauthorized: invalid token"}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        if tail > 0:
+            lines = lines[-tail:]
+        content = "".join(lines)
+        return {
+            "path": path,
+            "lines": len(lines),
+            "content": content[:20000],
+            "truncated": len(content) > 20000,
+        }
+    except FileNotFoundError:
+        return {"error": f"File not found: {path}"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":
