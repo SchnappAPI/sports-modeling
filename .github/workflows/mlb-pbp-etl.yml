@@ -10,7 +10,7 @@ on:
       seasons:
         description: 'Space-separated season years (e.g. 2025 or 2023 2024 2025)'
         required: false
-        default: '2025'
+        default: '2026'
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -20,29 +20,14 @@ env:
 
 jobs:
   pbp:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, schnapp-runner]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Microsoft ODBC Driver 18
-        run: |
-          curl -sSL https://packages.microsoft.com/keys/microsoft.asc \
-            | sudo gpg --batch --yes --dearmor \
-            -o /usr/share/keyrings/microsoft-prod.gpg
-          curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list
-          sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev
-
-      - name: Install Python dependencies
-        run: pip install -r etl/requirements.txt
+      - name: Activate venv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
 
       - name: Run MLB Play-by-Play ETL
         run: |
