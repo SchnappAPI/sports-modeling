@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import MatchupDefense from '@/components/MatchupDefense';
@@ -276,6 +276,8 @@ function volumeBg(value: number, range: AttemptRange): string {
 const ALL_PERIODS = ['1Q', '2Q', '3Q', '4Q', 'OT'] as const;
 type QuarterKey = typeof ALL_PERIODS[number];
 
+type RoleFilter = 'all' | 'started' | 'bench' | 'played';
+
 function buildGameSummaries(
   rows: GameLogRow[],
   selectedPeriods: Set<QuarterKey>,
@@ -333,7 +335,7 @@ function buildGameSummaries(
   }));
 }
 
-type SplitKey = 'season' | 'l10' | 'opp';
+type SplitKey = 'season' | 'l10' | 'starter' | 'bench' | 'opp';
 
 interface SplitStats {
   gp: number;
@@ -343,11 +345,13 @@ interface SplitStats {
 
 function computeSplit(summaries: GameSummary[], opp: string | null): Record<SplitKey, SplitStats> {
   const zero = (): SplitStats => ({ gp:0, pts:0, reb:0, ast:0, stl:0, blk:0, tov:0, min:0, fg3m:0, fg3a:0, fgm:0, fga:0, ftm:0, fta:0 });
-  const acc  = { season: zero(), l10: zero(), opp: zero() };
+  const acc  = { season: zero(), l10: zero(), starter: zero(), bench: zero(), opp: zero() };
 
-  const played = summaries.filter((g) => !g.dnp);
-  const l10    = played.slice(0, 10);
-  const vs     = opp ? played.filter((g) => g.opponentAbbr === opp) : [];
+  const played  = summaries.filter((g) => !g.dnp);
+  const l10     = played.slice(0, 10);
+  const started = played.filter((g) => g.started === true);
+  const bench   = played.filter((g) => g.started === false);
+  const vs      = opp ? played.filter((g) => g.opponentAbbr === opp) : [];
 
   function add(target: SplitStats, g: GameSummary) {
     target.gp++;  target.pts += g.pts; target.reb += g.reb; target.ast += g.ast;
@@ -355,9 +359,11 @@ function computeSplit(summaries: GameSummary[], opp: string | null): Record<Spli
     target.fg3m += g.fg3m; target.fg3a += g.fg3a; target.fgm += g.fgm; target.fga += g.fga;
     target.ftm += g.ftm;  target.fta += g.fta;
   }
-  played.forEach((g) => add(acc.season, g));
-  l10.forEach((g)    => add(acc.l10, g));
-  vs.forEach((g)     => add(acc.opp, g));
+  played.forEach((g)   => add(acc.season, g));
+  l10.forEach((g)      => add(acc.l10, g));
+  started.forEach((g)  => add(acc.starter, g));
+  bench.forEach((g)    => add(acc.bench, g));
+  vs.forEach((g)       => add(acc.opp, g));
   return acc;
 }
 
@@ -612,10 +618,14 @@ function TodayPropsSection({
   playerId,
   gradeDate,
   summaries,
+  expanded,
+  onToggleExpanded,
 }: {
   playerId: string;
   gradeDate: string;
   summaries: GameSummary[];
+  expanded: boolean;
+  onToggleExpanded: () => void;
 }) {
   const [grades, setGrades]         = useState<TodayGradeRow[]>([]);
   const [loading, setLoading]       = useState(true);
@@ -653,10 +663,11 @@ function TodayPropsSection({
 
   return (
     <div className="border-b border-gray-800">
+      {/* Header row — always visible */}
       <div className="flex items-center px-4 py-1.5 border-b border-gray-800">
-        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today's Props</span>
-        <div className="flex gap-1 ml-auto">
-          {(['L10', 'L30', 'L50', 'All'] as DotWindow[]).map((w) => (
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today&apos;s Props</span>
+        <div className="flex gap-1 ml-auto items-center">
+          {expanded && (['L10', 'L30', 'L50', 'All'] as DotWindow[]).map((w) => (
             <button
               key={w}
               onClick={() => setDotWindow(w)}
@@ -668,9 +679,17 @@ function TodayPropsSection({
               {w}
             </button>
           ))}
+          <button
+            onClick={onToggleExpanded}
+            className="ml-2 text-gray-600 hover:text-gray-400 text-xs px-1.5 py-0.5 rounded transition-colors"
+            title={expanded ? 'Collapse chart' : 'Expand chart'}
+          >
+            {expanded ? '\u25b2' : '\u25bc'}
+          </button>
         </div>
       </div>
 
+      {/* Market strip — always visible */}
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
@@ -683,7 +702,7 @@ function TodayPropsSection({
                 onClick={() => setActiveBase(isActive ? null : group.baseKey)}
                 className={[
                   'flex flex-col items-center flex-1 min-w-[52px] py-2 transition-colors text-xs',
-                  isActive ? 'bg-gray-800' : 'hover:bg-gray-900',
+                  isActive && expanded ? 'bg-gray-800' : 'hover:bg-gray-900',
                 ].join(' ')}
               >
                 <span className="font-semibold text-gray-300 leading-none mb-0.5">{group.label}</span>
@@ -705,7 +724,8 @@ function TodayPropsSection({
         </div>
       </div>
 
-      {activeGroup && (
+      {/* Chart + alt lines — only when expanded and a market is selected */}
+      {expanded && activeGroup && (
         <MarketPanel
           group={activeGroup}
           summaries={summaries}
@@ -803,14 +823,14 @@ function GameTeamSelector({
       <button
         onClick={() => navigateToTeam(activeGame.awayTeamId, activeGame.gameId)}
         disabled={loadingTeam !== null}
-        className="px-2.5 py1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
+        className="px-2.5 py-1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
       >
         {loadingTeam === activeGame.awayTeamId ? '...' : activeGame.awayTeamAbbr}
       </button>
       <button
         onClick={() => navigateToTeam(activeGame.homeTeamId, activeGame.gameId)}
         disabled={loadingTeam !== null}
-        className="px-2.5 py1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
+        className="px-2.5 py-1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
       >
         {loadingTeam === activeGame.homeTeamId ? '...' : activeGame.homeTeamAbbr}
       </button>
@@ -832,6 +852,14 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
   const gradeDate = backDate ?? todayLocal();
 
+  // ---- persisted filter state (survives player navigation) ----
+  // These live in refs so changing them does NOT trigger a re-render on navigation;
+  // the actual state values are initialized from the refs on mount and updated in sync.
+  const persistedPeriods      = useRef<Set<QuarterKey>>(new Set());
+  const persistedRole         = useRef<RoleFilter>('all');
+  const persistedPropsExpanded = useRef<boolean>(true);
+  const prevTeamId             = useRef<number | null>(null);
+
   const [log, setLog]               = useState<GameLogRow[]>([]);
   const [grades, setGrades]         = useState<GradeLine[]>([]);
   const [playerInfo, setPlayerInfo] = useState<PlayerInfo>({
@@ -841,7 +869,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   });
   const [loading, setLoading]       = useState(true);
   const [error, setError]           = useState<string | null>(null);
-  const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(new Set());
+
+  // filter state — initialized from persisted refs
+  const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(persistedPeriods.current);
+  const [roleFilter, setRoleFilter]           = useState<RoleFilter>(persistedRole.current);
+  const [propsExpanded, setPropsExpanded]     = useState<boolean>(persistedPropsExpanded.current);
+
   const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
   const [showAllStats, setShowAllStats] = useState(false);
   const [vsOppOnly, setVsOppOnly]   = useState(false);
@@ -889,9 +922,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       playerName: null, teamId: null,
       gameLineupStatus: null, gameStarterStatus: null,
     });
-    setSelectedPeriods(new Set());
     setTeamPlayers([]);
-    setVsOppOnly(false);
 
     const playerUrl = backGameId
       ? `/api/player?playerId=${playerId}&lastN=9999&sport=nba&gameId=${backGameId}`
@@ -917,6 +948,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           gameStarterStatus:  playerData.gameStarterStatus  ?? null,
         };
         setPlayerInfo(info);
+
+        // If the team changed, reset vsOppOnly. Otherwise leave it as-is.
+        if (prevTeamId.current !== null && prevTeamId.current !== playerData.teamId) {
+          setVsOppOnly(false);
+        }
+        prevTeamId.current = playerData.teamId ?? null;
 
         if (playerData.teamId) {
           fetch(`/api/team-players?teamId=${playerData.teamId}`)
@@ -946,6 +983,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [playerId]);
+
+  // Keep refs in sync with state so they persist across player navigation
+  useEffect(() => { persistedPeriods.current = selectedPeriods; }, [selectedPeriods]);
+  useEffect(() => { persistedRole.current    = roleFilter; },     [roleFilter]);
+  useEffect(() => { persistedPropsExpanded.current = propsExpanded; }, [propsExpanded]);
 
   const gradeMap = useMemo(() => {
     const m = new Map<string, Map<string, number>>();
@@ -985,12 +1027,26 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     };
   }, [log]);
 
-  const displayedSummaries = useMemo(
-    () => vsOppOnly && oppParam
-      ? summaries.filter((g) => g.opponentAbbr === oppParam)
-      : summaries,
-    [summaries, vsOppOnly, oppParam],
-  );
+  // Apply role filter then vs-opp filter to produce the displayed rows
+  const displayedSummaries = useMemo(() => {
+    let rows = summaries;
+
+    // Role filter
+    if (roleFilter === 'started') {
+      rows = rows.filter((g) => !g.dnp && g.started === true);
+    } else if (roleFilter === 'bench') {
+      rows = rows.filter((g) => !g.dnp && g.started === false);
+    } else if (roleFilter === 'played') {
+      rows = rows.filter((g) => !g.dnp);
+    }
+    // 'all' keeps DNPs visible (existing default behavior)
+
+    if (vsOppOnly && oppParam) {
+      rows = rows.filter((g) => g.opponentAbbr === oppParam);
+    }
+
+    return rows;
+  }, [summaries, roleFilter, vsOppOnly, oppParam]);
 
   const splits = useMemo(
     () => computeSplit(summaries, oppParam),
@@ -1050,8 +1106,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   if (error)   return <div className="px-4 py-6 text-sm text-red-400">Error: {error}</div>;
 
   const splitLabels: { key: SplitKey; label: string }[] = [
-    { key: 'season', label: 'Season' },
-    { key: 'l10',    label: 'Last 10' },
+    { key: 'season',  label: 'Season' },
+    { key: 'l10',     label: 'Last 10' },
+    { key: 'starter', label: 'Starter' },
+    { key: 'bench',   label: 'Bench' },
     ...(oppParam ? [{ key: 'opp' as SplitKey, label: `vs ${oppParam}` }] : []),
   ];
 
@@ -1101,6 +1159,13 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       </>
     );
   }
+
+  const roleButtons: { value: RoleFilter; label: string }[] = [
+    { value: 'all',     label: 'All' },
+    { value: 'played',  label: 'Played' },
+    { value: 'started', label: 'Started' },
+    { value: 'bench',   label: 'Bench' },
+  ];
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -1165,6 +1230,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         </span>
       </div>
 
+      {/* Splits table */}
       <div className="overflow-x-auto border-b border-gray-800">
         <table className="text-xs w-full">
           <thead>
@@ -1203,9 +1269,13 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         playerId={playerId}
         gradeDate={gradeDate}
         summaries={summaries}
+        expanded={propsExpanded}
+        onToggleExpanded={() => setPropsExpanded((v) => !v)}
       />
 
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800">
+      {/* Filter bar */}
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800 flex-wrap">
+        {/* Quarter filters */}
         <span className="text-xs text-gray-600">All</span>
         {availablePeriods.map((p) => (
           <button
@@ -1229,10 +1299,30 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
             Clear
           </button>
         )}
+
         {!showPropColors && grades.length > 0 && (
           <span className="text-xs text-gray-600 ml-2">Prop coloring off (full game only)</span>
         )}
-        <div className="ml-auto flex items-center gap-2">
+
+        <div className="ml-auto flex items-center gap-2 flex-wrap">
+          {/* Role filter buttons */}
+          <div className="flex rounded overflow-hidden border border-gray-700">
+            {roleButtons.map(({ value, label }) => (
+              <button
+                key={value}
+                onClick={() => setRoleFilter(value)}
+                className={[
+                  'px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap',
+                  roleFilter === value
+                    ? 'bg-gray-600 text-white'
+                    : 'bg-gray-900 text-gray-400 hover:bg-gray-800',
+                ].join(' ')}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           {oppParam && (
             <button
               onClick={() => setVsOppOnly((v) => !v)}
@@ -1250,6 +1340,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         </div>
       </div>
 
+      {/* Game log table */}
       <div className="flex-1 overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="sticky top-0 z-20 bg-gray-950">
