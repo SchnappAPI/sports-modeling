@@ -803,14 +803,14 @@ function GameTeamSelector({
       <button
         onClick={() => navigateToTeam(activeGame.awayTeamId, activeGame.gameId)}
         disabled={loadingTeam !== null}
-        className="px-2.5 py-1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
+        className="px-2.5 py1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
       >
         {loadingTeam === activeGame.awayTeamId ? '...' : activeGame.awayTeamAbbr}
       </button>
       <button
         onClick={() => navigateToTeam(activeGame.homeTeamId, activeGame.gameId)}
         disabled={loadingTeam !== null}
-        className="px-2.5 py-1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
+        className="px-2.5 py1 text-xs rounded border border-gray-700 text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap disabled:opacity-40"
       >
         {loadingTeam === activeGame.homeTeamId ? '...' : activeGame.homeTeamAbbr}
       </button>
@@ -826,21 +826,11 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const router       = useRouter();
   const searchParams = useSearchParams();
 
-  const backGameId   = searchParams.get('gameId');
-  const backTab      = searchParams.get('tab') ?? 'boxscore';
-  const backDate     = searchParams.get('date');
-  const oppParam     = searchParams.get('opp');
+  const backGameId = searchParams.get('gameId');
+  const backDate   = searchParams.get('date');
+  const oppParam   = searchParams.get('opp');
 
   const gradeDate = backDate ?? todayLocal();
-
-  const backHref = (() => {
-    const p = new URLSearchParams();
-    if (backGameId) p.set('gameId', backGameId);
-    if (backTab)    p.set('tab', backTab);
-    if (backDate)   p.set('date', backDate);
-    const qs = p.toString();
-    return qs ? `/nba?${qs}` : '/nba';
-  })();
 
   const [log, setLog]               = useState<GameLogRow[]>([]);
   const [grades, setGrades]         = useState<GradeLine[]>([]);
@@ -1118,7 +1108,18 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap"
         style={teamColor ? { borderLeftWidth: 3, borderLeftColor: teamColor, borderLeftStyle: 'solid' } : undefined}
       >
-        <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm flex-none">&#8592;</Link>
+        <button
+          onClick={() => {
+            if (window.history.length > 1) {
+              router.back();
+            } else {
+              router.push('/nba');
+            }
+          }}
+          className="text-gray-400 hover:text-gray-200 text-sm flex-none"
+        >
+          &#8592;
+        </button>
 
         <PlayerHeadshot playerId={playerId} size={32} />
 
@@ -1156,7 +1157,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           activeGameId={backGameId}
           currentPlayerId={playerId}
           date={gradeDate}
-          tab={backTab}
+          tab="boxscore"
         />
 
         <span className="text-xs text-gray-600 flex-none">
