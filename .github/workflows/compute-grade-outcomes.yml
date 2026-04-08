@@ -1,0 +1,39 @@
+name: Compute Grade Outcomes
+
+# Standalone outcomes backfill — fills in Won/Lost for all completed games
+# where outcome is still NULL. Safe to re-run any time; skips already-resolved rows.
+# Intended for the initial historical backfill and periodic catch-up.
+
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Limit to a specific ET game date (YYYY-MM-DD). Leave blank to process all unresolved rows."
+        required: false
+        default: ""
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  outcomes:
+    runs-on: [self-hosted, schnapp-runner]
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Compute outcomes
+        run: |
+          DATE="${{ github.event.inputs.date }}"
+          if [ -n "$DATE" ]; then
+            python grading/grade_props.py --mode outcomes --date "$DATE"
+          else
+            python grading/grade_props.py --mode outcomes
+          fi
