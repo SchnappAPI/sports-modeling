@@ -55,7 +55,6 @@ function ScoreHeader({ data }: { data: LiveData }) {
 
   return (
     <div className="flex items-center justify-center gap-6 py-3 mb-4 border border-gray-800 rounded-lg bg-gray-900">
-      {/* Away team */}
       <div className="text-center min-w-[60px]">
         <div className="text-xs text-gray-500 font-semibold uppercase tracking-wider mb-0.5">
           {data.awayTeamAbbr}
@@ -65,7 +64,6 @@ function ScoreHeader({ data }: { data: LiveData }) {
         </div>
       </div>
 
-      {/* Clock / period */}
       <div className="text-center">
         <div className="flex items-center gap-1.5 justify-center mb-1">
           <span className="relative flex h-2 w-2">
@@ -77,7 +75,6 @@ function ScoreHeader({ data }: { data: LiveData }) {
         <div className="text-sm font-semibold text-gray-300">{data.gameStatusText}</div>
       </div>
 
-      {/* Home team */}
       <div className="text-center min-w-[60px]">
         <div className="text-xs text-gray-500 font-semibold uppercase tracking-wider mb-0.5">
           {data.homeTeamAbbr}
@@ -101,19 +98,21 @@ function TeamTable({
   gameId: string;
   selectedDate: string;
 }) {
+  const [benchOpen, setBenchOpen] = useState(false);
+  const [dnpOpen, setDnpOpen]     = useState(false);
+
   const hasLineup = players.some((p) => p.starter !== undefined);
 
-  const starters = hasLineup
-    ? players.filter((p) => p.starter)
-    : [];
-  const bench = hasLineup
-    ? players.filter((p) => !p.starter)
-    : [...players].sort((a, b) => b.min - a.min);
+  const starters   = hasLineup ? players.filter((p) => p.starter && p.min > 0) : [];
+  const benchPlayed = hasLineup
+    ? players.filter((p) => !p.starter && p.min > 0)
+    : players.filter((p) => p.min > 0).sort((a, b) => b.min - a.min);
+  const dnp        = players.filter((p) => p.min === 0);
 
   const renderRow = (p: LivePlayer) => {
     const href = `/nba/player/${p.playerId}?gameId=${gameId}&tab=boxscore&date=${selectedDate}`;
     return (
-      <tr key={p.playerId} className={`border-b border-gray-800 ${p.min === 0 ? 'opacity-40' : ''}`}>
+      <tr key={p.playerId} className="border-b border-gray-800">
         <td className="py-1 pr-3 whitespace-nowrap">
           <Link
             href={href}
@@ -139,10 +138,30 @@ function TeamTable({
     );
   };
 
-  const sectionHeader = (label: string) => (
+  const collapsibleHeader = (
+    label: string,
+    count: number,
+    open: boolean,
+    toggle: () => void,
+  ) => (
+    <tr>
+      <td colSpan={11} className="pt-2 pb-0.5">
+        <button
+          onClick={toggle}
+          className="flex items-center gap-1.5 text-xs text-gray-600 font-semibold uppercase tracking-wider hover:text-gray-400 transition-colors"
+        >
+          <span>{open ? '\u25bc' : '\u25b6'}</span>
+          <span>{label}</span>
+          <span className="text-gray-700 font-normal normal-case tracking-normal">({count})</span>
+        </button>
+      </td>
+    </tr>
+  );
+
+  const starterHeader = () => (
     <tr>
       <td colSpan={11} className="pt-2 pb-0.5 text-xs text-gray-600 font-semibold uppercase tracking-wider">
-        {label}
+        Starters
       </td>
     </tr>
   );
@@ -169,14 +188,16 @@ function TeamTable({
         <tbody>
           {hasLineup ? (
             <>
-              {starters.length > 0 && sectionHeader('Starters')}
+              {starters.length > 0 && starterHeader()}
               {starters.map(renderRow)}
-              {bench.length > 0 && sectionHeader('Bench')}
-              {bench.map(renderRow)}
+              {benchPlayed.length > 0 && collapsibleHeader('Bench', benchPlayed.length, benchOpen, () => setBenchOpen((v) => !v))}
+              {benchOpen && benchPlayed.map(renderRow)}
             </>
           ) : (
-            bench.map(renderRow)
+            benchPlayed.map(renderRow)
           )}
+          {dnp.length > 0 && collapsibleHeader('Not yet in', dnp.length, dnpOpen, () => setDnpOpen((v) => !v))}
+          {dnpOpen && dnp.map(renderRow)}
         </tbody>
       </table>
     </div>
@@ -234,10 +255,8 @@ export default function LiveBoxScore({
 
   return (
     <div>
-      {/* Score header — shown as soon as we have data */}
       {data && <ScoreHeader data={data} />}
 
-      {/* Refresh timestamp */}
       <div className="text-xs text-gray-600 mb-3">
         Updated {refreshStr} &middot; auto-refreshes every 30s
       </div>
