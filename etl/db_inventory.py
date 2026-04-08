@@ -1,14 +1,18 @@
 """
-db_inventory.py — understand alternate line structure in daily_grades
+db_inventory.py — check schema of odds tables for link column,
+and test what includeLinks=true returns from the Odds API
 """
 import os
 import pyodbc
+import urllib.request
+import json
 
 DRIVER   = "ODBC Driver 18 for SQL Server"
 SERVER   = os.environ["AZURE_SQL_SERVER"]
 DATABASE = os.environ["AZURE_SQL_DATABASE"]
 USERNAME = os.environ["AZURE_SQL_USERNAME"]
 PASSWORD = os.environ["AZURE_SQL_PASSWORD"]
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
 
 CONN_STR = (
     f"DRIVER={{{DRIVER}}};"
@@ -27,117 +31,64 @@ def p(line=""): print(line); out.append(line)
 conn   = pyodbc.connect(CONN_STR)
 cursor = conn.cursor()
 
-# Pick a recent date with good data
+p("=== COLUMNS IN odds.upcoming_player_props ===")
 cursor.execute("""
-    SELECT TOP 1 CONVERT(VARCHAR(10), grade_date, 120)
-    FROM common.daily_grades
-    WHERE grade_date < CAST(GETUTCDATE() AS DATE)
-    GROUP BY grade_date
-    HAVING COUNT(*) > 500
-    ORDER BY grade_date DESC
+    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'odds' AND TABLE_NAME = 'upcoming_player_props'
+    ORDER BY ORDINAL_POSITION
 """)
-sample_date = cursor.fetchone()[0]
-p(f"Sample date: {sample_date}")
-
-p()
-p("=== player_points line values for one player on sample date ===")
-p("  (showing both standard and alternate to understand structure)")
-cursor.execute("""
-    SELECT TOP 1 player_name
-    FROM common.daily_grades
-    WHERE CONVERT(VARCHAR(10), grade_date, 120) = ?
-      AND market_key IN ('player_points', 'player_points_alternate')
-      AND outcome_name = 'Over'
-      AND over_price IS NOT NULL
-    GROUP BY player_name
-    ORDER BY COUNT(*) DESC
-""", sample_date)
-sample_player = cursor.fetchone()[0]
-p(f"Sample player: {sample_player}")
-
-cursor.execute("""
-    SELECT market_key, outcome_name, line_value, over_price,
-           CASE WHEN line_value = FLOOR(line_value) THEN 'whole' ELSE 'decimal' END AS num_type
-    FROM common.daily_grades
-    WHERE CONVERT(VARCHAR(10), grade_date, 120) = ?
-      AND player_name = ?
-      AND market_key IN ('player_points', 'player_points_alternate')
-    ORDER BY market_key, outcome_name, line_value
-""", sample_date, sample_player)
-cols = [d[0] for d in cursor.description]
-p("  " + " | ".join(cols))
 for row in cursor.fetchall():
-    p("  " + " | ".join(str(v) for v in row))
+    p(f"  {row[0]:<40} {row[1]:<20} {str(row[2]) if row[2] else ''}")
 
 p()
-p("=== player_threes line values for one player ===")
-p("  (threes is clearest — 0.5 increments vs whole number)")
+p("=== COLUMNS IN odds.player_props ===")
 cursor.execute("""
-    SELECT TOP 1 player_name
-    FROM common.daily_grades
-    WHERE CONVERT(VARCHAR(10), grade_date, 120) = ?
-      AND market_key IN ('player_threes', 'player_threes_alternate')
-      AND outcome_name = 'Over'
-      AND over_price IS NOT NULL
-    GROUP BY player_name
-    ORDER BY COUNT(*) DESC
-""", sample_date)
-row = cursor.fetchone()
-if row:
-    sample_player2 = row[0]
-    p(f"Sample player: {sample_player2}")
-    cursor.execute("""
-        SELECT market_key, outcome_name, line_value, over_price,
-               CASE WHEN line_value = FLOOR(line_value) THEN 'whole' ELSE 'decimal' END AS num_type
-        FROM common.daily_grades
-        WHERE CONVERT(VARCHAR(10), grade_date, 120) = ?
-          AND player_name = ?
-          AND market_key IN ('player_threes', 'player_threes_alternate')
-        ORDER BY market_key, outcome_name, line_value
-    """, sample_date, sample_player2)
-    cols = [d[0] for d in cursor.description]
-    p("  " + " | ".join(cols))
-    for row in cursor.fetchall():
-        p("  " + " | ".join(str(v) for v in row))
-
-p()
-p("=== breakdown: whole number vs decimal alternate lines across all markets ===")
-cursor.execute("""
-    SELECT
-        market_key,
-        SUM(CASE WHEN line_value = FLOOR(line_value) THEN 1 ELSE 0 END) AS whole_number,
-        SUM(CASE WHEN line_value != FLOOR(line_value) THEN 1 ELSE 0 END) AS decimal_half,
-        COUNT(*) AS total
-    FROM common.daily_grades
-    WHERE CONVERT(VARCHAR(10), grade_date, 120) = ?
-      AND market_key LIKE '%_alternate'
-      AND outcome_name = 'Over'
-    GROUP BY market_key
-    ORDER BY market_key
-""", sample_date)
-cols = [d[0] for d in cursor.description]
-p("  " + "  ".join(f"{c:>45}" if i == 0 else f"{c:>15}" for i, c in enumerate(cols)))
+    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'odds' AND TABLE_NAME = 'player_props'
+    ORDER BY ORDINAL_POSITION
+""")
 for row in cursor.fetchall():
-    p("  " + "  ".join(f"{str(v):>45}" if i == 0 else f"{str(v):>15}" for i, v in enumerate(row)))
+    p(f"  {row[0]:<40} {row[1]:<20} {str(row[2]) if row[2] else ''}")
 
 p()
-p("=== what line values exist for player_points_alternate (Over only, with price) ===")
-cursor.execute("""
-    SELECT DISTINCT line_value,
-           CASE WHEN line_value = FLOOR(line_value) THEN 'whole' ELSE 'decimal' END AS num_type,
-           over_price
-    FROM common.daily_grades
-    WHERE CONVERT(VARCHAR(10), grade_date, 120) = ?
-      AND player_name = ?
-      AND market_key = 'player_points_alternate'
-      AND outcome_name = 'Over'
-      AND over_price IS NOT NULL
-    ORDER BY line_value
-""", sample_date, sample_player)
-cols = [d[0] for d in cursor.description]
-p("  " + " | ".join(cols))
-for row in cursor.fetchall():
-    p("  " + " | ".join(str(v) for v in row))
+p("=== CALLING ODDS API WITH includeLinks=true (single market, single event) ===")
+if ODDS_API_KEY:
+    # First get today's events to find one event ID
+    url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/events?apiKey={ODDS_API_KEY}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            events = json.loads(resp.read())
+        if events:
+            event_id = events[0]["id"]
+            p(f"  Using event_id: {event_id}")
+            p(f"  home: {events[0].get('home_team')} vs away: {events[0].get('away_team')}")
+            # Now fetch one prop market with links
+            prop_url = (
+                f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds"
+                f"?apiKey={ODDS_API_KEY}&regions=us&markets=player_points,player_points_alternate"
+                f"&bookmakers=fanduel&oddsFormat=american&includeLinks=true"
+            )
+            with urllib.request.urlopen(prop_url, timeout=15) as resp:
+                prop_data = json.loads(resp.read())
+            p(f"  API response keys: {list(prop_data.keys())}")
+            bookmakers = prop_data.get("bookmakers", [])
+            if bookmakers:
+                bk = bookmakers[0]
+                p(f"  Bookmaker: {bk.get('key')}")
+                for market in bk.get("markets", [])[:2]:
+                    p(f"  Market: {market.get('key')}")
+                    for outcome in market.get("outcomes", [])[:5]:
+                        p(f"    {outcome}")
+            else:
+                p("  No bookmakers returned (game may not have props yet)")
+        else:
+            p("  No events found for today")
+    except Exception as e:
+        p(f"  Error: {e}")
+else:
+    p("  ODDS_API_KEY not set")
 
 conn.close()
 p()
