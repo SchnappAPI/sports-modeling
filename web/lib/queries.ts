@@ -446,8 +446,9 @@ export interface GradeRow {
   gameId: string | null;
   homeTeamAbbr: string | null;
   awayTeamAbbr: string | null;
-  outcome: string | null;        // 'Won' | 'Lost' | null
-  eventId: string | null;        // Odds API event_id, used for live odds matching
+  outcome: string | null;   // 'Won' | 'Lost' | null
+  eventId: string | null;   // Odds API event_id for live odds matching
+  link: string | null;      // FanDuel deep link — only present for today/upcoming grades
 }
 
 export async function getGrades(
@@ -469,12 +470,41 @@ export async function getGrades(
   );
   const existingCols = new Set(colCheck.recordset.map((r) => r.column_name));
 
+  // Check whether the link column exists on upcoming_player_props yet.
+  // It is added by the ETL's ensure_schema() on next run, so this guards
+  // against the UI breaking before the first post-deploy odds refresh.
+  const linkColCheck = await pool.request().query<{ column_name: string }>(
+    `SELECT column_name
+     FROM information_schema.columns
+     WHERE table_schema = 'odds'
+       AND table_name   = 'upcoming_player_props'
+       AND column_name  = 'link'`
+  );
+  const hasLinkCol = linkColCheck.recordset.length > 0;
+
   const sel = (col: string, alias: string, fallback = 'NULL') =>
     existingCols.has(col) ? `dg.${col} AS ${alias}` : `${fallback} AS ${alias}`;
 
   const req = pool.request().input('gradeDate', mssql.VarChar, gradeDate);
   const gameFilter = gameId != null ? `AND egm.game_id = @gameId` : '';
   if (gameId != null) req.input('gameId', mssql.VarChar, gameId);
+
+  // Link is joined from upcoming_player_props on the exact
+  // (event_id, player_name, market_key, outcome_name, outcome_point) tuple.
+  // upcoming_player_props is truncated and reloaded each nightly run so it
+  // only contains today/upcoming rows — historical grades will always get NULL.
+  const linkSel = hasLinkCol
+    ? `pp.link                AS link`
+    : `NULL                   AS link`;
+
+  const linkJoin = hasLinkCol
+    ? `LEFT JOIN odds.upcoming_player_props pp
+         ON  pp.event_id     = dg.event_id
+         AND pp.player_name  = dg.player_name
+         AND pp.market_key   = dg.market_key
+         AND pp.outcome_name = COALESCE(dg.outcome_name, 'Over')
+         AND pp.outcome_point = dg.line_value`
+    : '';
 
   const result = await req.query<GradeRow>(
     `SELECT
@@ -501,6 +531,7 @@ export async function getGrades(
        ${sel('sample_size_opp',  'sampleSizeOpp')},
        ${sel('outcome',          'outcome')},
        dg.event_id          AS eventId,
+       ${linkSel},
        CASE
          WHEN p.team_id = s.home_team_id THEN s.away_team_id
          ELSE s.home_team_id
@@ -519,6 +550,7 @@ export async function getGrades(
      LEFT JOIN nba.schedule s ON s.game_id = egm.game_id
      LEFT JOIN nba.teams ht ON ht.team_id = s.home_team_id
      LEFT JOIN nba.teams at ON at.team_id = s.away_team_id
+     ${linkJoin}
      WHERE CONVERT(VARCHAR(10), dg.grade_date, 120) = @gradeDate
      ${gameFilter}
      ORDER BY COALESCE(dg.composite_grade, dg.grade) DESC`
