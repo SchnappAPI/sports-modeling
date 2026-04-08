@@ -40,3 +40,12 @@ jobs:
           else
             python grading/grade_props.py --mode backfill --batch 5
           fi
+
+      - name: Compute outcomes for newly-graded games
+        run: |
+          DATE="${{ github.event.inputs.date }}"
+          if [ -n "$DATE" ]; then
+            python grading/grade_props.py --mode outcomes --date "$DATE"
+          else
+            python grading/grade_props.py --mode outcomes
+          fi
