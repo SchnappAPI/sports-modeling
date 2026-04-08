@@ -1,7 +1,9 @@
 """
 db_inventory.py — daily_grades audit
+Writes output to /tmp/db_inventory_output.txt for retrieval via shell_exec.
 """
 import os
+import sys
 import pyodbc
 
 DRIVER   = "ODBC Driver 18 for SQL Server"
@@ -21,10 +23,16 @@ CONN_STR = (
     "Connection Timeout=60;"
 )
 
+out = []
+
+def p(line=""):
+    print(line)
+    out.append(line)
+
 conn   = pyodbc.connect(CONN_STR)
 cursor = conn.cursor()
 
-print("=== SUMMARY ===")
+p("=== SUMMARY ===")
 cursor.execute("""
     SELECT
         COUNT(*)                                             AS total_rows,
@@ -41,9 +49,10 @@ cursor.execute("""
 row = cursor.fetchone()
 cols = [d[0] for d in cursor.description]
 for col, val in zip(cols, row):
-    print(f"  {col}: {val}")
+    p(f"  {col}: {val}")
 
-print("\n=== ROWS BY MARKET ===")
+p()
+p("=== ROWS BY MARKET ===")
 cursor.execute("""
     SELECT market_key,
            COUNT(*)                                            AS total,
@@ -55,11 +64,12 @@ cursor.execute("""
     ORDER BY total DESC
 """)
 cols = [d[0] for d in cursor.description]
-print("  " + "  ".join(f"{c:<50}" if i == 0 else f"{c:>10}" for i, c in enumerate(cols)))
+p("  " + "  ".join(f"{c:<55}" if i == 0 else f"{c:>10}" for i, c in enumerate(cols)))
 for row in cursor.fetchall():
-    print("  " + "  ".join(f"{str(v):<50}" if i == 0 else f"{str(v):>10}" for i, v in enumerate(row)))
+    p("  " + "  ".join(f"{str(v):<55}" if i == 0 else f"{str(v):>10}" for i, v in enumerate(row)))
 
-print("\n=== ROWS BY DATE (last 10 graded dates) ===")
+p()
+p("=== ROWS BY DATE (last 10 graded dates) ===")
 cursor.execute("""
     SELECT TOP 10
         CONVERT(VARCHAR(10), grade_date, 120)               AS grade_date,
@@ -72,11 +82,12 @@ cursor.execute("""
     ORDER BY grade_date DESC
 """)
 cols = [d[0] for d in cursor.description]
-print("  " + "  ".join(f"{c:>12}" for c in cols))
+p("  " + "  ".join(f"{c:>12}" for c in cols))
 for row in cursor.fetchall():
-    print("  " + "  ".join(f"{str(v):>12}" for v in row))
+    p("  " + "  ".join(f"{str(v):>12}" for v in row))
 
-print("\n=== TOP 15 PROPS (most recent date, Over, by composite grade) ===")
+p()
+p("=== TOP 15 PROPS (most recent date, Over, by composite grade) ===")
 cursor.execute("""
     SELECT TOP 15
         CONVERT(VARCHAR(10), dg.grade_date, 120) AS grade_date,
@@ -93,9 +104,13 @@ cursor.execute("""
     ORDER BY dg.composite_grade DESC
 """)
 cols = [d[0] for d in cursor.description]
-print("  " + "  |  ".join(f"{c}" for c in cols))
+p("  " + " | ".join(f"{c}" for c in cols))
 for row in cursor.fetchall():
-    print("  " + "  |  ".join(f"{str(v)}" for v in row))
+    p("  " + " | ".join(f"{str(v)}" for v in row))
 
 conn.close()
-print("\nDone.")
+p()
+p("Done.")
+
+with open("/tmp/db_inventory_output.txt", "w") as f:
+    f.write("\n".join(out))
