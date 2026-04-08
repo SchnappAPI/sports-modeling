@@ -1,79 +1,54 @@
-"""
-db_inventory.py — verify link column populated in upcoming_player_props
-"""
-import os
-import pyodbc
-
-DRIVER   = "ODBC Driver 18 for SQL Server"
-SERVER   = os.environ["AZURE_SQL_SERVER"]
-DATABASE = os.environ["AZURE_SQL_DATABASE"]
-USERNAME = os.environ["AZURE_SQL_USERNAME"]
-PASSWORD = os.environ["AZURE_SQL_PASSWORD"]
+import os, pyodbc
 
 CONN_STR = (
-    f"DRIVER={{{DRIVER}}};"
-    f"SERVER={SERVER};"
-    f"DATABASE={DATABASE};"
-    f"UID={USERNAME};"
-    f"PWD={PASSWORD};"
-    "Encrypt=yes;"
-    "TrustServerCertificate=no;"
-    "Connection Timeout=60;"
+    f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+    f"SERVER={os.environ['AZURE_SQL_SERVER']};"
+    f"DATABASE={os.environ['AZURE_SQL_DATABASE']};"
+    f"UID={os.environ['AZURE_SQL_USERNAME']};"
+    f"PWD={os.environ['AZURE_SQL_PASSWORD']};"
+    "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
 )
+conn = pyodbc.connect(CONN_STR)
+cur = conn.cursor()
 
 out = []
 def p(line=""): print(line); out.append(line)
 
-conn   = pyodbc.connect(CONN_STR)
-cursor = conn.cursor()
-
-p("=== link column presence ===")
-cursor.execute("""
-    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = 'odds' AND TABLE_NAME = 'upcoming_player_props'
-      AND COLUMN_NAME = 'link'
+cur.execute("""
+    SELECT player_id, player_name, team_id, team_tricode, roster_status
+    FROM nba.players WHERE player_name LIKE '%McCollum%'
 """)
-row = cursor.fetchone()
-if row:
-    p(f"  link column exists: {row[0]} {row[1]}({row[2]})")
-else:
-    p("  link column NOT found")
+p("=== players ===")
+for r in cur.fetchall(): p(str(r))
 
-p()
-p("=== link population summary ===")
-cursor.execute("""
-    SELECT
-        COUNT(*)                                          AS total_rows,
-        SUM(CASE WHEN link IS NOT NULL THEN 1 ELSE 0 END) AS rows_with_link,
-        SUM(CASE WHEN link IS NULL     THEN 1 ELSE 0 END) AS rows_without_link
-    FROM odds.upcoming_player_props
-    WHERE sport_key = 'basketball_nba'
+cur.execute("""
+    SELECT COUNT(DISTINCT game_id) AS games, MIN(game_date) AS first, MAX(game_date) AS last
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
 """)
-row = cursor.fetchone()
-cols = [d[0] for d in cursor.description]
-for col, val in zip(cols, row):
-    p(f"  {col}: {val}")
+p("=== pbs game count ===")
+for r in cur.fetchall(): p(str(r))
 
-p()
-p("=== sample links (5 rows) ===")
-cursor.execute("""
-    SELECT TOP 5
-        player_name, market_key, outcome_name, outcome_point, outcome_price, link
-    FROM odds.upcoming_player_props
-    WHERE sport_key = 'basketball_nba'
-      AND link IS NOT NULL
-      AND outcome_name = 'Over'
-    ORDER BY player_name, market_key, outcome_point
+cur.execute("""
+    SELECT TOP 5 game_id, CONVERT(VARCHAR(10), game_date, 120) AS game_date, matchup
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
+    ORDER BY game_date DESC
 """)
-cols = [d[0] for d in cursor.description]
-p("  " + " | ".join(cols))
-for row in cursor.fetchall():
-    p("  " + " | ".join(str(v) for v in row))
+p("=== recent pbs rows ===")
+for r in cur.fetchall(): p(str(r))
+
+cur.execute("""
+    SELECT TOP 5 game_id, CONVERT(VARCHAR(10), game_date, 120) AS game_date, matchup
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
+    ORDER BY game_date ASC
+""")
+p("=== oldest pbs rows ===")
+for r in cur.fetchall(): p(str(r))
 
 conn.close()
-p()
-p("Done.")
 
 with open("/tmp/db_inventory_output.txt", "w") as f:
     f.write("\n".join(out))
+p("Done.")
