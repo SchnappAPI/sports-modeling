@@ -41,8 +41,6 @@ interface DefenseCache {
   [key: string]: Record<string, number> | 'loading' | 'error';
 }
 
-// Live prices fetched from /api/live-props
-// key: "eventId|playerName|marketKey|lineValue|outcomeName" -> american price
 type LivePrices = Record<string, number>;
 
 const MARKET_ABBR: Record<string, string> = {
@@ -141,7 +139,6 @@ function posGroup(position: string | null): string | null {
 }
 
 const ODDS_MIN     = -1000;
-const ODDS_MAX     = 200;
 const ODDS_DEFAULT = -600;
 
 type OutcomeFilter = 'Over' | 'Under';
@@ -173,7 +170,6 @@ export default function GradesPageInner() {
   const [outcomeFilter, setOutcomeFilter]   = useState<OutcomeFilter>('Over');
   const [resultFilter, setResultFilter]     = useState<ResultFilter>('all');
 
-  // Live odds state
   const [livePrices, setLivePrices]     = useState<LivePrices>({});
   const [liveEventIds, setLiveEventIds] = useState<Set<string>>(new Set());
   const liveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -182,7 +178,16 @@ export default function GradesPageInner() {
   const isToday   = gradeDate === todayLocal();
   const backHref  = '/nba';
 
-  // Fetch live props when viewing today and there are live event IDs
+  // Derive the max price present in the loaded grades so the slider ceiling
+  // is always exactly what the data contains — no hardcoded cap.
+  const oddsMax = useMemo(() => {
+    const prices = grades
+      .map((r) => r.overPrice)
+      .filter((p): p is number => p != null);
+    if (prices.length === 0) return ODDS_DEFAULT;
+    return Math.max(...prices);
+  }, [grades]);
+
   const fetchLiveProps = useCallback(async () => {
     try {
       const r = await fetch('/api/live-props');
@@ -215,7 +220,11 @@ export default function GradesPageInner() {
     loadGrades();
   }, [loadGrades]);
 
-  // Start / stop live odds polling based on whether we're on today
+  // If minOdds is above the new oddsMax after grades reload, clamp it down.
+  useEffect(() => {
+    if (minOdds > oddsMax) setMinOdds(oddsMax);
+  }, [oddsMax]);
+
   useEffect(() => {
     if (liveIntervalRef.current) {
       clearInterval(liveIntervalRef.current);
@@ -226,7 +235,6 @@ export default function GradesPageInner() {
       setLiveEventIds(new Set());
       return;
     }
-    // Initial fetch, then refresh every 60s
     fetchLiveProps();
     liveIntervalRef.current = setInterval(fetchLiveProps, 60_000);
     return () => {
@@ -266,9 +274,6 @@ export default function GradesPageInner() {
     if (isToday) fetchLiveProps();
   }
 
-  // Resolve the displayed price for a row:
-  // - If the game is live, show the current live price (or '-' if pulled)
-  // - Otherwise show the stored pre-game price
   function getLivePrice(row: GradeRow): number | null | 'live-unavailable' {
     if (!row.eventId || !liveEventIds.has(row.eventId)) return null;
     const key = `${row.eventId}|${row.playerName}|${row.marketKey}|${row.lineValue}|${row.outcomeName ?? 'Over'}`;
@@ -302,7 +307,6 @@ export default function GradesPageInner() {
   const overCount  = useMemo(() => grades.filter((r) => (r.outcomeName ?? 'Over') === 'Over' && r.overPrice != null).length, [grades]);
   const underCount = useMemo(() => grades.filter((r) => r.outcomeName === 'Under' && r.overPrice != null).length, [grades]);
 
-  // Counts for result filter tabs (scoped to current outcomeFilter)
   const resultCounts = useMemo(() => {
     const base = grades.filter((r) => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter);
     return {
@@ -320,8 +324,7 @@ export default function GradesPageInner() {
     let rows = grades.filter((r) => r.overPrice != null);
     rows = rows.filter((r) => (r.outcomeName ?? 'Over') === outcomeFilter);
 
-    // Result filter
-    if (resultFilter === 'Won')  rows = rows.filter((r) => r.outcome === 'Won');
+    if (resultFilter === 'Won')       rows = rows.filter((r) => r.outcome === 'Won');
     else if (resultFilter === 'Lost') rows = rows.filter((r) => r.outcome === 'Lost');
     else if (resultFilter === 'open') rows = rows.filter((r) => r.outcome == null);
 
@@ -459,12 +462,10 @@ export default function GradesPageInner() {
         </span>
         <span className="text-xs text-gray-600">{gradeDate}</span>
 
-        {/* Live indicator */}
         {hasLiveGames && (
           <span className="text-xs text-green-500 font-medium">&#9679; Live</span>
         )}
 
-        {/* Over / Under toggle */}
         {!loading && !error && grades.length > 0 && (
           <div className="flex rounded border border-gray-700 overflow-hidden text-xs font-medium">
             <button
@@ -486,7 +487,6 @@ export default function GradesPageInner() {
           </div>
         )}
 
-        {/* Won / Lost / Open filter */}
         {!loading && !error && grades.length > 0 && (
           <div className="flex rounded border border-gray-700 overflow-hidden text-xs font-medium">
             {(['all', 'open', 'Won', 'Lost'] as ResultFilter[]).map((f, i) => {
@@ -560,14 +560,13 @@ export default function GradesPageInner() {
         )}
       </div>
 
-      {/* Odds floor slider */}
       {!loading && !error && grades.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
           <span className="text-xs text-gray-600 whitespace-nowrap">Min odds</span>
           <input
             type="range"
             min={ODDS_MIN}
-            max={ODDS_MAX}
+            max={oddsMax}
             step={5}
             value={minOdds}
             onChange={(e) => setMinOdds(parseInt(e.target.value))}
@@ -622,9 +621,6 @@ export default function GradesPageInner() {
                     ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'} (full season)`
                     : undefined;
 
-                  // Determine displayed price:
-                  // - live game: use live price (null if pulled)
-                  // - pre-game or final: use stored pre-game price
                   const livePrice = getLivePrice(row);
                   const isLive    = livePrice !== null;
                   const displayPrice: number | null = isLive && livePrice !== 'live-unavailable'
@@ -640,14 +636,12 @@ export default function GradesPageInner() {
                           <Link href={playerHref(row)} className="text-gray-100 hover:text-blue-400 transition-colors">
                             {row.playerName}
                           </Link>
-                          {/* Outcome badge */}
                           {row.outcome === 'Won' && (
                             <span className="text-xs font-medium text-green-400 bg-green-900/40 px-1 rounded">W</span>
                           )}
                           {row.outcome === 'Lost' && (
                             <span className="text-xs font-medium text-red-400 bg-red-900/40 px-1 rounded">L</span>
                           )}
-                          {/* Live indicator per row */}
                           {isLive && (
                             <span className="text-xs text-green-500">&#9679;</span>
                           )}
