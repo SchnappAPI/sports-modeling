@@ -333,8 +333,30 @@ export async function getPlayerGames(
       `WITH player_team AS (
          SELECT team_id FROM nba.players WHERE player_id = @playerId
        ),
-       team_games AS (
-         SELECT TOP (@lastN)
+       -- Played games: sourced directly from box score so trade history is included.
+       -- matchup format: 'TEAM vs. OPP' (home) or 'TEAM @ OPP' (away)
+       player_quarters AS (
+         SELECT
+           pbs.game_id,
+           pbs.game_date,
+           pbs.period,
+           pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk, pbs.tov,
+           pbs.minutes AS min,
+           pbs.fg3m, pbs.fg3a, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta,
+           CASE WHEN pbs.matchup LIKE '% vs. %' THEN 1 ELSE 0 END AS isHome,
+           CASE WHEN pbs.matchup LIKE '% vs. %'
+                THEN LTRIM(RTRIM(SUBSTRING(pbs.matchup, CHARINDEX(' vs. ', pbs.matchup) + 5, 10)))
+                ELSE LTRIM(RTRIM(SUBSTRING(pbs.matchup, CHARINDEX(' @ ', pbs.matchup) + 3, 10)))
+           END AS opponentAbbr
+         FROM nba.player_box_score_stats pbs
+         WHERE pbs.player_id = @playerId
+       ),
+       played_game_ids AS (
+         SELECT DISTINCT game_id FROM player_quarters
+       ),
+       -- DNP games: current team schedule only, for games the player missed or hasn't played yet
+       current_team_games AS (
+         SELECT
            s.game_id,
            s.game_date,
            s.home_team_id,
@@ -346,20 +368,6 @@ export async function getPlayerGames(
          WHERE (s.home_team_id = (SELECT team_id FROM player_team)
              OR s.away_team_id = (SELECT team_id FROM player_team))
            AND s.game_date <= DATEADD(DAY, 1, CAST(GETUTCDATE() AS DATE))
-         ORDER BY s.game_date DESC
-       ),
-       player_quarters AS (
-         SELECT
-           pbs.game_id,
-           pbs.period,
-           pbs.pts, pbs.reb, pbs.ast, pbs.stl, pbs.blk, pbs.tov,
-           pbs.minutes AS min,
-           pbs.fg3m, pbs.fg3a, pbs.fgm, pbs.fga, pbs.ftm, pbs.fta
-         FROM nba.player_box_score_stats pbs
-         WHERE pbs.player_id = @playerId
-       ),
-       played_games AS (
-         SELECT DISTINCT game_id FROM player_quarters
        ),
        lineup_status AS (
          SELECT dl.game_id,
@@ -367,48 +375,47 @@ export async function getPlayerGames(
          FROM nba.daily_lineups dl
          JOIN nba.players p ON p.player_name = dl.player_name
          WHERE p.player_id = @playerId
+       ),
+       combined AS (
+         SELECT
+           pq.game_id                              AS gameId,
+           CONVERT(VARCHAR(10), pq.game_date, 120) AS gameDate,
+           pq.opponentAbbr,
+           pq.isHome,
+           0                                       AS dnp,
+           ls.started                              AS started,
+           pq.period,
+           pq.pts, pq.reb, pq.ast, pq.stl, pq.blk, pq.tov,
+           pq.min, pq.fg3m, pq.fg3a, pq.fgm, pq.fga, pq.ftm, pq.fta,
+           pps.potential_ast                       AS potentialAst,
+           prc.reb_chances                         AS rebChances
+         FROM player_quarters pq
+         LEFT JOIN lineup_status ls ON ls.game_id = pq.game_id
+         LEFT JOIN nba.player_passing_stats pps
+           ON pps.player_id = @playerId AND pps.game_date = pq.game_date
+         LEFT JOIN nba.player_rebound_chances prc
+           ON prc.player_id = @playerId AND prc.game_date = pq.game_date
+
+         UNION ALL
+
+         SELECT
+           ctg.game_id                              AS gameId,
+           CONVERT(VARCHAR(10), ctg.game_date, 120) AS gameDate,
+           CASE WHEN ctg.home_team_id = (SELECT team_id FROM player_team)
+                THEN ctg.away_tricode ELSE ctg.home_tricode END AS opponentAbbr,
+           CASE WHEN ctg.home_team_id = (SELECT team_id FROM player_team)
+                THEN 1 ELSE 0 END                  AS isHome,
+           1                                        AS dnp,
+           NULL                                     AS started,
+           'FullGame'                               AS period,
+           NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+           NULL AS potentialAst,
+           NULL AS rebChances
+         FROM current_team_games ctg
+         WHERE ctg.game_id NOT IN (SELECT game_id FROM played_game_ids)
        )
-       SELECT
-         tg.game_id                              AS gameId,
-         CONVERT(VARCHAR(10), tg.game_date, 120) AS gameDate,
-         CASE WHEN tg.home_team_id = (SELECT team_id FROM player_team)
-              THEN tg.away_tricode ELSE tg.home_tricode END AS opponentAbbr,
-         CASE WHEN tg.home_team_id = (SELECT team_id FROM player_team)
-              THEN 1 ELSE 0 END                 AS isHome,
-         0                                       AS dnp,
-         ls.started                              AS started,
-         pq.period,
-         pq.pts, pq.reb, pq.ast, pq.stl, pq.blk, pq.tov,
-         pq.min, pq.fg3m, pq.fg3a, pq.fgm, pq.fga, pq.ftm, pq.fta,
-         pps.potential_ast                       AS potentialAst,
-         prc.reb_chances                         AS rebChances
-       FROM team_games tg
-       JOIN played_games pg ON pg.game_id = tg.game_id
-       JOIN player_quarters pq ON pq.game_id = tg.game_id
-       LEFT JOIN lineup_status ls ON ls.game_id = tg.game_id
-       LEFT JOIN nba.player_passing_stats pps
-         ON pps.player_id = @playerId AND pps.game_date = tg.game_date
-       LEFT JOIN nba.player_rebound_chances prc
-         ON prc.player_id = @playerId AND prc.game_date = tg.game_date
-
-       UNION ALL
-
-       SELECT
-         tg.game_id                              AS gameId,
-         CONVERT(VARCHAR(10), tg.game_date, 120) AS gameDate,
-         CASE WHEN tg.home_team_id = (SELECT team_id FROM player_team)
-              THEN tg.away_tricode ELSE tg.home_tricode END AS opponentAbbr,
-         CASE WHEN tg.home_team_id = (SELECT team_id FROM player_team)
-              THEN 1 ELSE 0 END                 AS isHome,
-         1                                       AS dnp,
-         NULL                                    AS started,
-         'FullGame'                              AS period,
-         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-         NULL AS potentialAst,
-         NULL AS rebChances
-       FROM team_games tg
-       WHERE tg.game_id NOT IN (SELECT game_id FROM played_games)
-
+       SELECT TOP (@lastN) *
+       FROM combined
        ORDER BY gameDate DESC, gameId, period`
     );
   return result.recordset;
