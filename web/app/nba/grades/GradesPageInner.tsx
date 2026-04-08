@@ -33,11 +33,17 @@ interface GradeRow {
   gameId: string | null;
   homeTeamAbbr: string | null;
   awayTeamAbbr: string | null;
+  outcome: string | null;
+  eventId: string | null;
 }
 
 interface DefenseCache {
   [key: string]: Record<string, number> | 'loading' | 'error';
 }
+
+// Live prices fetched from /api/live-props
+// key: "eventId|playerName|marketKey|lineValue|outcomeName" -> american price
+type LivePrices = Record<string, number>;
 
 const MARKET_ABBR: Record<string, string> = {
   player_points:                           'PTS',
@@ -138,6 +144,9 @@ const ODDS_MIN     = -1000;
 const ODDS_MAX     = 200;
 const ODDS_DEFAULT = -600;
 
+type OutcomeFilter = 'Over' | 'Under';
+type ResultFilter  = 'all' | 'open' | 'Won' | 'Lost';
+
 type SortKey =
   | 'playerName' | 'marketKey' | 'lineValue' | 'overPrice'
   | 'grade' | 'compositeGrade' | 'hitRate20' | 'hitRate60'
@@ -161,10 +170,30 @@ export default function GradesPageInner() {
   const [defenseCache, setDefenseCache]     = useState<DefenseCache>({});
   const [sortKey, setSortKey]               = useState<SortKey>('compositeGrade');
   const [sortDir, setSortDir]               = useState<SortDir>('desc');
-  const [outcomeFilter, setOutcomeFilter]   = useState<'Over' | 'Under'>('Over');
+  const [outcomeFilter, setOutcomeFilter]   = useState<OutcomeFilter>('Over');
+  const [resultFilter, setResultFilter]     = useState<ResultFilter>('all');
+
+  // Live odds state
+  const [livePrices, setLivePrices]     = useState<LivePrices>({});
+  const [liveEventIds, setLiveEventIds] = useState<Set<string>>(new Set());
+  const liveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const gradeDate = searchParams.get('date') ?? todayLocal();
+  const isToday   = gradeDate === todayLocal();
   const backHref  = '/nba';
+
+  // Fetch live props when viewing today and there are live event IDs
+  const fetchLiveProps = useCallback(async () => {
+    try {
+      const r = await fetch('/api/live-props');
+      if (!r.ok) return;
+      const data = await r.json();
+      setLivePrices(data.prices ?? {});
+      setLiveEventIds(new Set(data.liveEventIds ?? []));
+    } catch {
+      // silently ignore
+    }
+  }, []);
 
   const loadGrades = useCallback(() => {
     setLoading(true);
@@ -182,8 +211,28 @@ export default function GradesPageInner() {
     setMinOdds(ODDS_DEFAULT);
     setSelectedGameId('');
     setDefenseCache({});
+    setResultFilter('all');
     loadGrades();
   }, [loadGrades]);
+
+  // Start / stop live odds polling based on whether we're on today
+  useEffect(() => {
+    if (liveIntervalRef.current) {
+      clearInterval(liveIntervalRef.current);
+      liveIntervalRef.current = null;
+    }
+    if (!isToday) {
+      setLivePrices({});
+      setLiveEventIds(new Set());
+      return;
+    }
+    // Initial fetch, then refresh every 60s
+    fetchLiveProps();
+    liveIntervalRef.current = setInterval(fetchLiveProps, 60_000);
+    return () => {
+      if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
+    };
+  }, [isToday, fetchLiveProps]);
 
   useEffect(() => {
     if (grades.length === 0) return;
@@ -214,6 +263,17 @@ export default function GradesPageInner() {
   function handleRefreshComplete() {
     loadGrades();
     setDefenseCache({});
+    if (isToday) fetchLiveProps();
+  }
+
+  // Resolve the displayed price for a row:
+  // - If the game is live, show the current live price (or '-' if pulled)
+  // - Otherwise show the stored pre-game price
+  function getLivePrice(row: GradeRow): number | null | 'live-unavailable' {
+    if (!row.eventId || !liveEventIds.has(row.eventId)) return null;
+    const key = `${row.eventId}|${row.playerName}|${row.marketKey}|${row.lineValue}|${row.outcomeName ?? 'Over'}`;
+    if (key in livePrices) return livePrices[key];
+    return 'live-unavailable';
   }
 
   const gameOptions = useMemo(() => {
@@ -242,9 +302,29 @@ export default function GradesPageInner() {
   const overCount  = useMemo(() => grades.filter((r) => (r.outcomeName ?? 'Over') === 'Over' && r.overPrice != null).length, [grades]);
   const underCount = useMemo(() => grades.filter((r) => r.outcomeName === 'Under' && r.overPrice != null).length, [grades]);
 
+  // Counts for result filter tabs (scoped to current outcomeFilter)
+  const resultCounts = useMemo(() => {
+    const base = grades.filter((r) => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter);
+    return {
+      won:  base.filter((r) => r.outcome === 'Won').length,
+      lost: base.filter((r) => r.outcome === 'Lost').length,
+      open: base.filter((r) => r.outcome == null).length,
+    };
+  }, [grades, outcomeFilter]);
+
+  const hasLiveGames = useMemo(() => {
+    return grades.some((r) => r.eventId && liveEventIds.has(r.eventId));
+  }, [grades, liveEventIds]);
+
   const filtered = useMemo(() => {
     let rows = grades.filter((r) => r.overPrice != null);
     rows = rows.filter((r) => (r.outcomeName ?? 'Over') === outcomeFilter);
+
+    // Result filter
+    if (resultFilter === 'Won')  rows = rows.filter((r) => r.outcome === 'Won');
+    else if (resultFilter === 'Lost') rows = rows.filter((r) => r.outcome === 'Lost');
+    else if (resultFilter === 'open') rows = rows.filter((r) => r.outcome == null);
+
     if (selectedGameId) rows = rows.filter((r) => r.gameId === selectedGameId);
     if (selectedMarket) {
       rows = rows.filter((r) =>
@@ -269,7 +349,7 @@ export default function GradesPageInner() {
       });
     }
     return rows;
-  }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds, outcomeFilter]);
+  }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds, outcomeFilter, resultFilter]);
 
   function getDefRank(row: GradeRow): number | null {
     const pg = posGroup(row.position);
@@ -366,6 +446,8 @@ export default function GradesPageInner() {
     );
   }
 
+  const totalForFilter = grades.filter(r => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter).length;
+
   return (
     <div className="flex flex-col min-h-screen">
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap">
@@ -377,6 +459,12 @@ export default function GradesPageInner() {
         </span>
         <span className="text-xs text-gray-600">{gradeDate}</span>
 
+        {/* Live indicator */}
+        {hasLiveGames && (
+          <span className="text-xs text-green-500 font-medium">&#9679; Live</span>
+        )}
+
+        {/* Over / Under toggle */}
         {!loading && !error && grades.length > 0 && (
           <div className="flex rounded border border-gray-700 overflow-hidden text-xs font-medium">
             <button
@@ -395,6 +483,34 @@ export default function GradesPageInner() {
             >
               Under{underCount > 0 ? ` (${underCount})` : ''}
             </button>
+          </div>
+        )}
+
+        {/* Won / Lost / Open filter */}
+        {!loading && !error && grades.length > 0 && (
+          <div className="flex rounded border border-gray-700 overflow-hidden text-xs font-medium">
+            {(['all', 'open', 'Won', 'Lost'] as ResultFilter[]).map((f, i) => {
+              const label = f === 'all' ? 'All'
+                : f === 'open' ? `Open${resultCounts.open > 0 ? ` (${resultCounts.open})` : ''}`
+                : f === 'Won'  ? `Won${resultCounts.won  > 0 ? ` (${resultCounts.won})`  : ''}`
+                :                `Lost${resultCounts.lost > 0 ? ` (${resultCounts.lost})` : ''}`;
+              const active = resultFilter === f;
+              const borderLeft = i > 0 ? 'border-l border-gray-700' : '';
+              const activeColor = f === 'Won' ? 'bg-green-900 text-green-300'
+                : f === 'Lost' ? 'bg-red-900 text-red-300'
+                : 'bg-gray-700 text-gray-100';
+              return (
+                <button
+                  key={f}
+                  onClick={() => setResultFilter(f)}
+                  className={`px-3 py-1 transition-colors ${borderLeft} ${
+                    active ? activeColor : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -438,8 +554,8 @@ export default function GradesPageInner() {
 
         {!loading && !error && (
           <span className="text-xs text-gray-600 ml-auto">
-            {sorted.length}{sorted.length !== grades.filter(r => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter).length
-              ? ` / ${grades.filter(r => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter).length}` : ''} props
+            {sorted.length}{sorted.length !== totalForFilter
+              ? ` / ${totalForFilter}` : ''} props
           </span>
         )}
       </div>
@@ -491,7 +607,7 @@ export default function GradesPageInner() {
                   <SortTh col="grade" label="HR%" title="Hit rate grade (weighted 20/60 day)" right />
                   <SortTh col="hitRate20" label="L20%" right />
                   <SortTh col="hitRate60" label="L60%" right />
-                  <SortTh col="hitRateOpp" label={oppLabel} title="Hit rate vs today's opponent (60-day window)" right />
+                  <SortTh col="hitRateOpp" label={oppLabel} title="Hit rate vs today's opponent (full season)" right />
                   <SortTh col="sampleSize20" label="N20" right />
                   <SortTh col="sampleSize60" label="N60" right />
                   <SortTh col="def" label="Def" title="Opponent defense rank. 1st = most allowed." right />
@@ -503,22 +619,52 @@ export default function GradesPageInner() {
                   const alt = isAlternate(row.marketKey);
                   const oppPct   = fmtPct(row.hitRateOpp);
                   const oppTitle = row.sampleSizeOpp
-                    ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'}`
+                    ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'} (full season)`
                     : undefined;
+
+                  // Determine displayed price:
+                  // - live game: use live price (null if pulled)
+                  // - pre-game or final: use stored pre-game price
+                  const livePrice = getLivePrice(row);
+                  const isLive    = livePrice !== null;
+                  const displayPrice: number | null = isLive && livePrice !== 'live-unavailable'
+                    ? livePrice
+                    : isLive && livePrice === 'live-unavailable'
+                    ? null
+                    : row.overPrice;
+
                   return (
                     <tr key={row.gradeId} className="border-b border-gray-800">
                       <td className="py-1.5 pr-3">
-                        <Link href={playerHref(row)} className="text-gray-100 hover:text-blue-400 transition-colors">
-                          {row.playerName}
-                        </Link>
+                        <div className="flex items-center gap-1.5">
+                          <Link href={playerHref(row)} className="text-gray-100 hover:text-blue-400 transition-colors">
+                            {row.playerName}
+                          </Link>
+                          {/* Outcome badge */}
+                          {row.outcome === 'Won' && (
+                            <span className="text-xs font-medium text-green-400 bg-green-900/40 px-1 rounded">W</span>
+                          )}
+                          {row.outcome === 'Lost' && (
+                            <span className="text-xs font-medium text-red-400 bg-red-900/40 px-1 rounded">L</span>
+                          )}
+                          {/* Live indicator per row */}
+                          {isLive && (
+                            <span className="text-xs text-green-500">&#9679;</span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">{marketAbbr(row.marketKey)}</td>
                       <td className="py-1.5 px-1 text-center text-xs">
                         {alt ? <span className="text-yellow-600">*</span> : ''}
                       </td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.lineValue)}</td>
-                      <td className={`py-1.5 px-2 text-right tabular-nums ${oddsColor(row.overPrice)}`}>{fmtOdds(row.overPrice)}</td>
-                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">{impliedProb(row.overPrice)}</td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${isLive ? 'text-green-400' : oddsColor(displayPrice)}`}>
+                        {fmtOdds(displayPrice)}
+                        {isLive && displayPrice != null && (
+                          <span className="text-gray-600 text-xs ml-0.5">L</span>
+                        )}
+                      </td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">{impliedProb(displayPrice)}</td>
                       <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.compositeGrade)}`}>{fmt(row.compositeGrade)}</td>
                       <td className={`py-1.5 px-2 text-right ${gradeColor(row.grade)}`}>{fmt(row.grade)}</td>
                       <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>
