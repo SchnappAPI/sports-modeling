@@ -1,5 +1,5 @@
 """
-db_inventory.py — last 7 days of raw player props from odds.player_props
+db_inventory.py — audit null over_price rows in common.daily_grades
 """
 import os
 import pyodbc
@@ -27,39 +27,28 @@ def p(line=""): print(line); out.append(line)
 conn   = pyodbc.connect(CONN_STR)
 cursor = conn.cursor()
 
-p("=== odds.player_props — TABLE SUMMARY ===")
+p("=== NULL vs NON-NULL over_price breakdown ===")
 cursor.execute("""
     SELECT
-        COUNT(*)                                                    AS total_rows,
-        COUNT(DISTINCT CAST(egm.game_date AS DATE))                 AS distinct_dates,
-        CONVERT(VARCHAR(10), MIN(CAST(egm.game_date AS DATE)), 120) AS earliest_date,
-        CONVERT(VARCHAR(10), MAX(CAST(egm.game_date AS DATE)), 120) AS latest_date,
-        COUNT(DISTINCT pp.market_key)                               AS distinct_markets,
-        COUNT(DISTINCT pp.bookmaker_key)                            AS distinct_bookmakers
-    FROM odds.player_props pp
-    JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-    WHERE pp.sport_key = 'basketball_nba'
+        SUM(CASE WHEN over_price IS NULL THEN 1 ELSE 0 END)     AS null_price,
+        SUM(CASE WHEN over_price IS NOT NULL THEN 1 ELSE 0 END) AS has_price,
+        COUNT(*)                                                 AS total
+    FROM common.daily_grades
 """)
 row = cursor.fetchone()
-cols = [d[0] for d in cursor.description]
-for col, val in zip(cols, row):
+for col, val in zip([d[0] for d in cursor.description], row):
     p(f"  {col}: {val}")
 
 p()
-p("=== LAST 7 DAYS — ROW COUNT BY DATE AND BOOKMAKER ===")
+p("=== NULL over_price breakdown by outcome_name ===")
 cursor.execute("""
-    SELECT
-        CONVERT(VARCHAR(10), CAST(egm.game_date AS DATE), 120) AS game_date,
-        pp.bookmaker_key,
-        COUNT(*)                                               AS rows,
-        COUNT(DISTINCT pp.player_name)                         AS players,
-        COUNT(DISTINCT pp.market_key)                          AS markets
-    FROM odds.player_props pp
-    JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-    WHERE pp.sport_key = 'basketball_nba'
-      AND CAST(egm.game_date AS DATE) >= CAST(DATEADD(day, -7, GETUTCDATE()) AS DATE)
-    GROUP BY CAST(egm.game_date AS DATE), pp.bookmaker_key
-    ORDER BY game_date DESC, rows DESC
+    SELECT outcome_name,
+           COUNT(*)                                                 AS total,
+           SUM(CASE WHEN over_price IS NULL THEN 1 ELSE 0 END)     AS null_price,
+           SUM(CASE WHEN over_price IS NOT NULL THEN 1 ELSE 0 END) AS has_price
+    FROM common.daily_grades
+    GROUP BY outcome_name
+    ORDER BY total DESC
 """)
 cols = [d[0] for d in cursor.description]
 p("  " + "  ".join(f"{c:>15}" for c in cols))
@@ -67,22 +56,55 @@ for row in cursor.fetchall():
     p("  " + "  ".join(f"{str(v):>15}" for v in row))
 
 p()
-p("=== LAST 7 DAYS — FANDUEL SAMPLE (20 rows, Over lines only) ===")
+p("=== NULL over_price breakdown by market_key (top 10) ===")
+cursor.execute("""
+    SELECT TOP 10
+        market_key,
+        SUM(CASE WHEN over_price IS NULL THEN 1 ELSE 0 END)     AS null_price,
+        SUM(CASE WHEN over_price IS NOT NULL THEN 1 ELSE 0 END) AS has_price,
+        COUNT(*)                                                 AS total
+    FROM common.daily_grades
+    GROUP BY market_key
+    ORDER BY null_price DESC
+""")
+cols = [d[0] for d in cursor.description]
+p("  " + "  ".join(f"{c:>45}" if i == 0 else f"{c:>12}" for i, c in enumerate(cols)))
+for row in cursor.fetchall():
+    p("  " + "  ".join(f"{str(v):>45}" if i == 0 else f"{str(v):>12}" for i, v in enumerate(row)))
+
+p()
+p("=== ARE NULL-PRICE ROWS REFERENCED ANYWHERE? ===")
+p("  Checking if any null-price rows have hit_rate or grade data (i.e. do they carry useful signal)...")
+cursor.execute("""
+    SELECT
+        SUM(CASE WHEN composite_grade IS NOT NULL THEN 1 ELSE 0 END) AS has_composite,
+        SUM(CASE WHEN grade IS NOT NULL           THEN 1 ELSE 0 END) AS has_grade,
+        SUM(CASE WHEN hit_rate_60 IS NOT NULL     THEN 1 ELSE 0 END) AS has_hit_rate_60,
+        SUM(CASE WHEN outcome IS NOT NULL         THEN 1 ELSE 0 END) AS has_outcome,
+        COUNT(*)                                                      AS total_null_price
+    FROM common.daily_grades
+    WHERE over_price IS NULL
+""")
+row = cursor.fetchone()
+for col, val in zip([d[0] for d in cursor.description], row):
+    p(f"  {col}: {val}")
+
+p()
+p("=== WHERE DO NULL-PRICE ROWS COME FROM? ===")
+p("  Sample of null-price rows with their market_key and outcome_name...")
 cursor.execute("""
     SELECT TOP 20
-        CONVERT(VARCHAR(10), CAST(egm.game_date AS DATE), 120) AS game_date,
-        pp.player_name,
-        pp.market_key,
-        pp.outcome_name,
-        pp.outcome_point  AS line_value,
-        pp.outcome_price  AS price
-    FROM odds.player_props pp
-    JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-    WHERE pp.sport_key = 'basketball_nba'
-      AND pp.bookmaker_key = 'fanduel'
-      AND pp.outcome_name = 'Over'
-      AND CAST(egm.game_date AS DATE) >= CAST(DATEADD(day, -7, GETUTCDATE()) AS DATE)
-    ORDER BY egm.game_date DESC, pp.player_name, pp.market_key
+        CONVERT(VARCHAR(10), grade_date, 120) AS grade_date,
+        player_name,
+        market_key,
+        outcome_name,
+        line_value,
+        over_price,
+        composite_grade,
+        outcome
+    FROM common.daily_grades
+    WHERE over_price IS NULL
+    ORDER BY grade_date DESC, player_name
 """)
 cols = [d[0] for d in cursor.description]
 p("  " + " | ".join(cols))
@@ -90,20 +112,45 @@ for row in cursor.fetchall():
     p("  " + " | ".join(str(v) for v in row))
 
 p()
-p("=== odds.upcoming_player_props — CURRENT LINES SUMMARY ===")
+p("=== DO ANY NULL-PRICE ROWS HAVE outcome = Won OR Lost? ===")
 cursor.execute("""
-    SELECT
-        COUNT(*)                         AS total_rows,
-        COUNT(DISTINCT pp.player_name)   AS players,
-        COUNT(DISTINCT pp.market_key)    AS markets,
-        COUNT(DISTINCT pp.bookmaker_key) AS bookmakers
-    FROM odds.upcoming_player_props pp
-    WHERE pp.sport_key = 'basketball_nba'
+    SELECT outcome, COUNT(*) AS cnt
+    FROM common.daily_grades
+    WHERE over_price IS NULL
+    GROUP BY outcome
 """)
-row = cursor.fetchone()
 cols = [d[0] for d in cursor.description]
-for col, val in zip(cols, row):
-    p(f"  {col}: {val}")
+p("  " + "  ".join(f"{c:>10}" for c in cols))
+for row in cursor.fetchall():
+    p("  " + "  ".join(f"{str(v):>10}" for v in row))
+
+p()
+p("=== UI IMPACT CHECK ===")
+p("  GradesPageInner filters: rows = grades.filter(r => r.overPrice != null)")
+p("  So null-price rows are already excluded from the At a Glance view.")
+p()
+p("=== WHAT ARE THE NON-STANDARD BRACKET LINES? ===")
+p("  For standard markets, bracket grading generates 11 lines per player-market.")
+p("  Only the center line (step=0) gets over_price stored. The other 10 do not.")
+p("  Checking this assumption...")
+cursor.execute("""
+    SELECT TOP 5
+        CONVERT(VARCHAR(10), grade_date, 120) AS grade_date,
+        player_name,
+        market_key,
+        outcome_name,
+        line_value,
+        over_price
+    FROM common.daily_grades
+    WHERE over_price IS NULL
+      AND market_key NOT LIKE '%_alternate'
+      AND outcome_name = 'Over'
+    ORDER BY grade_date DESC, player_name, market_key, line_value
+""")
+cols = [d[0] for d in cursor.description]
+p("  " + " | ".join(cols))
+for row in cursor.fetchall():
+    p("  " + " | ".join(str(v) for v in row))
 
 conn.close()
 p()
