@@ -139,7 +139,7 @@ MARKET_DEF_RANK = {
 }
 
 # Maps market_key to the actual stat column in player_box_score_stats.
-# Used by run_outcomes to verify results against graded lines.
+# Used by run_outcomes for the SQL CASE expression.
 MARKET_TO_ACTUAL_COL = {
     "player_points":                            "pts",
     "player_points_alternate":                  "pts",
@@ -261,14 +261,6 @@ CREATE TABLE common.daily_grades(
 
 
 def fetch_history(engine, player_ids, market_keys, as_of_date, lookback=None):
-    """
-    Fetch per-game stat history for hit-rate calculation.
-
-    lookback: number of days to look back from as_of_date.
-              Defaults to LOOKBACK_LONG (60 days) for the main hit-rate window.
-              Pass LOOKBACK_OPP (200 days) when fetching data for the vs-opponent
-              calculation so it covers the full season.
-    """
     if lookback is None:
         lookback = LOOKBACK_LONG
     gradeable = [m for m in market_keys if m in MARKET_STAT_MAP]
@@ -567,13 +559,6 @@ def fetch_event_map_today(engine, grade_date_str):
 
 
 def compute_all_hit_rates(props_df, history_df, opp_info, direction="over", opp_history_df=None):
-    """
-    Compute hit rates for all props.
-
-    history_df:     windowed history (LOOKBACK_LONG days) — used for L60 / L20 hit rates.
-    opp_history_df: full-season history (LOOKBACK_OPP days) — used for vs-opponent hit rate.
-                    Falls back to history_df if not provided (backward-compatible).
-    """
     result = props_df.copy()
     all_grade_cols = (
         "hit_rate_60", "sample_size_60", "hit_rate_20", "sample_size_20",
@@ -621,11 +606,6 @@ def compute_all_hit_rates(props_df, history_df, opp_info, direction="over", opp_
     for col in ("weighted_hit_rate", "hit_rate_60", "hit_rate_20"):
         result[col] = result[col].apply(lambda x: round(x, 4) if pd.notna(x) else None)
 
-    # -------------------------------------------------------------------------
-    # vs-Opponent hit rate — uses full-season history (opp_history_df) so that
-    # every game this season against today's opponent is counted, not just the
-    # last 60 days.
-    # -------------------------------------------------------------------------
     opp_src = opp_history_df if (opp_history_df is not None and not opp_history_df.empty) else history_df
     player_opp = {
         pid: int(info["opp_team_id"])
@@ -1038,124 +1018,98 @@ def run_outcomes(engine, specific_date=None):
     Compute and persist Won/Lost outcomes for all graded props where the game
     has completed (game_status = 3) and outcome is still NULL.
 
-    For each eligible grade row, joins to nba.player_box_score_stats to get
-    the player's actual stat total for that game, then compares to line_value
-    using outcome_name (Over = stat > line wins, Under = stat < line wins).
-
-    If specific_date is provided, only processes rows for that date.
-    Otherwise processes all unresolved rows across all historical dates.
+    Uses a pure SQL UPDATE — no pandas, no Python loops over rows.
+    Each market_key maps to a specific stat expression computed inline from
+    nba.player_box_score_stats. One UPDATE per market group, fast regardless
+    of history size.
     """
     date_clause = "AND dg.grade_date = :gd" if specific_date else ""
     params: dict = {}
     if specific_date:
         params["gd"] = specific_date
 
-    mkt_list_sql = ", ".join(f"'{m}'" for m in MARKET_TO_ACTUAL_COL)
-
-    pending_sql = text(f"""
-        SELECT
-            dg.grade_id,
-            dg.player_id,
-            dg.game_id,
-            dg.market_key,
-            dg.line_value,
-            dg.outcome_name
+    # Check how many rows need resolving before doing any work
+    count_sql = text(f"""
+        SELECT COUNT(*) AS n
         FROM common.daily_grades dg
         JOIN nba.schedule s ON s.game_id = dg.game_id
         WHERE dg.outcome IS NULL
           AND dg.game_id IS NOT NULL
           AND dg.player_id IS NOT NULL
           AND s.game_status = 3
-          AND dg.market_key IN ({mkt_list_sql})
           {date_clause}
     """)
-    pending = pd.read_sql(pending_sql, engine, params=params)
+    with engine.connect() as conn:
+        n_pending = conn.execute(count_sql, params).scalar()
 
-    if pending.empty:
+    if not n_pending:
         log.info("Outcomes: no pending rows to resolve.")
         return 0
 
-    log.info(f"Outcomes: {len(pending)} rows to resolve across {pending['game_id'].nunique()} game(s).")
+    log.info(f"Outcomes: {n_pending} rows to resolve.")
 
-    pid_list = ", ".join(str(int(p)) for p in pending["player_id"].unique())
-    gid_list = ", ".join(f"'{g}'" for g in pending["game_id"].unique())
+    # Each entry: (market_keys_tuple, stat_sql_expression)
+    # stat_sql_expression is evaluated against nba.player_box_score_stats
+    # grouped by (player_id, game_id).
+    market_groups = [
+        (("player_points", "player_points_alternate"),
+         "SUM(b.pts)"),
+        (("player_rebounds", "player_rebounds_alternate"),
+         "SUM(b.reb)"),
+        (("player_assists", "player_assists_alternate"),
+         "SUM(b.ast)"),
+        (("player_threes", "player_threes_alternate"),
+         "SUM(b.fg3m)"),
+        (("player_blocks", "player_blocks_alternate"),
+         "SUM(b.blk)"),
+        (("player_steals", "player_steals_alternate"),
+         "SUM(b.stl)"),
+        (("player_points_rebounds_assists", "player_points_rebounds_assists_alternate"),
+         "SUM(b.pts) + SUM(b.reb) + SUM(b.ast)"),
+        (("player_points_rebounds", "player_points_rebounds_alternate"),
+         "SUM(b.pts) + SUM(b.reb)"),
+        (("player_points_assists", "player_points_assists_alternate"),
+         "SUM(b.pts) + SUM(b.ast)"),
+        (("player_rebounds_assists", "player_rebounds_assists_alternate"),
+         "SUM(b.reb) + SUM(b.ast)"),
+    ]
 
-    actuals_sql = text(f"""
-        SELECT
-            b.player_id,
-            b.game_id,
-            SUM(b.pts)  AS pts,
-            SUM(b.reb)  AS reb,
-            SUM(b.ast)  AS ast,
-            SUM(b.stl)  AS stl,
-            SUM(b.blk)  AS blk,
-            SUM(b.fg3m) AS fg3m,
-            SUM(b.tov)  AS tov
-        FROM nba.player_box_score_stats b
-        WHERE b.player_id IN ({pid_list})
-          AND b.game_id IN ({gid_list})
-        GROUP BY b.player_id, b.game_id
-    """)
-    actuals = pd.read_sql(actuals_sql, engine)
+    total_updated = 0
+    for market_keys, stat_expr in market_groups:
+        mkt_list = ", ".join(f"'{m}'" for m in market_keys)
+        update_sql = text(f"""
+            UPDATE dg
+            SET dg.outcome = CASE
+                WHEN dg.outcome_name = 'Over'  AND actual.stat_val > dg.line_value THEN 'Won'
+                WHEN dg.outcome_name = 'Over'  AND actual.stat_val <= dg.line_value THEN 'Lost'
+                WHEN dg.outcome_name = 'Under' AND actual.stat_val < dg.line_value  THEN 'Won'
+                WHEN dg.outcome_name = 'Under' AND actual.stat_val >= dg.line_value THEN 'Lost'
+                ELSE NULL
+            END
+            FROM common.daily_grades dg
+            JOIN nba.schedule s ON s.game_id = dg.game_id
+            JOIN (
+                SELECT b.player_id, b.game_id, {stat_expr} AS stat_val
+                FROM nba.player_box_score_stats b
+                GROUP BY b.player_id, b.game_id
+            ) actual ON actual.player_id = dg.player_id
+                     AND actual.game_id   = dg.game_id
+            WHERE dg.outcome IS NULL
+              AND dg.game_id IS NOT NULL
+              AND dg.player_id IS NOT NULL
+              AND s.game_status = 3
+              AND dg.market_key IN ({mkt_list})
+              {date_clause}
+        """)
+        with engine.begin() as conn:
+            result = conn.execute(update_sql, params)
+            n = result.rowcount
+            total_updated += n
+            if n:
+                log.info(f"  {market_keys[0]}: {n} rows updated.")
 
-    if actuals.empty:
-        log.info("Outcomes: no box score data found for pending rows.")
-        return 0
-
-    actuals["pra"] = actuals["pts"] + actuals["reb"] + actuals["ast"]
-    actuals["pr"]  = actuals["pts"] + actuals["reb"]
-    actuals["pa"]  = actuals["pts"] + actuals["ast"]
-    actuals["ra"]  = actuals["reb"] + actuals["ast"]
-
-    actuals_idx = actuals.set_index(["player_id", "game_id"])
-
-    updates = []
-    skipped = 0
-    for _, row in pending.iterrows():
-        pid      = int(row["player_id"])
-        gid      = row["game_id"]
-        mkt      = row["market_key"]
-        lv       = float(row["line_value"])
-        on       = row["outcome_name"]  # 'Over' or 'Under'
-        stat_col = MARKET_TO_ACTUAL_COL.get(mkt)
-
-        if stat_col is None:
-            skipped += 1
-            continue
-
-        try:
-            actual_row = actuals_idx.loc[(pid, gid)]
-        except KeyError:
-            skipped += 1
-            continue
-
-        stat_val = actual_row[stat_col]
-        if pd.isna(stat_val):
-            skipped += 1
-            continue
-
-        stat_val = float(stat_val)
-        if on == "Over":
-            result = "Won" if stat_val > lv else "Lost"
-        else:
-            result = "Won" if stat_val < lv else "Lost"
-
-        updates.append((result, int(row["grade_id"])))
-
-    if not updates:
-        log.info(f"Outcomes: nothing to write (skipped={skipped}).")
-        return 0
-
-    with engine.begin() as conn:
-        for i in range(0, len(updates), 500):
-            chunk = updates[i:i + 500]
-            conn.exec_driver_sql(
-                "UPDATE common.daily_grades SET outcome = ? WHERE grade_id = ?",
-                chunk,
-            )
-
-    log.info(f"Outcomes: wrote {len(updates)} outcomes, skipped {skipped} (DNP/no data).")
-    return len(updates)
+    log.info(f"Outcomes: {total_updated} total rows updated.")
+    return total_updated
 
 
 def main():
