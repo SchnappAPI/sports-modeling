@@ -5,11 +5,6 @@ import { getPool } from './db';
 // Position helpers
 // ---------------------------------------------------------------------------
 
-// Resolves any position string to a canonical G/F/C group.
-// Handles: PG, SG, G, G-F -> 'G'
-//          SF, PF, F, F-G, F-C -> 'F'
-//          C, C-F -> 'C'
-// Uses primary position (first component of compound values).
 export function posToGroup(pos: string | null): 'G' | 'F' | 'C' | null {
   if (!pos) return null;
   const p = pos.toUpperCase().trim();
@@ -23,10 +18,6 @@ export function posToGroup(pos: string | null): 'G' | 'F' | 'C' | null {
   return null;
 }
 
-// SQL CASE expression that maps nba.players.position to G/F/C.
-// Handles standard values (PG, SG, SF, PF, C) and NBA playerindex
-// compound values (G, G-F, F, F-G, F-C, C-F) using first component.
-// Replace the table alias prefix if needed (default is 'p').
 export function posCaseSql(alias = 'p'): string {
   const col = `${alias}.position`;
   return `CASE
@@ -455,6 +446,8 @@ export interface GradeRow {
   gameId: string | null;
   homeTeamAbbr: string | null;
   awayTeamAbbr: string | null;
+  outcome: string | null;        // 'Won' | 'Lost' | null
+  eventId: string | null;        // Odds API event_id, used for live odds matching
 }
 
 export async function getGrades(
@@ -471,7 +464,7 @@ export async function getGrades(
        AND column_name  IN (
            'composite_grade','trend_grade','momentum_grade',
            'matchup_grade','regression_grade','hit_rate_opp','sample_size_opp',
-           'outcome_name','over_price'
+           'outcome_name','over_price','outcome'
        )`
   );
   const existingCols = new Set(colCheck.recordset.map((r) => r.column_name));
@@ -506,6 +499,8 @@ export async function getGrades(
        ${sel('regression_grade', 'regressionGrade')},
        ${sel('hit_rate_opp',     'hitRateOpp')},
        ${sel('sample_size_opp',  'sampleSizeOpp')},
+       ${sel('outcome',          'outcome')},
+       dg.event_id          AS eventId,
        CASE
          WHEN p.team_id = s.home_team_id THEN s.away_team_id
          ELSE s.home_team_id
@@ -601,9 +596,6 @@ export interface MatchupDefenseRow {
   tov: MatchupStatLine;
 }
 
-// position: the raw position string from either daily_lineups (preferred) or nba.players.
-// Returns stats for all players whose position resolves to the same G/F/C group.
-// The posGroup used for the query is returned in the response so the UI can display it.
 export async function getMatchupDefense(
   oppTeamId: number,
   position: string
@@ -613,9 +605,6 @@ export async function getMatchupDefense(
   const posGroup = posToGroup(position);
   if (!posGroup) return null;
 
-  // Build the SQL CASE filter: matches all positions that resolve to posGroup.
-  // This is correct for all values: PG/SG -> G, SF/PF -> F, C -> C,
-  // and compound values G-F -> G, F-G -> F, C-F -> C, etc.
   const posFilterSql = posCaseSql('p');
 
   const result = await pool
