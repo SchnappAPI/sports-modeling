@@ -1,5 +1,5 @@
 """
-db_inventory.py — over_price distribution check
+db_inventory.py — last 7 days of raw player props from odds.player_props
 """
 import os
 import pyodbc
@@ -27,22 +27,18 @@ def p(line=""): print(line); out.append(line)
 conn   = pyodbc.connect(CONN_STR)
 cursor = conn.cursor()
 
-p("=== OVER_PRICE DISTRIBUTION (Over rows with a price) ===")
+p("=== odds.player_props — TABLE SUMMARY ===")
 cursor.execute("""
     SELECT
-        SUM(CASE WHEN over_price < -1000               THEN 1 ELSE 0 END) AS below_neg1000,
-        SUM(CASE WHEN over_price BETWEEN -1000 AND -500 THEN 1 ELSE 0 END) AS neg1000_to_neg500,
-        SUM(CASE WHEN over_price BETWEEN -499  AND -200 THEN 1 ELSE 0 END) AS neg499_to_neg200,
-        SUM(CASE WHEN over_price BETWEEN -199  AND -101 THEN 1 ELSE 0 END) AS neg199_to_neg101,
-        SUM(CASE WHEN over_price BETWEEN -100  AND  100 THEN 1 ELSE 0 END) AS neg100_to_pos100,
-        SUM(CASE WHEN over_price BETWEEN  101  AND  200 THEN 1 ELSE 0 END) AS pos101_to_pos200,
-        SUM(CASE WHEN over_price BETWEEN  201  AND  400 THEN 1 ELSE 0 END) AS pos201_to_pos400,
-        SUM(CASE WHEN over_price >  400                 THEN 1 ELSE 0 END) AS above_pos400,
-        MAX(over_price)                                                     AS max_price,
-        COUNT(*)                                                            AS total_with_price
-    FROM common.daily_grades
-    WHERE outcome_name = 'Over'
-      AND over_price IS NOT NULL
+        COUNT(*)                                                    AS total_rows,
+        COUNT(DISTINCT CAST(egm.game_date AS DATE))                 AS distinct_dates,
+        CONVERT(VARCHAR(10), MIN(CAST(egm.game_date AS DATE)), 120) AS earliest_date,
+        CONVERT(VARCHAR(10), MAX(CAST(egm.game_date AS DATE)), 120) AS latest_date,
+        COUNT(DISTINCT pp.market_key)                               AS distinct_markets,
+        COUNT(DISTINCT pp.bookmaker_key)                            AS distinct_bookmakers
+    FROM odds.player_props pp
+    JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+    WHERE pp.sport_key = 'basketball_nba'
 """)
 row = cursor.fetchone()
 cols = [d[0] for d in cursor.description]
@@ -50,22 +46,64 @@ for col, val in zip(cols, row):
     p(f"  {col}: {val}")
 
 p()
-p("=== SAMPLE OF ROWS WITH PRICE > +200 (today or most recent date) ===")
+p("=== LAST 7 DAYS — ROW COUNT BY DATE AND BOOKMAKER ===")
+cursor.execute("""
+    SELECT
+        CONVERT(VARCHAR(10), CAST(egm.game_date AS DATE), 120) AS game_date,
+        pp.bookmaker_key,
+        COUNT(*)                                               AS rows,
+        COUNT(DISTINCT pp.player_name)                         AS players,
+        COUNT(DISTINCT pp.market_key)                          AS markets
+    FROM odds.player_props pp
+    JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+    WHERE pp.sport_key = 'basketball_nba'
+      AND CAST(egm.game_date AS DATE) >= CAST(DATEADD(day, -7, GETUTCDATE()) AS DATE)
+    GROUP BY CAST(egm.game_date AS DATE), pp.bookmaker_key
+    ORDER BY game_date DESC, rows DESC
+""")
+cols = [d[0] for d in cursor.description]
+p("  " + "  ".join(f"{c:>15}" for c in cols))
+for row in cursor.fetchall():
+    p("  " + "  ".join(f"{str(v):>15}" for v in row))
+
+p()
+p("=== LAST 7 DAYS — FANDUEL SAMPLE (20 rows, Over lines only) ===")
 cursor.execute("""
     SELECT TOP 20
-        CONVERT(VARCHAR(10), grade_date, 120) AS grade_date,
-        player_name, market_key, line_value, over_price,
-        ROUND(composite_grade, 1) AS composite_grade
-    FROM common.daily_grades
-    WHERE outcome_name = 'Over'
-      AND over_price > 200
-      AND grade_date = (SELECT MAX(grade_date) FROM common.daily_grades WHERE over_price > 200)
-    ORDER BY over_price DESC
+        CONVERT(VARCHAR(10), CAST(egm.game_date AS DATE), 120) AS game_date,
+        pp.player_name,
+        pp.market_key,
+        pp.outcome_name,
+        pp.outcome_point  AS line_value,
+        pp.outcome_price  AS price
+    FROM odds.player_props pp
+    JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+    WHERE pp.sport_key = 'basketball_nba'
+      AND pp.bookmaker_key = 'fanduel'
+      AND pp.outcome_name = 'Over'
+      AND CAST(egm.game_date AS DATE) >= CAST(DATEADD(day, -7, GETUTCDATE()) AS DATE)
+    ORDER BY egm.game_date DESC, pp.player_name, pp.market_key
 """)
 cols = [d[0] for d in cursor.description]
 p("  " + " | ".join(cols))
 for row in cursor.fetchall():
     p("  " + " | ".join(str(v) for v in row))
+
+p()
+p("=== odds.upcoming_player_props — CURRENT LINES SUMMARY ===")
+cursor.execute("""
+    SELECT
+        COUNT(*)                         AS total_rows,
+        COUNT(DISTINCT pp.player_name)   AS players,
+        COUNT(DISTINCT pp.market_key)    AS markets,
+        COUNT(DISTINCT pp.bookmaker_key) AS bookmakers
+    FROM odds.upcoming_player_props pp
+    WHERE pp.sport_key = 'basketball_nba'
+""")
+row = cursor.fetchone()
+cols = [d[0] for d in cursor.description]
+for col, val in zip(cols, row):
+    p(f"  {col}: {val}")
 
 conn.close()
 p()
