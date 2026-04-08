@@ -853,10 +853,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const gradeDate = backDate ?? todayLocal();
 
   // ---- persisted filter state (survives player navigation) ----
-  // These live in refs so changing them does NOT trigger a re-render on navigation;
-  // the actual state values are initialized from the refs on mount and updated in sync.
-  const persistedPeriods      = useRef<Set<QuarterKey>>(new Set());
-  const persistedRole         = useRef<RoleFilter>('all');
+  const persistedPeriods       = useRef<Set<QuarterKey>>(new Set());
+  const persistedRole          = useRef<RoleFilter>('all');
   const persistedPropsExpanded = useRef<boolean>(true);
   const prevTeamId             = useRef<number | null>(null);
 
@@ -870,7 +868,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [loading, setLoading]       = useState(true);
   const [error, setError]           = useState<string | null>(null);
 
-  // filter state — initialized from persisted refs
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(persistedPeriods.current);
   const [roleFilter, setRoleFilter]           = useState<RoleFilter>(persistedRole.current);
   const [propsExpanded, setPropsExpanded]     = useState<boolean>(persistedPropsExpanded.current);
@@ -949,7 +946,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         };
         setPlayerInfo(info);
 
-        // If the team changed, reset vsOppOnly. Otherwise leave it as-is.
         if (prevTeamId.current !== null && prevTeamId.current !== playerData.teamId) {
           setVsOppOnly(false);
         }
@@ -984,7 +980,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       .finally(() => setLoading(false));
   }, [playerId]);
 
-  // Keep refs in sync with state so they persist across player navigation
   useEffect(() => { persistedPeriods.current = selectedPeriods; }, [selectedPeriods]);
   useEffect(() => { persistedRole.current    = roleFilter; },     [roleFilter]);
   useEffect(() => { persistedPropsExpanded.current = propsExpanded; }, [propsExpanded]);
@@ -1027,11 +1022,9 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     };
   }, [log]);
 
-  // Apply role filter then vs-opp filter to produce the displayed rows
   const displayedSummaries = useMemo(() => {
     let rows = summaries;
 
-    // Role filter
     if (roleFilter === 'started') {
       rows = rows.filter((g) => !g.dnp && g.started === true);
     } else if (roleFilter === 'bench') {
@@ -1039,7 +1032,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     } else if (roleFilter === 'played') {
       rows = rows.filter((g) => !g.dnp);
     }
-    // 'all' keeps DNPs visible (existing default behavior)
 
     if (vsOppOnly && oppParam) {
       rows = rows.filter((g) => g.opponentAbbr === oppParam);
@@ -1193,7 +1185,9 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
             value={playerId}
             onChange={(e) => {
               const params = new URLSearchParams(searchParams.toString());
-              router.push(`/nba/player/${e.target.value}?${params.toString()}`);
+              // Use replace so player-to-player navigation does not stack history entries.
+              // The back button then returns to the page before the first player was opened.
+              router.replace(`/nba/player/${e.target.value}?${params.toString()}`);
             }}
             className="bg-transparent text-sm font-semibold text-gray-200 border-none outline-none cursor-pointer flex-none"
           >
@@ -1275,7 +1269,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
       {/* Filter bar */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-800 flex-wrap">
-        {/* Quarter filters */}
         <span className="text-xs text-gray-600">All</span>
         {availablePeriods.map((p) => (
           <button
@@ -1305,7 +1298,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         )}
 
         <div className="ml-auto flex items-center gap-2 flex-wrap">
-          {/* Role filter buttons */}
           <div className="flex rounded overflow-hidden border border-gray-700">
             {roleButtons.map(({ value, label }) => (
               <button
