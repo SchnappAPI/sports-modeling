@@ -414,7 +414,7 @@ export async function getPlayerGames(
          FROM current_team_games ctg
          WHERE ctg.game_id NOT IN (SELECT game_id FROM played_game_ids)
        )
-       SELECT TOP (@lastN) *
+       SELECT *
        FROM combined
        ORDER BY gameDate DESC, gameId, period`
     );
