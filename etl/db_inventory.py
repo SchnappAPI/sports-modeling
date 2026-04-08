@@ -1,9 +1,7 @@
 """
-db_inventory.py — daily_grades audit
-Writes output to /tmp/db_inventory_output.txt for retrieval via shell_exec.
+db_inventory.py — over_price distribution check
 """
 import os
-import sys
 import pyodbc
 
 DRIVER   = "ODBC Driver 18 for SQL Server"
@@ -24,27 +22,27 @@ CONN_STR = (
 )
 
 out = []
-
-def p(line=""):
-    print(line)
-    out.append(line)
+def p(line=""): print(line); out.append(line)
 
 conn   = pyodbc.connect(CONN_STR)
 cursor = conn.cursor()
 
-p("=== SUMMARY ===")
+p("=== OVER_PRICE DISTRIBUTION (Over rows with a price) ===")
 cursor.execute("""
     SELECT
-        COUNT(*)                                             AS total_rows,
-        COUNT(DISTINCT grade_date)                          AS distinct_dates,
-        CONVERT(VARCHAR(10), MIN(grade_date), 120)          AS earliest_date,
-        CONVERT(VARCHAR(10), MAX(grade_date), 120)          AS latest_date,
-        COUNT(DISTINCT player_id)                           AS distinct_players,
-        COUNT(DISTINCT market_key)                          AS distinct_markets,
-        SUM(CASE WHEN outcome = 'Won'  THEN 1 ELSE 0 END)  AS won,
-        SUM(CASE WHEN outcome = 'Lost' THEN 1 ELSE 0 END)  AS lost,
-        SUM(CASE WHEN outcome IS NULL  THEN 1 ELSE 0 END)  AS unresolved
+        SUM(CASE WHEN over_price < -1000               THEN 1 ELSE 0 END) AS below_neg1000,
+        SUM(CASE WHEN over_price BETWEEN -1000 AND -500 THEN 1 ELSE 0 END) AS neg1000_to_neg500,
+        SUM(CASE WHEN over_price BETWEEN -499  AND -200 THEN 1 ELSE 0 END) AS neg499_to_neg200,
+        SUM(CASE WHEN over_price BETWEEN -199  AND -101 THEN 1 ELSE 0 END) AS neg199_to_neg101,
+        SUM(CASE WHEN over_price BETWEEN -100  AND  100 THEN 1 ELSE 0 END) AS neg100_to_pos100,
+        SUM(CASE WHEN over_price BETWEEN  101  AND  200 THEN 1 ELSE 0 END) AS pos101_to_pos200,
+        SUM(CASE WHEN over_price BETWEEN  201  AND  400 THEN 1 ELSE 0 END) AS pos201_to_pos400,
+        SUM(CASE WHEN over_price >  400                 THEN 1 ELSE 0 END) AS above_pos400,
+        MAX(over_price)                                                     AS max_price,
+        COUNT(*)                                                            AS total_with_price
     FROM common.daily_grades
+    WHERE outcome_name = 'Over'
+      AND over_price IS NOT NULL
 """)
 row = cursor.fetchone()
 cols = [d[0] for d in cursor.description]
@@ -52,61 +50,22 @@ for col, val in zip(cols, row):
     p(f"  {col}: {val}")
 
 p()
-p("=== ROWS BY MARKET ===")
+p("=== SAMPLE OF ROWS WITH PRICE > +200 (today or most recent date) ===")
 cursor.execute("""
-    SELECT market_key,
-           COUNT(*)                                            AS total,
-           SUM(CASE WHEN outcome='Won'  THEN 1 ELSE 0 END)   AS won,
-           SUM(CASE WHEN outcome='Lost' THEN 1 ELSE 0 END)   AS lost,
-           SUM(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END)  AS unresolved
+    SELECT TOP 20
+        CONVERT(VARCHAR(10), grade_date, 120) AS grade_date,
+        player_name, market_key, line_value, over_price,
+        ROUND(composite_grade, 1) AS composite_grade
     FROM common.daily_grades
-    GROUP BY market_key
-    ORDER BY total DESC
+    WHERE outcome_name = 'Over'
+      AND over_price > 200
+      AND grade_date = (SELECT MAX(grade_date) FROM common.daily_grades WHERE over_price > 200)
+    ORDER BY over_price DESC
 """)
 cols = [d[0] for d in cursor.description]
-p("  " + "  ".join(f"{c:<55}" if i == 0 else f"{c:>10}" for i, c in enumerate(cols)))
+p("  " + " | ".join(cols))
 for row in cursor.fetchall():
-    p("  " + "  ".join(f"{str(v):<55}" if i == 0 else f"{str(v):>10}" for i, v in enumerate(row)))
-
-p()
-p("=== ROWS BY DATE (last 10 graded dates) ===")
-cursor.execute("""
-    SELECT TOP 10
-        CONVERT(VARCHAR(10), grade_date, 120)               AS grade_date,
-        COUNT(*)                                            AS total,
-        SUM(CASE WHEN outcome='Won'  THEN 1 ELSE 0 END)    AS won,
-        SUM(CASE WHEN outcome='Lost' THEN 1 ELSE 0 END)    AS lost,
-        SUM(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END)   AS unresolved
-    FROM common.daily_grades
-    GROUP BY grade_date
-    ORDER BY grade_date DESC
-""")
-cols = [d[0] for d in cursor.description]
-p("  " + "  ".join(f"{c:>12}" for c in cols))
-for row in cursor.fetchall():
-    p("  " + "  ".join(f"{str(v):>12}" for v in row))
-
-p()
-p("=== TOP 15 PROPS (most recent date, Over, by composite grade) ===")
-cursor.execute("""
-    SELECT TOP 15
-        CONVERT(VARCHAR(10), dg.grade_date, 120) AS grade_date,
-        dg.player_name,
-        dg.market_key,
-        dg.line_value,
-        dg.over_price,
-        ROUND(dg.composite_grade, 1)             AS composite_grade,
-        dg.outcome
-    FROM common.daily_grades dg
-    WHERE dg.grade_date = (SELECT MAX(grade_date) FROM common.daily_grades)
-      AND dg.outcome_name = 'Over'
-      AND dg.over_price IS NOT NULL
-    ORDER BY dg.composite_grade DESC
-""")
-cols = [d[0] for d in cursor.description]
-p("  " + " | ".join(f"{c}" for c in cols))
-for row in cursor.fetchall():
-    p("  " + " | ".join(f"{str(v)}" for v in row))
+    p("  " + " | ".join(str(v) for v in row))
 
 conn.close()
 p()
