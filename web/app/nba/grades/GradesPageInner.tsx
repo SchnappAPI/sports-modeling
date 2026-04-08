@@ -35,6 +35,7 @@ interface GradeRow {
   awayTeamAbbr: string | null;
   outcome: string | null;
   eventId: string | null;
+  link: string | null;
 }
 
 interface DefenseCache {
@@ -76,6 +77,26 @@ function marketAbbr(key: string): string {
 function marketDropdownLabel(baseKey: string): string {
   return MARKET_ABBR[baseKey] ?? baseKey.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
+
+/**
+ * Display label for a line value, matching how FanDuel presents it.
+ *
+ * Alternate market, Over outcome:
+ *   All alternate lines in the DB end in .5.
+ *   FanDuel shows these as whole-number "X+" labels (e.g. Over 0.5 = "1+").
+ *   Formula: floor(line + 0.5)+ which equals the ceiling for .5 values.
+ *
+ * Standard market or Under outcome:
+ *   Show as "O X.X" or "U X.X" to match FanDuel's O/U presentation.
+ */
+function fmtLineLabel(marketKey: string, outcomeName: string, lineValue: number): string {
+  if (isAlternate(marketKey) && outcomeName !== 'Under') {
+    return `${Math.floor(lineValue + 0.5)}+`;
+  }
+  const prefix = outcomeName === 'Under' ? 'U' : 'O';
+  return `${prefix} ${lineValue % 1 === 0 ? lineValue.toFixed(1) : lineValue}`;
+}
+
 function impliedProb(price: number | null): string {
   if (price == null) return '-';
   const prob = price < 0 ? Math.abs(price) / (Math.abs(price) + 100) : 100 / (price + 100);
@@ -178,12 +199,8 @@ export default function GradesPageInner() {
   const isToday   = gradeDate === todayLocal();
   const backHref  = '/nba';
 
-  // Derive the max price present in the loaded grades so the slider ceiling
-  // is always exactly what the data contains — no hardcoded cap.
   const oddsMax = useMemo(() => {
-    const prices = grades
-      .map((r) => r.overPrice)
-      .filter((p): p is number => p != null);
+    const prices = grades.map((r) => r.overPrice).filter((p): p is number => p != null);
     if (prices.length === 0) return ODDS_DEFAULT;
     return Math.max(...prices);
   }, [grades]);
@@ -220,7 +237,6 @@ export default function GradesPageInner() {
     loadGrades();
   }, [loadGrades]);
 
-  // If minOdds is above the new oddsMax after grades reload, clamp it down.
   useEffect(() => {
     if (minOdds > oddsMax) setMinOdds(oddsMax);
   }, [oddsMax]);
@@ -598,7 +614,6 @@ export default function GradesPageInner() {
                 <tr className="text-xs text-gray-500 border-b border-gray-800">
                   <SortTh col="playerName" label="Player" />
                   <SortTh col="marketKey" label="Mkt" />
-                  <th className="text-center py-1.5 px-1 font-medium text-xs text-gray-500" title="Alternate line">Alt</th>
                   <SortTh col="lineValue" label="Line" right />
                   <SortTh col="overPrice" label={priceColLabel} right />
                   <th className="text-right py-1.5 px-2 font-medium text-gray-500 text-xs" title="Implied probability from odds">Imp%</th>
@@ -615,7 +630,6 @@ export default function GradesPageInner() {
               <tbody>
                 {sorted.map((row) => {
                   const def = defRankCell(row);
-                  const alt = isAlternate(row.marketKey);
                   const oppPct   = fmtPct(row.hitRateOpp);
                   const oppTitle = row.sampleSizeOpp
                     ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'} (full season)`
@@ -628,6 +642,22 @@ export default function GradesPageInner() {
                     : isLive && livePrice === 'live-unavailable'
                     ? null
                     : row.overPrice;
+
+                  // Line label: formatted per FanDuel convention
+                  const lineLabel = fmtLineLabel(row.marketKey, row.outcomeName ?? 'Over', row.lineValue);
+
+                  // Odds cell: clickable to FanDuel betslip when link exists and game not yet final
+                  const oddsContent = (
+                    <span className={isLive ? 'text-green-400' : oddsColor(displayPrice)}>
+                      {fmtOdds(displayPrice)}
+                      {isLive && displayPrice != null && (
+                        <span className="text-gray-600 text-xs ml-0.5">L</span>
+                      )}
+                    </span>
+                  );
+
+                  // Only show link when the game has not yet been resolved (outcome is null)
+                  const showLink = row.link != null && row.outcome == null;
 
                   return (
                     <tr key={row.gradeId} className="border-b border-gray-800">
@@ -648,16 +678,40 @@ export default function GradesPageInner() {
                         </div>
                       </td>
                       <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">{marketAbbr(row.marketKey)}</td>
-                      <td className="py-1.5 px-1 text-center text-xs">
-                        {alt ? <span className="text-yellow-600">*</span> : ''}
-                      </td>
-                      <td className="py-1.5 px-2 text-right text-gray-300">{fmt(row.lineValue)}</td>
-                      <td className={`py-1.5 px-2 text-right tabular-nums ${isLive ? 'text-green-400' : oddsColor(displayPrice)}`}>
-                        {fmtOdds(displayPrice)}
-                        {isLive && displayPrice != null && (
-                          <span className="text-gray-600 text-xs ml-0.5">L</span>
+
+                      {/* Line — show FanDuel-style label. Clickable when link available. */}
+                      <td className="py-1.5 px-2 text-right text-gray-300 tabular-nums">
+                        {showLink ? (
+                          <a
+                            href={row.link!}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="hover:text-blue-400 transition-colors"
+                          >
+                            {lineLabel}
+                          </a>
+                        ) : (
+                          lineLabel
                         )}
                       </td>
+
+                      {/* Odds — also clickable when link available */}
+                      <td className="py-1.5 px-2 text-right tabular-nums">
+                        {showLink ? (
+                          <a
+                            href={row.link!}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className={`hover:text-blue-400 transition-colors ${isLive ? 'text-green-400' : oddsColor(displayPrice)}`}
+                          >
+                            {fmtOdds(displayPrice)}
+                            {isLive && displayPrice != null && (
+                              <span className="text-gray-600 text-xs ml-0.5">L</span>
+                            )}
+                          </a>
+                        ) : oddsContent}
+                      </td>
+
                       <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">{impliedProb(displayPrice)}</td>
                       <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.compositeGrade)}`}>{fmt(row.compositeGrade)}</td>
                       <td className={`py-1.5 px-2 text-right ${gradeColor(row.grade)}`}>{fmt(row.grade)}</td>
