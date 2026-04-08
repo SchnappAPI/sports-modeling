@@ -138,6 +138,31 @@ MARKET_DEF_RANK = {
     "player_steals_alternate":   "rank_stl",
 }
 
+# Maps market_key to the actual stat column in player_box_score_stats.
+# Used by run_outcomes to verify results against graded lines.
+MARKET_TO_ACTUAL_COL = {
+    "player_points":                            "pts",
+    "player_points_alternate":                  "pts",
+    "player_rebounds":                          "reb",
+    "player_rebounds_alternate":                "reb",
+    "player_assists":                           "ast",
+    "player_assists_alternate":                 "ast",
+    "player_threes":                            "fg3m",
+    "player_threes_alternate":                  "fg3m",
+    "player_blocks":                            "blk",
+    "player_blocks_alternate":                  "blk",
+    "player_steals":                            "stl",
+    "player_steals_alternate":                  "stl",
+    "player_points_rebounds_assists":           "pra",
+    "player_points_rebounds_assists_alternate": "pra",
+    "player_points_rebounds":                   "pr",
+    "player_points_rebounds_alternate":         "pr",
+    "player_points_assists":                    "pa",
+    "player_points_assists_alternate":          "pa",
+    "player_rebounds_assists":                  "ra",
+    "player_rebounds_assists_alternate":        "ra",
+}
+
 
 def get_engine(max_retries=3, retry_wait=60):
     conn_str = (
@@ -205,6 +230,7 @@ CREATE TABLE common.daily_grades(
     composite_grade   FLOAT         NULL,
     hit_rate_opp      FLOAT         NULL,
     sample_size_opp   INT           NULL,
+    outcome           VARCHAR(5)    NULL,
     created_at        DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
     CONSTRAINT pk_daily_grades PRIMARY KEY (grade_id),
     CONSTRAINT uq_daily_grades_v3 UNIQUE (
@@ -214,10 +240,17 @@ CREATE TABLE common.daily_grades(
 )
 """))
         for col, dtype in [
-            ("over_price", "INT"), ("trend_grade", "FLOAT"), ("momentum_grade", "FLOAT"),
-            ("pattern_grade", "FLOAT"), ("matchup_grade", "FLOAT"), ("regression_grade", "FLOAT"),
-            ("composite_grade", "FLOAT"), ("hit_rate_opp", "FLOAT"), ("sample_size_opp", "INT"),
-            ("outcome_name", "VARCHAR(5)"),
+            ("over_price",      "INT"),
+            ("trend_grade",     "FLOAT"),
+            ("momentum_grade",  "FLOAT"),
+            ("pattern_grade",   "FLOAT"),
+            ("matchup_grade",   "FLOAT"),
+            ("regression_grade","FLOAT"),
+            ("composite_grade", "FLOAT"),
+            ("hit_rate_opp",    "FLOAT"),
+            ("sample_size_opp", "INT"),
+            ("outcome_name",    "VARCHAR(5)"),
+            ("outcome",         "VARCHAR(5)"),   # 'Won' / 'Lost' / NULL
         ]:
             conn.execute(text(
                 f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
@@ -1000,9 +1033,134 @@ def run_backfill(engine, batch_size, specific_date=None):
     log.info(f"Backfill complete. {total} total rows written.")
 
 
+def run_outcomes(engine, specific_date=None):
+    """
+    Compute and persist Won/Lost outcomes for all graded props where the game
+    has completed (game_status = 3) and outcome is still NULL.
+
+    For each eligible grade row, joins to nba.player_box_score_stats to get
+    the player's actual stat total for that game, then compares to line_value
+    using outcome_name (Over = stat > line wins, Under = stat < line wins).
+
+    If specific_date is provided, only processes rows for that date.
+    Otherwise processes all unresolved rows across all historical dates.
+    """
+    date_clause = "AND dg.grade_date = :gd" if specific_date else ""
+    params: dict = {}
+    if specific_date:
+        params["gd"] = specific_date
+
+    mkt_list_sql = ", ".join(f"'{m}'" for m in MARKET_TO_ACTUAL_COL)
+
+    pending_sql = text(f"""
+        SELECT
+            dg.grade_id,
+            dg.player_id,
+            dg.game_id,
+            dg.market_key,
+            dg.line_value,
+            dg.outcome_name
+        FROM common.daily_grades dg
+        JOIN nba.schedule s ON s.game_id = dg.game_id
+        WHERE dg.outcome IS NULL
+          AND dg.game_id IS NOT NULL
+          AND dg.player_id IS NOT NULL
+          AND s.game_status = 3
+          AND dg.market_key IN ({mkt_list_sql})
+          {date_clause}
+    """)
+    pending = pd.read_sql(pending_sql, engine, params=params)
+
+    if pending.empty:
+        log.info("Outcomes: no pending rows to resolve.")
+        return 0
+
+    log.info(f"Outcomes: {len(pending)} rows to resolve across {pending['game_id'].nunique()} game(s).")
+
+    pid_list = ", ".join(str(int(p)) for p in pending["player_id"].unique())
+    gid_list = ", ".join(f"'{g}'" for g in pending["game_id"].unique())
+
+    actuals_sql = text(f"""
+        SELECT
+            b.player_id,
+            b.game_id,
+            SUM(b.pts)  AS pts,
+            SUM(b.reb)  AS reb,
+            SUM(b.ast)  AS ast,
+            SUM(b.stl)  AS stl,
+            SUM(b.blk)  AS blk,
+            SUM(b.fg3m) AS fg3m,
+            SUM(b.tov)  AS tov
+        FROM nba.player_box_score_stats b
+        WHERE b.player_id IN ({pid_list})
+          AND b.game_id IN ({gid_list})
+        GROUP BY b.player_id, b.game_id
+    """)
+    actuals = pd.read_sql(actuals_sql, engine)
+
+    if actuals.empty:
+        log.info("Outcomes: no box score data found for pending rows.")
+        return 0
+
+    actuals["pra"] = actuals["pts"] + actuals["reb"] + actuals["ast"]
+    actuals["pr"]  = actuals["pts"] + actuals["reb"]
+    actuals["pa"]  = actuals["pts"] + actuals["ast"]
+    actuals["ra"]  = actuals["reb"] + actuals["ast"]
+
+    actuals_idx = actuals.set_index(["player_id", "game_id"])
+
+    updates = []
+    skipped = 0
+    for _, row in pending.iterrows():
+        pid      = int(row["player_id"])
+        gid      = row["game_id"]
+        mkt      = row["market_key"]
+        lv       = float(row["line_value"])
+        on       = row["outcome_name"]  # 'Over' or 'Under'
+        stat_col = MARKET_TO_ACTUAL_COL.get(mkt)
+
+        if stat_col is None:
+            skipped += 1
+            continue
+
+        try:
+            actual_row = actuals_idx.loc[(pid, gid)]
+        except KeyError:
+            skipped += 1
+            continue
+
+        stat_val = actual_row[stat_col]
+        if pd.isna(stat_val):
+            skipped += 1
+            continue
+
+        stat_val = float(stat_val)
+        if on == "Over":
+            result = "Won" if stat_val > lv else "Lost"
+        else:
+            result = "Won" if stat_val < lv else "Lost"
+
+        updates.append((result, int(row["grade_id"])))
+
+    if not updates:
+        log.info(f"Outcomes: nothing to write (skipped={skipped}).")
+        return 0
+
+    with engine.begin() as conn:
+        for i in range(0, len(updates), 500):
+            chunk = updates[i:i + 500]
+            conn.exec_driver_sql(
+                "UPDATE common.daily_grades SET outcome = ? WHERE grade_id = ?",
+                chunk,
+            )
+
+    log.info(f"Outcomes: wrote {len(updates)} outcomes, skipped {skipped} (DNP/no data).")
+    return len(updates)
+
+
 def main():
     parser = argparse.ArgumentParser(description="NBA prop grading model")
-    parser.add_argument("--mode",  choices=["upcoming", "intraday", "backfill"], default="upcoming")
+    parser.add_argument("--mode",  choices=["upcoming", "intraday", "backfill", "outcomes"], default="upcoming")
     parser.add_argument("--batch", type=int, default=BATCH_DEFAULT)
     parser.add_argument("--date",  type=str, default=None)
     args = parser.parse_args()
@@ -1012,8 +1170,10 @@ def main():
         run_upcoming(engine)
     elif args.mode == "intraday":
         run_intraday(engine)
-    else:
+    elif args.mode == "backfill":
         run_backfill(engine, batch_size=args.batch, specific_date=args.date)
+    else:
+        run_outcomes(engine, specific_date=args.date)
     log.info("Done.")
 
 
