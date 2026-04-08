@@ -28,21 +28,22 @@ def today_et() -> str:
 
 
 BOOKMAKER = "fanduel"
-LOOKBACK_LONG = 60
+LOOKBACK_LONG  = 60
 LOOKBACK_SHORT = 20
+LOOKBACK_OPP   = 200   # full-season window for vs-opponent hit rate
 WEIGHT_SHORT = 0.60
-WEIGHT_LONG = 0.40
+WEIGHT_LONG  = 0.40
 MIN_SAMPLE = 5
 SEASON_START = "2024-10-01"
 SEASON_MIN = 10
 RECENT_WINDOW = 10
 TREND_SHORT = 10
-TREND_LONG = 30
-TREND_MIN = 3
+TREND_LONG  = 30
+TREND_MIN   = 3
 PATTERN_MIN = 3
-BRACKET_STEPS = 5
+BRACKET_STEPS     = 5
 BRACKET_INCREMENT = 1.0
-BATCH_DEFAULT = 10
+BATCH_DEFAULT     = 10
 
 STANDARD_MARKETS = {
     "player_points", "player_rebounds", "player_assists", "player_threes",
@@ -226,7 +227,17 @@ CREATE TABLE common.daily_grades(
     log.info("Schema verified.")
 
 
-def fetch_history(engine, player_ids, market_keys, as_of_date):
+def fetch_history(engine, player_ids, market_keys, as_of_date, lookback=None):
+    """
+    Fetch per-game stat history for hit-rate calculation.
+
+    lookback: number of days to look back from as_of_date.
+              Defaults to LOOKBACK_LONG (60 days) for the main hit-rate window.
+              Pass LOOKBACK_OPP (200 days) when fetching data for the vs-opponent
+              calculation so it covers the full season.
+    """
+    if lookback is None:
+        lookback = LOOKBACK_LONG
     gradeable = [m for m in market_keys if m in MARKET_STAT_MAP]
     if not player_ids or not gradeable:
         return pd.DataFrame()
@@ -255,9 +266,9 @@ def fetch_history(engine, player_ids, market_keys, as_of_date):
         f" FROM ({union_sql}) AS combined WHERE stat_value IS NOT NULL"
     )
     df = pd.read_sql(sql, engine, params={
-        "aod": str(as_of_date), "lb_long": LOOKBACK_LONG, "lb_short": LOOKBACK_SHORT,
+        "aod": str(as_of_date), "lb_long": lookback, "lb_short": LOOKBACK_SHORT,
     })
-    log.info(f"  Hit-rate history: {len(df)} rows.")
+    log.info(f"  Hit-rate history (lookback={lookback}d): {len(df)} rows.")
     return df
 
 
@@ -522,52 +533,111 @@ def fetch_event_map_today(engine, grade_date_str):
     return result
 
 
-def compute_all_hit_rates(props_df, history_df, opp_info, direction="over"):
+def compute_all_hit_rates(props_df, history_df, opp_info, direction="over", opp_history_df=None):
+    """
+    Compute hit rates for all props.
+
+    history_df:     windowed history (LOOKBACK_LONG days) — used for L60 / L20 hit rates.
+    opp_history_df: full-season history (LOOKBACK_OPP days) — used for vs-opponent hit rate.
+                    Falls back to history_df if not provided (backward-compatible).
+    """
     result = props_df.copy()
-    all_grade_cols = ("hit_rate_60","sample_size_60","hit_rate_20","sample_size_20","weighted_hit_rate","grade","hit_rate_opp","sample_size_opp")
+    all_grade_cols = (
+        "hit_rate_60", "sample_size_60", "hit_rate_20", "sample_size_20",
+        "weighted_hit_rate", "grade", "hit_rate_opp", "sample_size_opp",
+    )
     if history_df.empty:
         for col in all_grade_cols:
             result[col] = None
         return result
+
     history = history_df.copy()
     history["stat_value"] = history["stat_value"].astype(float)
     result["line_value"] = result["line_value"].astype(float)
-    lines = result[["player_id","market_key","line_value"]].drop_duplicates()
-    merged = history.merge(lines, on=["player_id","market_key"], how="inner")
+
+    lines = result[["player_id", "market_key", "line_value"]].drop_duplicates()
+    merged = history.merge(lines, on=["player_id", "market_key"], how="inner")
+
     if direction == "under":
         merged["hit"] = (merged["stat_value"] < merged["line_value"]).astype(int)
     else:
         merged["hit"] = (merged["stat_value"] > merged["line_value"]).astype(int)
-    g60 = merged.groupby(["player_id","market_key","line_value"]).agg(sample_size_60=("hit","count"),hits_60=("hit","sum")).reset_index()
+
+    g60 = merged.groupby(["player_id", "market_key", "line_value"]).agg(
+        sample_size_60=("hit", "count"), hits_60=("hit", "sum")
+    ).reset_index()
     g60["hit_rate_60"] = g60["hits_60"] / g60["sample_size_60"]
-    g20 = merged[merged["in_short_window"]==1].groupby(["player_id","market_key","line_value"]).agg(sample_size_20=("hit","count"),hits_20=("hit","sum")).reset_index()
+
+    g20 = merged[merged["in_short_window"] == 1].groupby(["player_id", "market_key", "line_value"]).agg(
+        sample_size_20=("hit", "count"), hits_20=("hit", "sum")
+    ).reset_index()
     g20["hit_rate_20"] = g20["hits_20"] / g20["sample_size_20"]
-    result = result.merge(g60[["player_id","market_key","line_value","hit_rate_60","sample_size_60"]], on=["player_id","market_key","line_value"], how="left")
-    result = result.merge(g20[["player_id","market_key","line_value","hit_rate_20","sample_size_20"]], on=["player_id","market_key","line_value"], how="left")
+
+    result = result.merge(g60[["player_id", "market_key", "line_value", "hit_rate_60", "sample_size_60"]], on=["player_id", "market_key", "line_value"], how="left")
+    result = result.merge(g20[["player_id", "market_key", "line_value", "hit_rate_20", "sample_size_20"]], on=["player_id", "market_key", "line_value"], how="left")
     result["sample_size_60"] = result["sample_size_60"].fillna(0).astype(int)
     result["sample_size_20"] = result["sample_size_20"].fillna(0).astype(int)
+
     use_blend = (result["sample_size_20"] >= MIN_SAMPLE) & result["hit_rate_20"].notna()
     result["weighted_hit_rate"] = result["hit_rate_60"]
-    result.loc[use_blend,"weighted_hit_rate"] = WEIGHT_SHORT * result.loc[use_blend,"hit_rate_20"] + WEIGHT_LONG * result.loc[use_blend,"hit_rate_60"]
-    result["grade"] = result["weighted_hit_rate"].apply(lambda x: round(x*100,1) if pd.notna(x) else None)
-    for col in ("weighted_hit_rate","hit_rate_60","hit_rate_20"):
-        result[col] = result[col].apply(lambda x: round(x,4) if pd.notna(x) else None)
-    player_opp = {pid: int(info["opp_team_id"]) for pid,info in opp_info.items() if info.get("opp_team_id") is not None}
-    if player_opp and "opp_team_id" in merged.columns:
-        merged["today_opp"] = merged["player_id"].map(player_opp)
-        opp_rows = merged[merged["today_opp"].notna() & (merged["opp_team_id"] == merged["today_opp"])]
+    result.loc[use_blend, "weighted_hit_rate"] = (
+        WEIGHT_SHORT * result.loc[use_blend, "hit_rate_20"]
+        + WEIGHT_LONG  * result.loc[use_blend, "hit_rate_60"]
+    )
+    result["grade"] = result["weighted_hit_rate"].apply(lambda x: round(x * 100, 1) if pd.notna(x) else None)
+    for col in ("weighted_hit_rate", "hit_rate_60", "hit_rate_20"):
+        result[col] = result[col].apply(lambda x: round(x, 4) if pd.notna(x) else None)
+
+    # -------------------------------------------------------------------------
+    # vs-Opponent hit rate — uses full-season history (opp_history_df) so that
+    # every game this season against today's opponent is counted, not just the
+    # last 60 days.
+    # -------------------------------------------------------------------------
+    opp_src = opp_history_df if (opp_history_df is not None and not opp_history_df.empty) else history_df
+    player_opp = {
+        pid: int(info["opp_team_id"])
+        for pid, info in opp_info.items()
+        if info.get("opp_team_id") is not None
+    }
+
+    if player_opp and "opp_team_id" in opp_src.columns:
+        opp_src_copy = opp_src.copy()
+        opp_src_copy["stat_value"] = opp_src_copy["stat_value"].astype(float)
+        merged_opp = opp_src_copy.merge(lines, on=["player_id", "market_key"], how="inner")
+        if direction == "under":
+            merged_opp["hit"] = (merged_opp["stat_value"] < merged_opp["line_value"]).astype(int)
+        else:
+            merged_opp["hit"] = (merged_opp["stat_value"] > merged_opp["line_value"]).astype(int)
+
+        merged_opp["today_opp"] = merged_opp["player_id"].map(player_opp)
+        opp_rows = merged_opp[
+            merged_opp["today_opp"].notna()
+            & (merged_opp["opp_team_id"] == merged_opp["today_opp"])
+        ]
         if not opp_rows.empty:
-            g_opp = opp_rows.groupby(["player_id","market_key","line_value"]).agg(sample_size_opp=("hit","count"),hits_opp=("hit","sum")).reset_index()
-            g_opp["hit_rate_opp"] = (g_opp["hits_opp"]/g_opp["sample_size_opp"]).apply(lambda x: round(x,4) if pd.notna(x) else None)
-            result = result.merge(g_opp[["player_id","market_key","line_value","hit_rate_opp","sample_size_opp"]], on=["player_id","market_key","line_value"], how="left")
+            g_opp = opp_rows.groupby(["player_id", "market_key", "line_value"]).agg(
+                sample_size_opp=("hit", "count"), hits_opp=("hit", "sum")
+            ).reset_index()
+            g_opp["hit_rate_opp"] = (g_opp["hits_opp"] / g_opp["sample_size_opp"]).apply(
+                lambda x: round(x, 4) if pd.notna(x) else None
+            )
+            result = result.merge(
+                g_opp[["player_id", "market_key", "line_value", "hit_rate_opp", "sample_size_opp"]],
+                on=["player_id", "market_key", "line_value"],
+                how="left",
+            )
             result["sample_size_opp"] = result["sample_size_opp"].fillna(0).astype(int)
         else:
-            result["hit_rate_opp"] = None; result["sample_size_opp"] = 0
+            result["hit_rate_opp"] = None
+            result["sample_size_opp"] = 0
     else:
-        result["hit_rate_opp"] = None; result["sample_size_opp"] = 0
+        result["hit_rate_opp"] = None
+        result["sample_size_opp"] = 0
+
     if "sample_size_opp" in result.columns:
-        result.loc[result["sample_size_opp"]==0,"hit_rate_opp"] = None
-        result.loc[result["sample_size_opp"]==0,"sample_size_opp"] = None
+        result.loc[result["sample_size_opp"] == 0, "hit_rate_opp"]    = None
+        result.loc[result["sample_size_opp"] == 0, "sample_size_opp"] = None
+
     return result
 
 
@@ -587,14 +657,15 @@ def _invert(v):
 
 
 def precompute_player_market_grades(season_df, props_df):
-    combos = props_df[["player_id","market_key"]].drop_duplicates()
+    combos = props_df[["player_id", "market_key"]].drop_duplicates()
     result = {}
-    player_groups = {pid: grp.sort_values("game_date") for pid,grp in season_df.groupby("player_id")}
+    player_groups = {pid: grp.sort_values("game_date") for pid, grp in season_df.groupby("player_id")}
     for _, row in combos.iterrows():
         pid = int(row["player_id"]); mkt = row["market_key"]
         stat_col = MARKET_STAT_COL.get(mkt); pdf = player_groups.get(pid)
         if stat_col is None or pdf is None or pdf.empty or stat_col not in pdf.columns:
-            result[(pid,mkt)] = {"trend_grade": None, "regression_grade": None}; continue
+            result[(pid, mkt)] = {"trend_grade": None, "regression_grade": None}
+            continue
         vals = pdf[stat_col].dropna().values
         trend = None
         if len(vals) >= TREND_MIN:
@@ -603,31 +674,33 @@ def precompute_player_market_grades(season_df, props_df):
             if len(short) >= TREND_MIN:
                 sm, lm = float(np.mean(short)), float(np.mean(long))
                 if lm != 0:
-                    trend = _safe(max(0.0, min(100.0, 50.0 + (sm-lm)/lm*150.0)))
+                    trend = _safe(max(0.0, min(100.0, 50.0 + (sm - lm) / lm * 150.0)))
         regression = None
         if len(vals) >= SEASON_MIN:
-            recent = vals[-RECENT_WINDOW:] if len(vals) >= RECENT_WINDOW else vals[-max(1, len(vals)//2):]
+            recent = vals[-RECENT_WINDOW:] if len(vals) >= RECENT_WINDOW else vals[-max(1, len(vals) // 2):]
             if len(recent) >= 3:
                 s_std = float(np.std(vals))
                 if s_std >= 0.01:
                     z = (float(np.mean(recent)) - float(np.mean(vals))) / s_std
-                    regression = _safe(max(0.0, min(100.0, 50.0 - z*25.0)))
-        result[(pid,mkt)] = {"trend_grade": trend, "regression_grade": regression}
+                    regression = _safe(max(0.0, min(100.0, 50.0 - z * 25.0)))
+        result[(pid, mkt)] = {"trend_grade": trend, "regression_grade": regression}
     return result
 
 
 def precompute_line_grades(season_df, props_df):
-    combos = props_df[["player_id","market_key","line_value"]].drop_duplicates()
+    combos = props_df[["player_id", "market_key", "line_value"]].drop_duplicates()
     result = {}
-    player_groups = {pid: grp.sort_values("game_date") for pid,grp in season_df.groupby("player_id")}
+    player_groups = {pid: grp.sort_values("game_date") for pid, grp in season_df.groupby("player_id")}
     for _, row in combos.iterrows():
-        pid = int(row["player_id"]); mkt = row["market_key"]; lv = float(row["line_value"]); key = (pid,mkt,lv)
+        pid = int(row["player_id"]); mkt = row["market_key"]; lv = float(row["line_value"]); key = (pid, mkt, lv)
         stat_col = MARKET_STAT_COL.get(mkt); pdf = player_groups.get(pid)
         if stat_col is None or pdf is None or pdf.empty or stat_col not in pdf.columns:
-            result[key] = {"momentum_grade": None, "pattern_grade": None}; continue
+            result[key] = {"momentum_grade": None, "pattern_grade": None}
+            continue
         vals = pdf[stat_col].dropna().values
         if len(vals) == 0:
-            result[key] = {"momentum_grade": None, "pattern_grade": None}; continue
+            result[key] = {"momentum_grade": None, "pattern_grade": None}
+            continue
         hits = [bool(v > lv) for v in vals]
         momentum = None
         if hits:
@@ -635,7 +708,7 @@ def precompute_line_grades(season_df, props_df):
             for h in reversed(hits):
                 if h == last: streak += 1
                 else: break
-            momentum = _safe(max(0.0, min(100.0, 50.0 + (1 if last else -1)*25.0*math.log2(1+streak))))
+            momentum = _safe(max(0.0, min(100.0, 50.0 + (1 if last else -1) * 25.0 * math.log2(1 + streak))))
         pattern = None
         if len(hits) >= 2:
             last = hits[-1]; current_streak = 0
@@ -643,8 +716,8 @@ def precompute_line_grades(season_df, props_df):
                 if h == last: current_streak += 1
                 else: break
             reversals = 0; instances = 0
-            for end_idx in range(current_streak-1, len(hits)-current_streak):
-                window = hits[end_idx-current_streak+1:end_idx+1]
+            for end_idx in range(current_streak - 1, len(hits) - current_streak):
+                window = hits[end_idx - current_streak + 1:end_idx + 1]
                 if len(window) != current_streak: continue
                 if all(h == last for h in window):
                     before_idx = end_idx - current_streak
@@ -655,7 +728,7 @@ def precompute_line_grades(season_df, props_df):
                         if hits[next_idx] != last: reversals += 1
             if instances >= PATTERN_MIN:
                 rate = reversals / instances
-                score = 50.0 - (rate-0.5)*100.0 if last else 50.0 + (rate-0.5)*100.0
+                score = 50.0 - (rate - 0.5) * 100.0 if last else 50.0 + (rate - 0.5) * 100.0
                 pattern = _safe(max(0.0, min(100.0, score)))
         result[key] = {"momentum_grade": momentum, "pattern_grade": pattern}
     return result
@@ -671,7 +744,7 @@ def compute_matchup_grade(market_key, opp_team_id, position, matchup_cache):
     if defense is None: return None
     rank = defense.get(rank_col)
     if rank is None or (isinstance(rank, float) and math.isnan(rank)): return None
-    return _safe(max(0.0, min(100.0, (30-int(rank)+1)/30.0*100.0)))
+    return _safe(max(0.0, min(100.0, (30 - int(rank) + 1) / 30.0 * 100.0)))
 
 
 def compute_composite(whr, trend, momentum, pattern, matchup, regression):
@@ -679,14 +752,18 @@ def compute_composite(whr, trend, momentum, pattern, matchup, regression):
     if whr is not None: parts.append(whr * 100.0)
     for v in (trend, momentum, pattern, matchup, regression):
         if v is not None: parts.append(float(v))
-    return _safe(sum(parts)/len(parts)) if parts else None
+    return _safe(sum(parts) / len(parts)) if parts else None
 
 
 def upsert_grades(engine, rows):
     if not rows: return 0
     seen = {}
     for r in rows:
-        k = (r["grade_date"],r["event_id"],r["player_id"],r["market_key"],r["bookmaker_key"],r["line_value"],r.get("outcome_name","Over"))
+        k = (
+            r["grade_date"], r["event_id"], r["player_id"],
+            r["market_key"], r["bookmaker_key"], r["line_value"],
+            r.get("outcome_name", "Over"),
+        )
         seen[k] = r
     rows = list(seen.values())
     with engine.begin() as conn:
@@ -700,14 +777,15 @@ CREATE TABLE #stage_grades(
     composite_grade FLOAT,hit_rate_opp FLOAT,sample_size_opp INT
 )"""))
         for i in range(0, len(rows), 500):
-            chunk = rows[i:i+500]
+            chunk = rows[i:i + 500]
             conn.exec_driver_sql(
                 "INSERT INTO #stage_grades VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [(r["grade_date"],r["event_id"],r["game_id"],r["player_id"],r["player_name"],r["market_key"],
-                  r["bookmaker_key"],r["line_value"],r.get("outcome_name","Over"),r["over_price"],
-                  r["hit_rate_60"],r["hit_rate_20"],r["sample_size_60"],r["sample_size_20"],
-                  r["weighted_hit_rate"],r["grade"],r["trend_grade"],r["momentum_grade"],r["pattern_grade"],
-                  r["matchup_grade"],r["regression_grade"],r["composite_grade"],r["hit_rate_opp"],r["sample_size_opp"])
+                [(r["grade_date"], r["event_id"], r["game_id"], r["player_id"], r["player_name"],
+                  r["market_key"], r["bookmaker_key"], r["line_value"], r.get("outcome_name", "Over"),
+                  r["over_price"], r["hit_rate_60"], r["hit_rate_20"], r["sample_size_60"],
+                  r["sample_size_20"], r["weighted_hit_rate"], r["grade"], r["trend_grade"],
+                  r["momentum_grade"], r["pattern_grade"], r["matchup_grade"], r["regression_grade"],
+                  r["composite_grade"], r["hit_rate_opp"], r["sample_size_opp"])
                  for r in chunk]
             )
         conn.execute(text("""
@@ -739,10 +817,10 @@ WHEN NOT MATCHED THEN INSERT(
     return len(rows)
 
 
-def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df, opp_info, matchup_cache, direction="over"):
+def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=None):
     if props_df.empty: return []
-    props_df = props_df.drop_duplicates(subset=["player_id","market_key","line_value"]).copy()
-    graded_df   = compute_all_hit_rates(props_df, history_df, opp_info, direction=direction)
+    props_df = props_df.drop_duplicates(subset=["player_id", "market_key", "line_value"]).copy()
+    graded_df   = compute_all_hit_rates(props_df, history_df, opp_info, direction=direction, opp_history_df=opp_history_df)
     pm_grades   = precompute_player_market_grades(season_df, graded_df)
     line_grades = precompute_line_grades(season_df, graded_df)
     is_under = (direction == "under")
@@ -751,18 +829,20 @@ def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df
         pid = r["player_id"]
         if pd.isna(pid): continue
         pid_int = int(pid); mkt = r["market_key"]; lv = float(r["line_value"])
-        info = opp_info.get(pid_int, {}); position = info.get("position",""); opp_id = info.get("opp_team_id")
+        info = opp_info.get(pid_int, {}); position = info.get("position", ""); opp_id = info.get("opp_team_id")
         whr = r.get("weighted_hit_rate"); whr = whr if pd.notna(whr) else None
-        pm = pm_grades.get((pid_int,mkt),{}); lk = line_grades.get((pid_int,mkt,lv),{})
-        t_r=pm.get("trend_grade"); rg_r=pm.get("regression_grade"); mo_r=lk.get("momentum_grade")
-        pa_r=lk.get("pattern_grade"); ma_r=compute_matchup_grade(mkt,opp_id,position,matchup_cache)
+        pm = pm_grades.get((pid_int, mkt), {}); lk = line_grades.get((pid_int, mkt, lv), {})
+        t_r  = pm.get("trend_grade");      rg_r = pm.get("regression_grade")
+        mo_r = lk.get("momentum_grade");   pa_r = lk.get("pattern_grade")
+        ma_r = compute_matchup_grade(mkt, opp_id, position, matchup_cache)
         if is_under:
-            trend=_invert(t_r); regression=_invert(rg_r); momentum=_invert(mo_r); pattern=_invert(pa_r); matchup=_invert(ma_r)
+            trend = _invert(t_r); regression = _invert(rg_r)
+            momentum = _invert(mo_r); pattern = _invert(pa_r); matchup = _invert(ma_r)
         else:
-            trend=t_r; regression=rg_r; momentum=mo_r; pattern=pa_r; matchup=ma_r
+            trend = t_r; regression = rg_r; momentum = mo_r; pattern = pa_r; matchup = ma_r
         composite = compute_composite(whr, trend, momentum, pattern, matchup, regression)
         hr_opp = r.get("hit_rate_opp"); hr_opp = hr_opp if pd.notna(hr_opp) else None
-        n_opp = r.get("sample_size_opp"); n_opp = int(n_opp) if pd.notna(n_opp) and n_opp else None
+        n_opp  = r.get("sample_size_opp"); n_opp = int(n_opp) if pd.notna(n_opp) and n_opp else None
         raw_price = r.get("over_price"); price = int(raw_price) if pd.notna(raw_price) and raw_price is not None else None
         rows.append({
             "grade_date":        grade_date_str,
@@ -795,24 +875,25 @@ def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df
 
 def _common_grade_data(engine, all_over, under_props, today):
     all_player_ids = list(set(
-        all_over["player_id"].dropna().tolist() +
-        (under_props["player_id"].dropna().tolist() if not under_props.empty else [])
+        all_over["player_id"].dropna().tolist()
+        + (under_props["player_id"].dropna().tolist() if not under_props.empty else [])
     ))
     all_market_keys = list(set(
-        all_over["market_key"].dropna().tolist() +
-        (under_props["market_key"].dropna().tolist() if not under_props.empty else [])
+        all_over["market_key"].dropna().tolist()
+        + (under_props["market_key"].dropna().tolist() if not under_props.empty else [])
     ))
-    history_df    = fetch_history(engine, all_player_ids, all_market_keys, today)
-    season_df     = fetch_season_history(engine, all_player_ids, today)
-    opp_info      = fetch_opp_info(engine, all_player_ids, today)
-    matchup_pairs = []
+    history_df     = fetch_history(engine, all_player_ids, all_market_keys, today)
+    opp_history_df = fetch_history(engine, all_player_ids, all_market_keys, today, lookback=LOOKBACK_OPP)
+    season_df      = fetch_season_history(engine, all_player_ids, today)
+    opp_info       = fetch_opp_info(engine, all_player_ids, today)
+    matchup_pairs  = []
     for pid, info in opp_info.items():
-        pos = info.get("position","")
+        pos = info.get("position", "")
         pg = "G" if pos.startswith("G") else "F" if pos.startswith("F") else "C" if pos.startswith("C") else None
         if pg and info.get("opp_team_id"):
             matchup_pairs.append((int(info["opp_team_id"]), pg))
     matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
-    return history_df, season_df, opp_info, matchup_cache
+    return history_df, season_df, opp_info, matchup_cache, opp_history_df
 
 
 def run_upcoming(engine):
@@ -821,20 +902,20 @@ def run_upcoming(engine):
     posted    = fetch_posted_props(engine)
     active    = fetch_active_players_today(engine, today)
     event_map = fetch_event_map_today(engine, today)
-    std_props = build_standard_props(posted)
-    alt_props = build_alt_props(posted, active, event_map)
+    std_props   = build_standard_props(posted)
+    alt_props   = build_alt_props(posted, active, event_map)
     std_trimmed = drop_bracket_lines_covered_by_alts(std_props, alt_props)
     all_over = pd.concat([p for p in [std_trimmed, alt_props] if not p.empty], ignore_index=True)
     if all_over.empty:
         log.info("No props to grade."); return
-    all_over = all_over.drop_duplicates(subset=["player_id","market_key","line_value"])
+    all_over = all_over.drop_duplicates(subset=["player_id", "market_key", "line_value"])
     log.info(f"  {len(all_over)} over prop rows ({len(std_trimmed)} standard, {len(alt_props)} alternate).")
     under_prices = fetch_under_prices(engine)
     under_props  = build_under_props(posted, under_prices)
     log.info(f"  {len(under_props)} under prop rows.")
-    history_df, season_df, opp_info, matchup_cache = _common_grade_data(engine, all_over, under_props, today)
-    over_rows  = grade_props_for_date(engine, today, all_over, history_df, season_df, opp_info, matchup_cache, direction="over")
-    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under") if not under_props.empty else []
+    history_df, season_df, opp_info, matchup_cache, opp_history_df = _common_grade_data(engine, all_over, under_props, today)
+    over_rows  = grade_props_for_date(engine, today, all_over, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df)
+    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df) if not under_props.empty else []
     written = upsert_grades(engine, over_rows + under_rows)
     log.info(f"  {written} total rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
@@ -859,23 +940,23 @@ def run_intraday(engine):
         f" AND market_key IN({std_mkt_list}) AND bookmaker_key=:bk AND outcome_name='Over'"
         f") ranked WHERE rn=1"
     ), engine, params={"gd": today, "bk": BOOKMAKER})
-    current = std_posted[["player_id","market_key","line_value"]].rename(columns={"line_value":"current_line"})
+    current = std_posted[["player_id", "market_key", "line_value"]].rename(columns={"line_value": "current_line"})
     if not last_graded.empty:
-        merged = current.merge(last_graded, on=["player_id","market_key"], how="left")
+        merged = current.merge(last_graded, on=["player_id", "market_key"], how="left")
         moved  = merged[merged["last_line"].isna() | (merged["current_line"].astype(float) != merged["last_line"].astype(float))]
     else:
         moved = current.copy()
     if moved.empty:
         log.info("  No line movement. Nothing to do."); return
     log.info(f"  {len(moved)} player-market pairs with movement.")
-    moved_posted = std_posted.merge(moved[["player_id","market_key"]], on=["player_id","market_key"], how="inner")
+    moved_posted = std_posted.merge(moved[["player_id", "market_key"]], on=["player_id", "market_key"], how="inner")
     over_bracket = build_standard_props(moved_posted)
     if over_bracket.empty: return
     under_prices = fetch_under_prices(engine)
     under_props  = build_under_props(moved_posted, under_prices)
-    history_df, season_df, opp_info, matchup_cache = _common_grade_data(engine, over_bracket, under_props, today)
-    over_rows  = grade_props_for_date(engine, today, over_bracket, history_df, season_df, opp_info, matchup_cache, direction="over")
-    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under") if not under_props.empty else []
+    history_df, season_df, opp_info, matchup_cache, opp_history_df = _common_grade_data(engine, over_bracket, under_props, today)
+    over_rows  = grade_props_for_date(engine, today, over_bracket, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df)
+    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df) if not under_props.empty else []
     written = upsert_grades(engine, over_rows + under_rows)
     log.info(f"  {written} rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
@@ -903,24 +984,25 @@ def run_backfill(engine, batch_size, specific_date=None):
         if props.empty: continue
         player_ids  = props["player_id"].dropna().unique().tolist()
         market_keys = props["market_key"].dropna().unique().tolist()
-        history_df  = fetch_history(engine, player_ids, market_keys, gd)
-        season_df   = fetch_season_history(engine, player_ids, gd)
-        opp_info    = fetch_opp_info(engine, player_ids, gd)
-        matchup_pairs = []
+        history_df     = fetch_history(engine, player_ids, market_keys, gd)
+        opp_history_df = fetch_history(engine, player_ids, market_keys, gd, lookback=LOOKBACK_OPP)
+        season_df      = fetch_season_history(engine, player_ids, gd)
+        opp_info       = fetch_opp_info(engine, player_ids, gd)
+        matchup_pairs  = []
         for pid, info in opp_info.items():
-            pos = info.get("position","")
+            pos = info.get("position", "")
             pg = "G" if pos.startswith("G") else "F" if pos.startswith("F") else "C" if pos.startswith("C") else None
             if pg and info.get("opp_team_id"):
                 matchup_pairs.append((int(info["opp_team_id"]), pg))
         matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
-        rows  = grade_props_for_date(engine, gd, props, history_df, season_df, opp_info, matchup_cache, direction="over")
+        rows  = grade_props_for_date(engine, gd, props, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df)
         total += upsert_grades(engine, rows)
     log.info(f"Backfill complete. {total} total rows written.")
 
 
 def main():
     parser = argparse.ArgumentParser(description="NBA prop grading model")
-    parser.add_argument("--mode", choices=["upcoming","intraday","backfill"], default="upcoming")
+    parser.add_argument("--mode",  choices=["upcoming", "intraday", "backfill"], default="upcoming")
     parser.add_argument("--batch", type=int, default=BATCH_DEFAULT)
     parser.add_argument("--date",  type=str, default=None)
     args = parser.parse_args()
