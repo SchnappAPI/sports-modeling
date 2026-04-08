@@ -32,6 +32,10 @@ Modes
                days. Truncates and reloads odds.upcoming_* tables each run.
                Also upserts into odds.event_game_map so the grading engine
                can resolve event_id -> game_id for today's props.
+               Includes FanDuel deep links (includeLinks=true) for prop markets
+               so the UI can link directly to the betslip.
+               Deduplicates on highest price when the same player/market/line
+               appears in both standard and alternate market types.
 
   probe     -- Coverage discovery pass. Writes to odds.market_probe only.
 
@@ -128,33 +132,18 @@ BOOKMAKERS   = "fanduel"
 
 # ---------------------------------------------------------------------------
 # Market constants
-#
-# These lists are derived from the AllMarkets audit run against live FanDuel
-# data (March-April 2026). GamePeriod markets that are genuinely team-level
-# (team_totals and all variants) are kept here for completeness but routed to
-# game_lines rather than player_props by the parser.
 # ---------------------------------------------------------------------------
 
-# The three core markets sent via the cheaper bulk /odds endpoint.
-# One bulk call returns all games on the slate.
 BULK_FEATURED_MARKETS = ["h2h", "spreads", "totals"]
 
-# ---------------------------------------------------------------------------
-# NFL markets
-# ---------------------------------------------------------------------------
 NFL_EVENT_GAME_PERIOD = [
-    # moneyline
     "h2h_h1", "h2h_h2",
     "h2h_q1", "h2h_q2", "h2h_q3", "h2h_q4",
-    # spreads
     "spreads_h1", "spreads_h2",
     "spreads_q1", "spreads_q2", "spreads_q3", "spreads_q4",
-    # totals
     "totals_h1", "totals_h2",
     "totals_q1", "totals_q2", "totals_q3", "totals_q4",
-    # team totals
     "team_totals", "team_totals_h1", "team_totals_h2",
-    # alternate game lines
     "alternate_spreads", "alternate_spreads_h1", "alternate_spreads_h2",
     "alternate_spreads_q1", "alternate_spreads_q2", "alternate_spreads_q3", "alternate_spreads_q4",
     "alternate_totals", "alternate_totals_h1", "alternate_totals_h2",
@@ -182,23 +171,15 @@ NFL_ALT_PROPS = [
     "player_rush_reception_yds_alternate",
 ]
 
-# ---------------------------------------------------------------------------
-# NBA markets
-# ---------------------------------------------------------------------------
 NBA_EVENT_GAME_PERIOD = [
-    # moneyline
     "h2h_h1", "h2h_h2",
     "h2h_q1", "h2h_q2", "h2h_q3", "h2h_q4",
-    # spreads
     "spreads_h1",
     "spreads_q1", "spreads_q2", "spreads_q3", "spreads_q4",
-    # totals
     "totals_h1",
     "totals_q1", "totals_q2", "totals_q3", "totals_q4",
-    # team totals
     "team_totals", "team_totals_h1",
     "team_totals_q1", "team_totals_q2", "team_totals_q3", "team_totals_q4",
-    # alternate game lines
     "alternate_spreads", "alternate_totals",
     "alternate_team_totals",
 ]
@@ -231,19 +212,11 @@ NBA_ALT_PROPS = [
     "player_points_rebounds_assists_alternate",
 ]
 
-# ---------------------------------------------------------------------------
-# MLB markets
-# ---------------------------------------------------------------------------
 MLB_EVENT_GAME_PERIOD = [
-    # moneyline
     "h2h_1st_5_innings", "h2h_1st_7_innings",
-    # spreads
     "spreads_1st_5_innings", "spreads_1st_7_innings",
-    # totals
     "totals_1st_5_innings", "totals_1st_7_innings",
-    # team totals
     "team_totals",
-    # alternate game lines
     "alternate_spreads", "alternate_spreads_1st_5_innings",
     "alternate_totals", "alternate_totals_1st_5_innings",
     "alternate_team_totals",
@@ -267,10 +240,6 @@ MLB_ALT_PROPS = [
     "pitcher_strikeouts_alternate",
 ]
 
-# ---------------------------------------------------------------------------
-# Aggregated market dicts
-# ---------------------------------------------------------------------------
-
 ALL_FEATURED_MARKETS = {
     "nfl": BULK_FEATURED_MARKETS + NFL_EVENT_GAME_PERIOD,
     "nba": BULK_FEATURED_MARKETS + NBA_EVENT_GAME_PERIOD,
@@ -284,9 +253,6 @@ EVENT_FEATURED_MARKETS = {
 PROP_MARKETS     = {"nfl": NFL_PROPS,     "nba": NBA_PROPS,     "mlb": MLB_PROPS}
 ALT_PROP_MARKETS = {"nfl": NFL_ALT_PROPS, "nba": NBA_ALT_PROPS, "mlb": MLB_ALT_PROPS}
 
-# Markets that are always team-level, never player-level.
-# The odds API populates the outcome description with a team name for these,
-# which would otherwise cause them to be misrouted into player_props.
 TEAM_LEVEL_MARKETS = {
     "team_totals",
     "team_totals_h1", "team_totals_h2",
@@ -513,6 +479,7 @@ DDL_STATEMENTS = [
         outcome_name    VARCHAR(20)  NOT NULL,
         outcome_price   INT          NULL,
         outcome_point   DECIMAL(6,1) NULL,
+        link            VARCHAR(500) NULL,
         snap_ts         DATETIME2    NULL,
         created_at      DATETIME2    NOT NULL DEFAULT GETUTCDATE()
     )
@@ -535,6 +502,13 @@ DDL_STATEMENTS = [
                WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='player_props'
                AND COLUMN_NAME='snapshot_timestamp')
     EXEC sp_rename 'odds.player_props.snapshot_timestamp', 'snap_ts', 'COLUMN'
+    """,
+    # Additive migration: link column on upcoming_player_props
+    """
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                   WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props'
+                   AND COLUMN_NAME='link')
+    ALTER TABLE odds.upcoming_player_props ADD link VARCHAR(500) NULL
     """,
 ]
 
@@ -652,7 +626,6 @@ def ensure_schema(engine):
 # ---------------------------------------------------------------------------
 
 def _to_utc_str(dt):
-    """Return a naive UTC string 'YYYY-MM-DD HH:MM:SS', or None."""
     if dt is None:
         return None
     if isinstance(dt, str):
@@ -668,7 +641,6 @@ def _to_utc_str(dt):
 
 
 def _parse_iso(ts_str):
-    """Parse an ISO 8601 string (with or without Z) to a timezone-aware UTC datetime."""
     if not ts_str:
         return None
     try:
@@ -976,7 +948,13 @@ def _fetch_event(sport_key, event_id, snap_iso, markets, api_key):
 # Parsing
 # ---------------------------------------------------------------------------
 
-def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
+def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw, include_links=False):
+    """
+    Parse bookmaker markets from an API event object into game_lines and player_props rows.
+
+    include_links: when True, capture outcome.get("link") into player_props rows.
+                   Only used in upcoming mode where includeLinks=true was passed to the API.
+    """
     snap_ts = _to_utc_str(snap_ts_raw)
     game_lines, player_props = [], []
     for bk in event_obj.get("bookmakers") or []:
@@ -998,10 +976,45 @@ def _parse_bookmakers(event_obj, event_id, sport_key, snap_ts_raw):
                     "snap_ts":         snap_ts,
                 }
                 if description and not is_team_market:
-                    player_props.append({**base, "player_name": description})
+                    row = {**base, "player_name": description}
+                    if include_links:
+                        row["link"] = outcome.get("link")
+                    player_props.append(row)
                 else:
                     game_lines.append(base)
     return game_lines, player_props
+
+
+def _dedup_props_highest_price(pp_rows):
+    """
+    Deduplicate player prop rows keeping the highest outcome_price per
+    (player_name, market_key, outcome_name, outcome_point) combination.
+
+    This handles the case where FanDuel posts the same line in both a standard
+    market (e.g. player_points) and an alternate market (e.g. player_points_alternate)
+    at slightly different prices. We keep the row with the better odds and its link.
+    """
+    if not pp_rows:
+        return pp_rows
+    best = {}
+    for row in pp_rows:
+        key = (
+            row.get("player_name"),
+            row.get("market_key"),
+            row.get("outcome_name"),
+            row.get("outcome_point"),
+        )
+        price = row.get("outcome_price")
+        if key not in best:
+            best[key] = row
+        else:
+            existing_price = best[key].get("outcome_price")
+            # Higher American odds = better for the bettor.
+            # None prices are kept only if no priced row exists.
+            if price is not None:
+                if existing_price is None or price > existing_price:
+                    best[key] = row
+    return list(best.values())
 
 
 def _snap_iso(commence_raw):
@@ -1070,10 +1083,6 @@ def run_backfill(sport, api_key, games_limit, season_year, engine, fresh=False):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Backfill: {sport.upper()} Season {season_year} ===")
 
-    # --fresh: clear loaded data for this sport+season so we start clean.
-    # The discover catalog (odds.discovered_events) is never touched.
-    # Each table is scoped by sport_key AND season_year so parallel matrix
-    # jobs for different pairs do not interfere with each other.
     if fresh:
         print("  --fresh: clearing odds.events, odds.game_lines, odds.player_props "
               f"for {sport_key} season {season_year}...")
@@ -1187,11 +1196,6 @@ def run_backfill(sport, api_key, games_limit, season_year, engine, fresh=False):
         else:
             print("    Before props cutoff. Skipping prop calls.")
 
-        # Write game_lines and player_props first, then stamp odds.events as the
-        # completion marker. If the process crashes between the data writes and
-        # the events write, the next run will re-fetch this event (its event_id
-        # will not be in odds.events), and the upsert MERGE will overwrite the
-        # partial data cleanly. No data from previous events is lost.
         gl_n = pp_n = 0
         if gl_all:
             upsert(engine, clean_dataframe(pd.DataFrame(gl_all)),
@@ -1204,7 +1208,6 @@ def run_backfill(sport, api_key, games_limit, season_year, engine, fresh=False):
                    keys=["event_id", "market_key", "bookmaker_key", "player_name", "outcome_name"])
             pp_n = len(pp_all)
 
-        # Stamp the event as complete. This is the idempotency gate.
         upsert(engine,
                clean_dataframe(pd.DataFrame([{
                    "event_id":      eid,
@@ -1530,11 +1533,25 @@ def _fetch_upcoming_bulk(sport_key, markets, api_key):
     return data.get("data") or []
 
 
-def _fetch_upcoming_event(sport_key, event_id, markets, api_key):
+def _fetch_upcoming_event(sport_key, event_id, markets, api_key, include_links=False):
+    """
+    Fetch per-event odds for upcoming/live games.
+
+    include_links: when True, adds includeLinks=true to the API request so
+                   each outcome includes a FanDuel deep link URL.
+    """
+    params = {
+        "apiKey":      api_key,
+        "bookmakers":  BOOKMAKERS,
+        "markets":     ",".join(markets),
+        "oddsFormat":  "american",
+    }
+    if include_links:
+        params["includeLinks"] = "true"
+
     data, _ = _request(
         f"{BASE_URL}/v4/sports/{sport_key}/events/{event_id}/odds",
-        {"apiKey": api_key, "bookmakers": BOOKMAKERS,
-         "markets": ",".join(markets), "oddsFormat": "american"},
+        params,
     )
     if data is None: return None, None
     if isinstance(data, dict) and "bookmakers" in data: return data, None
@@ -1611,30 +1628,47 @@ def run_upcoming(sport, api_key, days_ahead, engine):
         print(f"\n  {away_name or ''} @ {home_name or ''} ({eastern_date or '?'})")
 
         gl_all, pp_all = [], []
+
+        # Bulk h2h/spreads/totals — no links needed for game lines
         bulk_data = _fetch_upcoming_bulk(sport_key, BULK_FEATURED_MARKETS, api_key)
         ev_obj = next((e for e in bulk_data if e.get("id") == eid), None)
         if ev_obj:
             gl, pp = _parse_bookmakers(ev_obj, eid, sport_key, snap_ts)
             gl_all.extend(gl); pp_all.extend(pp)
         time.sleep(1.5)
+
+        # Game period markets (h2h_q1 etc.) — no links needed
         if event_feat:
             ef_obj, _ = _fetch_upcoming_event(sport_key, eid, event_feat, api_key)
             if ef_obj:
                 gl, pp = _parse_bookmakers(ef_obj, eid, sport_key, snap_ts)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
+
+        # Standard prop markets — fetch with links
         if prop_markets:
-            p_obj, _ = _fetch_upcoming_event(sport_key, eid, prop_markets, api_key)
+            p_obj, _ = _fetch_upcoming_event(
+                sport_key, eid, prop_markets, api_key, include_links=True
+            )
             if p_obj:
-                gl, pp = _parse_bookmakers(p_obj, eid, sport_key, snap_ts)
+                gl, pp = _parse_bookmakers(p_obj, eid, sport_key, snap_ts, include_links=True)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
+
+        # Alternate prop markets — fetch with links
         if alt_markets:
-            a_obj, _ = _fetch_upcoming_event(sport_key, eid, alt_markets, api_key)
+            a_obj, _ = _fetch_upcoming_event(
+                sport_key, eid, alt_markets, api_key, include_links=True
+            )
             if a_obj:
-                gl, pp = _parse_bookmakers(a_obj, eid, sport_key, snap_ts)
+                gl, pp = _parse_bookmakers(a_obj, eid, sport_key, snap_ts, include_links=True)
                 gl_all.extend(gl); pp_all.extend(pp)
             time.sleep(1.5)
+
+        # Deduplicate player props: keep highest price per player/market/line/outcome.
+        # This removes duplicate lines when FanDuel posts the same threshold in both
+        # player_points and player_points_alternate at slightly different prices.
+        pp_all = _dedup_props_highest_price(pp_all)
 
         upsert(engine, clean_dataframe(pd.DataFrame([{
             "event_id":      eid,
@@ -1666,6 +1700,9 @@ def run_upcoming(sport, api_key, days_ahead, engine):
         if pp_all:
             pp_df = pd.DataFrame(pp_all)
             pp_df["player_id"] = pp_df["player_name"].map(pid_map)
+            # Ensure link column exists even if no links were returned
+            if "link" not in pp_df.columns:
+                pp_df["link"] = None
             upsert(engine, clean_dataframe(pp_df),
                    schema="odds", table="upcoming_player_props",
                    keys=["event_id", "market_key", "bookmaker_key", "player_name", "outcome_name"])
