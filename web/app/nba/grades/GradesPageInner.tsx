@@ -6,6 +6,7 @@ import { useSearchParams } from 'next/navigation';
 import RefreshDataButton from '@/components/RefreshDataButton';
 import PropMatrix from '@/components/PropMatrix';
 import { HelpButton } from '@/components/HelpPanel';
+import { HelpButton } from '@/components/HelpPanel';
 import {
   getAllSignals,
   getPlayerSignals,
@@ -789,6 +790,9 @@ export default function GradesPageInner() {
         {!loading && !error && (
           <RefreshDataButton onComplete={handleRefreshComplete} />
         )}
+
+        {/* Help */}
+        <HelpButton page={viewMode === 'matrix' ? 'grades-matrix' : 'grades-list'} />
 
         {/* View toggle */}
         {!loading && !error && grades.length > 0 && (
