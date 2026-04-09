@@ -447,7 +447,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                     <table className="text-xs border-collapse">
                       <thead>
                         <tr className="text-gray-600">
-                          <th className="text-left py-1 pr-4 font-normal min-w-[160px]">Player</th>
+                          <th className="text-left py-1 pr-4 font-normal min-w-[160px] sticky left-0 bg-gray-950 z-10">Player</th>
                           {cols.map((line) => (
                             <th key={line} className="text-right py-1 px-2 font-normal tabular-nums whitespace-nowrap min-w-[52px]">
                               {line}+
@@ -458,7 +458,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                       <tbody>
                         {players.map((player) => (
                           <tr key={player.playerId} className="border-t border-gray-900 hover:bg-gray-900/30 transition-colors">
-                            <td className="py-1.5 pr-4">
+                            <td className="py-1.5 pr-4 sticky left-0 bg-gray-950 z-10">
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <button
                                   className="text-gray-100 hover:text-blue-400 transition-colors text-left"
@@ -492,7 +492,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                               const bg   = won ? 'bg-green-900/20' : lost ? 'bg-red-900/20' : '';
 
                               // Line-specific signals: STREAK/SLUMP from momentum of this exact cell
-                              const lineSignals = getLineSignals({ momentumGrade: cell.momentumGrade });
+                              const lineSignals = getLineSignals({ momentumGrade: cell.momentumGrade, hitRate60: cell.hitRate60 });
                               // Value signals: LONGSHOT
                               const valueSignals = getCellValueSignals({
                                 overPrice:  cell.price,

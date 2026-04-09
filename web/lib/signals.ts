@@ -44,6 +44,7 @@ export interface PlayerSignalInputs {
 
 export interface LineSignalInputs {
   momentumGrade: number | null;
+  hitRate60?:    number | null;  // optional — used to suppress noise on low-probability lines
 }
 
 export interface CellValueInputs {
@@ -79,17 +80,31 @@ export function getPlayerSignals(row: PlayerSignalInputs): Signal[] {
 
 /**
  * Line-level signals — specific to a single line value.
- * Only shown on individual cells or in drill-down panels, not at the player row level.
  *
- * momentumGrade: Active streak for this exact line. >75 = hit streak (STREAK), <25 = miss streak (SLUMP).
+ * Gated on hitRate60 to suppress noise on low-probability lines:
+ * - STREAK only fires when hr60 <= 0.80 (not just their normal behavior)
+ *   and hr60 >= 0.25 (they hit it often enough that a streak is meaningful)
+ * - SLUMP only fires when hr60 >= 0.30 (missing is unexpected, not the norm)
+ *
+ * Without these gates, nearly every high line shows SLUMP because players
+ * naturally miss high thresholds most of the time.
  */
 export function getLineSignals(row: LineSignalInputs): Signal[] {
   const signals: Signal[] = [];
-  const { momentumGrade } = row;
+  const { momentumGrade, hitRate60 } = row;
+  const hr = hitRate60 ?? null;
 
   if (momentumGrade != null) {
-    if (momentumGrade > 75) signals.push({ type: 'STREAK', ...SIGNAL_DEFS.STREAK });
-    if (momentumGrade < 25) signals.push({ type: 'SLUMP',  ...SIGNAL_DEFS.SLUMP  });
+    // STREAK: on a hit run, only meaningful if they don't always hit it (hr <= 0.80)
+    // and they hit it often enough for a streak to stand out (hr >= 0.25)
+    if (momentumGrade > 75 && (hr === null || (hr >= 0.25 && hr <= 0.80))) {
+      signals.push({ type: 'STREAK', ...SIGNAL_DEFS.STREAK });
+    }
+    // SLUMP: on a miss run, only meaningful if they normally hit it (hr >= 0.30)
+    // If they miss it 80% of the time normally, a miss streak is not a signal
+    if (momentumGrade < 25 && (hr === null || hr >= 0.30)) {
+      signals.push({ type: 'SLUMP', ...SIGNAL_DEFS.SLUMP });
+    }
   }
 
   return signals;
@@ -111,7 +126,7 @@ export function getCellValueSignals(row: CellValueInputs): Signal[] {
     overPrice != null &&
     overPrice > 250 &&
     hitRate20 != null && hitRate20 > 0 &&
-    hitRate60 != null && hitRate60 >= 0.12
+    hitRate60 != null && hitRate60 >= 0.20
   ) {
     signals.push({ type: 'LONGSHOT', ...SIGNAL_DEFS.LONGSHOT });
   }
