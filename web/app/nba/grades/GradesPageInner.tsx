@@ -44,6 +44,31 @@ interface DefenseCache {
 
 type LivePrices = Record<string, number>;
 
+interface LiveGame {
+  gameId: string;
+  awayTeamAbbr: string;
+  homeTeamAbbr: string;
+  awayScore: number;
+  homeScore: number;
+  gameStatus: number;
+  gameStatusText: string;
+}
+
+interface LivePlayer {
+  playerId: number;
+  pts: number;
+  reb: number;
+  ast: number;
+  fg3m: number;
+  stl: number;
+  blk: number;
+  tov: number;
+  min: number;
+  oncourt: boolean;
+}
+
+type LiveBoxScores = Record<number, LivePlayer>;
+
 const MARKET_ABBR: Record<string, string> = {
   player_points:                           'PTS',
   player_points_alternate:                 'PTS',
@@ -69,6 +94,30 @@ const MARKET_ABBR: Record<string, string> = {
   player_rebounds_assists_alternate:       'RA',
 };
 
+const MARKET_STAT: Record<string, string> = {
+  player_points: 'pts', player_points_alternate: 'pts',
+  player_rebounds: 'reb', player_rebounds_alternate: 'reb',
+  player_assists: 'ast', player_assists_alternate: 'ast',
+  player_steals: 'stl', player_steals_alternate: 'stl',
+  player_blocks: 'blk', player_blocks_alternate: 'blk',
+  player_threes: 'fg3m', player_threes_alternate: 'fg3m',
+  player_turnovers: 'tov', player_turnovers_alternate: 'tov',
+  player_points_rebounds_assists: 'pra', player_points_rebounds_assists_alternate: 'pra',
+  player_points_rebounds: 'pr', player_points_rebounds_alternate: 'pr',
+  player_points_assists: 'pa', player_points_assists_alternate: 'pa',
+  player_rebounds_assists: 'ra', player_rebounds_assists_alternate: 'ra',
+};
+
+function liveStatForMarket(p: LivePlayer, marketKey: string): number | null {
+  const k = MARKET_STAT[marketKey];
+  if (!k) return null;
+  if (k === 'pra') return p.pts + p.reb + p.ast;
+  if (k === 'pr')  return p.pts + p.reb;
+  if (k === 'pa')  return p.pts + p.ast;
+  if (k === 'ra')  return p.reb + p.ast;
+  return (p as unknown as Record<string, number>)[k] ?? null;
+}
+
 function baseMarket(key: string): string { return key.replace(/_alternate$/, ''); }
 function isAlternate(key: string): boolean { return key.endsWith('_alternate'); }
 function marketAbbr(key: string): string {
@@ -78,17 +127,6 @@ function marketDropdownLabel(baseKey: string): string {
   return MARKET_ABBR[baseKey] ?? baseKey.replace('player_', '').replace(/_/g, ' ').toUpperCase();
 }
 
-/**
- * Display label for a line value, matching how FanDuel presents it.
- *
- * Alternate market, Over outcome:
- *   All alternate lines in the DB end in .5.
- *   FanDuel shows these as whole-number "X+" labels (e.g. Over 0.5 = "1+").
- *   Formula: floor(line + 0.5)+ which equals the ceiling for .5 values.
- *
- * Standard market or Under outcome:
- *   Show as "O X.X" or "U X.X" to match FanDuel's O/U presentation.
- */
 function fmtLineLabel(marketKey: string, outcomeName: string, lineValue: number): string {
   if (isAlternate(marketKey) && outcomeName !== 'Under') {
     return `${Math.floor(lineValue + 0.5)}+`;
@@ -176,6 +214,34 @@ const SORT_NULLS_LAST_DESC: SortKey[] = [
   'hitRateOpp', 'sampleSize20', 'sampleSize60', 'overPrice', 'def',
 ];
 
+// ---------------------------------------------------------------------------
+// Mini dot plot for expanded row
+// ---------------------------------------------------------------------------
+
+function MiniDotPlot({ values, lineValue }: { values: number[]; lineValue: number }) {
+  if (values.length === 0) return null;
+  const minVal = Math.min(...values, lineValue);
+  const maxVal = Math.max(...values, lineValue);
+  const range  = maxVal - minVal || 1;
+  const VW = 600; const VH = 56;
+  const PX = 8; const PY = 10;
+  const plotW = VW - PX * 2; const plotH = VH - PY * 2;
+  const xPos = (i: number) => PX + (values.length <= 1 ? plotW / 2 : (i / (values.length - 1)) * plotW);
+  const yPos = (v: number) => PY + plotH - ((v - minVal) / range) * plotH;
+  const lineY = yPos(lineValue);
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} preserveAspectRatio="none" className="w-full" style={{ height: VH }}>
+      <line x1={PX} y1={lineY} x2={VW - PX} y2={lineY} stroke="#4b5563" strokeWidth="1.5" strokeDasharray="4 4" />
+      <text x={VW - PX - 4} y={lineY - 4} fill="#6b7280" fontSize="9" textAnchor="end"
+        style={{ fontVariantNumeric: 'tabular-nums' }}>{lineValue.toFixed(1)}</text>
+      {values.map((v, i) => (
+        <circle key={i} cx={xPos(i)} cy={yPos(v)} r={4}
+          fill={v > lineValue ? '#4ade80' : '#f87171'} opacity={0.9} />
+      ))}
+    </svg>
+  );
+}
+
 export default function GradesPageInner() {
   const searchParams = useSearchParams();
   const [grades, setGrades]         = useState<GradeRow[]>([]);
@@ -190,9 +256,12 @@ export default function GradesPageInner() {
   const [sortDir, setSortDir]               = useState<SortDir>('desc');
   const [outcomeFilter, setOutcomeFilter]   = useState<OutcomeFilter>('Over');
   const [resultFilter, setResultFilter]     = useState<ResultFilter>('all');
+  const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
 
-  const [livePrices, setLivePrices]     = useState<LivePrices>({});
-  const [liveEventIds, setLiveEventIds] = useState<Set<string>>(new Set());
+  const [livePrices, setLivePrices]         = useState<LivePrices>({});
+  const [liveEventIds, setLiveEventIds]     = useState<Set<string>>(new Set());
+  const [liveGames, setLiveGames]           = useState<LiveGame[]>([]);
+  const [liveBoxScores, setLiveBoxScores]   = useState<LiveBoxScores>({});
   const liveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const gradeDate = searchParams.get('date') ?? todayLocal();
@@ -205,13 +274,40 @@ export default function GradesPageInner() {
     return Math.max(...prices);
   }, [grades]);
 
-  const fetchLiveProps = useCallback(async () => {
+  const fetchLiveData = useCallback(async () => {
     try {
-      const r = await fetch('/api/live-props');
-      if (!r.ok) return;
-      const data = await r.json();
-      setLivePrices(data.prices ?? {});
-      setLiveEventIds(new Set(data.liveEventIds ?? []));
+      // live props (odds)
+      const propsRes = await fetch('/api/live-props');
+      if (propsRes.ok) {
+        const data = await propsRes.json();
+        setLivePrices(data.prices ?? {});
+        setLiveEventIds(new Set(data.liveEventIds ?? []));
+      }
+      // scoreboard
+      const sbRes = await fetch('/api/scoreboard');
+      if (sbRes.ok) {
+        const sbData = await sbRes.json();
+        const games: LiveGame[] = sbData.games ?? [];
+        setLiveGames(games);
+        // fetch box scores for in-progress games
+        const liveGameIds = games.filter((g) => g.gameStatus === 2).map((g) => g.gameId);
+        if (liveGameIds.length > 0) {
+          const results = await Promise.allSettled(
+            liveGameIds.map((gid) => fetch(`/api/live-boxscore?gameId=${gid}`).then((r) => r.json()))
+          );
+          const merged: LiveBoxScores = {};
+          for (const r of results) {
+            if (r.status === 'fulfilled' && r.value?.players) {
+              for (const p of r.value.players) {
+                merged[p.playerId] = p;
+              }
+            }
+          }
+          setLiveBoxScores(merged);
+        } else {
+          setLiveBoxScores({});
+        }
+      }
     } catch {
       // silently ignore
     }
@@ -234,6 +330,7 @@ export default function GradesPageInner() {
     setSelectedGameId('');
     setDefenseCache({});
     setResultFilter('all');
+    setExpandedRowKey(null);
     loadGrades();
   }, [loadGrades]);
 
@@ -249,14 +346,16 @@ export default function GradesPageInner() {
     if (!isToday) {
       setLivePrices({});
       setLiveEventIds(new Set());
+      setLiveGames([]);
+      setLiveBoxScores({});
       return;
     }
-    fetchLiveProps();
-    liveIntervalRef.current = setInterval(fetchLiveProps, 60_000);
+    fetchLiveData();
+    liveIntervalRef.current = setInterval(fetchLiveData, 30_000);
     return () => {
       if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
     };
-  }, [isToday, fetchLiveProps]);
+  }, [isToday, fetchLiveData]);
 
   useEffect(() => {
     if (grades.length === 0) return;
@@ -287,7 +386,7 @@ export default function GradesPageInner() {
   function handleRefreshComplete() {
     loadGrades();
     setDefenseCache({});
-    if (isToday) fetchLiveProps();
+    if (isToday) fetchLiveData();
   }
 
   function getLivePrice(row: GradeRow): number | null | 'live-unavailable' {
@@ -467,6 +566,25 @@ export default function GradesPageInner() {
 
   const totalForFilter = grades.filter(r => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter).length;
 
+  // Scoreboard strip: merge liveGames with gameOptions so we show all today's games
+  // even if grades haven't loaded yet, keyed by gameId for filter toggle
+  const scoreboardGames = useMemo(() => {
+    if (liveGames.length > 0) return liveGames;
+    // fall back to game options from grades while scoreboard loads
+    return gameOptions.map(([gid, label]) => {
+      const parts = label.split(' @ ');
+      return {
+        gameId: gid,
+        awayTeamAbbr: parts[0] ?? '',
+        homeTeamAbbr: parts[1] ?? '',
+        awayScore: 0,
+        homeScore: 0,
+        gameStatus: 1,
+        gameStatusText: '',
+      } as LiveGame;
+    });
+  }, [liveGames, gameOptions]);
+
   return (
     <div className="flex flex-col min-h-screen">
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap">
@@ -532,18 +650,6 @@ export default function GradesPageInner() {
 
         {!loading && !error && grades.length > 0 && (
           <>
-            {gameOptions.length > 1 && (
-              <select
-                value={selectedGameId}
-                onChange={(e) => setSelectedGameId(e.target.value)}
-                className="bg-gray-900 border border-gray-700 text-gray-300 text-xs rounded px-2 py-1 focus:outline-none focus:border-gray-500"
-              >
-                <option value="">All games</option>
-                {gameOptions.map(([gid, label]) => (
-                  <option key={gid} value={gid}>{label}</option>
-                ))}
-              </select>
-            )}
             <select
               value={selectedMarket}
               onChange={(e) => setSelectedMarket(e.target.value)}
@@ -575,6 +681,62 @@ export default function GradesPageInner() {
           </span>
         )}
       </div>
+
+      {/* Live scoreboard strip */}
+      {isToday && scoreboardGames.length > 0 && (
+        <div className="border-b border-gray-800 px-4 py-2">
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {scoreboardGames.map((g) => {
+              const isActive  = selectedGameId === g.gameId;
+              const isLive    = g.gameStatus === 2;
+              const isFinal   = g.gameStatus === 3;
+              const isUpcoming = g.gameStatus === 1;
+              const awayWin = isFinal && g.awayScore > g.homeScore;
+              const homeWin = isFinal && g.homeScore > g.awayScore;
+              return (
+                <button
+                  key={g.gameId}
+                  onClick={() => setSelectedGameId((prev) => prev === g.gameId ? '' : g.gameId)}
+                  className={`flex-none rounded border text-left px-3 py-2 transition-colors min-w-[110px] ${
+                    isActive
+                      ? 'border-blue-500 bg-blue-950/40'
+                      : 'border-gray-700 hover:border-gray-500'
+                  }`}
+                >
+                  {/* Score line */}
+                  <div className="flex items-center justify-between gap-2 text-xs tabular-nums">
+                    <span className={`font-medium ${awayWin ? 'text-gray-100' : isFinal ? 'text-gray-500' : 'text-gray-200'}`}>
+                      {g.awayTeamAbbr}
+                    </span>
+                    {isUpcoming ? (
+                      <span className="text-gray-600 text-xs">{g.gameStatusText}</span>
+                    ) : (
+                      <span className={`font-semibold tabular-nums ${awayWin ? 'text-gray-100' : isFinal ? 'text-gray-500' : 'text-gray-200'}`}>
+                        {g.awayScore}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-xs tabular-nums mt-0.5">
+                    <span className={`font-medium ${homeWin ? 'text-gray-100' : isFinal ? 'text-gray-500' : 'text-gray-200'}`}>
+                      {g.homeTeamAbbr}
+                    </span>
+                    {!isUpcoming && (
+                      <span className={`font-semibold tabular-nums ${homeWin ? 'text-gray-100' : isFinal ? 'text-gray-500' : 'text-gray-200'}`}>
+                        {g.homeScore}
+                      </span>
+                    )}
+                  </div>
+                  {/* Status */}
+                  <div className={`mt-1 text-xs ${isLive ? 'text-green-400' : isFinal ? 'text-gray-600' : 'text-gray-600'}`}>
+                    {isLive && <span className="mr-1">&#9679;</span>}
+                    {g.gameStatusText}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {!loading && !error && grades.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
@@ -643,10 +805,21 @@ export default function GradesPageInner() {
                     ? null
                     : row.overPrice;
 
-                  // Line label: formatted per FanDuel convention
                   const lineLabel = fmtLineLabel(row.marketKey, row.outcomeName ?? 'Over', row.lineValue);
+                  const showLink  = row.link != null && row.outcome == null;
 
-                  // Odds cell: clickable to FanDuel betslip when link exists and game not yet final
+                  const livePlayer = liveBoxScores[row.playerId] ?? null;
+                  const liveStat   = livePlayer ? liveStatForMarket(livePlayer, row.marketKey) : null;
+
+                  const rowKey = `${row.gradeId}`;
+                  const isExpanded = expandedRowKey === rowKey;
+
+                  // recent values for dot plot (reuse grades hit rate history isn't available here,
+                  // so the dot plot just shows the inline live stat; a richer version would need
+                  // the game log which we don't fetch on this page)
+                  // We skip the dot plot on grades page since we don't have the game log data;
+                  // instead the expanded panel shows just the live stat line.
+
                   const oddsContent = (
                     <span className={isLive ? 'text-green-400' : oddsColor(displayPrice)}>
                       {fmtOdds(displayPrice)}
@@ -656,84 +829,160 @@ export default function GradesPageInner() {
                     </span>
                   );
 
-                  // Only show link when the game has not yet been resolved (outcome is null)
-                  const showLink = row.link != null && row.outcome == null;
-
                   return (
-                    <tr key={row.gradeId} className="border-b border-gray-800">
-                      <td className="py-1.5 pr-3">
-                        <div className="flex items-center gap-1.5">
-                          <Link href={playerHref(row)} className="text-gray-100 hover:text-blue-400 transition-colors">
-                            {row.playerName}
-                          </Link>
-                          {row.outcome === 'Won' && (
-                            <span className="text-xs font-medium text-green-400 bg-green-900/40 px-1 rounded">W</span>
-                          )}
-                          {row.outcome === 'Lost' && (
-                            <span className="text-xs font-medium text-red-400 bg-red-900/40 px-1 rounded">L</span>
-                          )}
-                          {isLive && (
-                            <span className="text-xs text-green-500">&#9679;</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">{marketAbbr(row.marketKey)}</td>
-
-                      {/* Line — show FanDuel-style label. Clickable when link available. */}
-                      <td className="py-1.5 px-2 text-right text-gray-300 tabular-nums">
-                        {showLink ? (
-                          <a
-                            href={row.link!}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="hover:text-blue-400 transition-colors"
-                          >
-                            {lineLabel}
-                          </a>
-                        ) : (
-                          lineLabel
-                        )}
-                      </td>
-
-                      {/* Odds — also clickable when link available */}
-                      <td className="py-1.5 px-2 text-right tabular-nums">
-                        {showLink ? (
-                          <a
-                            href={row.link!}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className={`hover:text-blue-400 transition-colors ${isLive ? 'text-green-400' : oddsColor(displayPrice)}`}
-                          >
-                            {fmtOdds(displayPrice)}
-                            {isLive && displayPrice != null && (
-                              <span className="text-gray-600 text-xs ml-0.5">L</span>
-                            )}
-                          </a>
-                        ) : oddsContent}
-                      </td>
-
-                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">{impliedProb(displayPrice)}</td>
-                      <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.compositeGrade)}`}>{fmt(row.compositeGrade)}</td>
-                      <td className={`py-1.5 px-2 text-right ${gradeColor(row.grade)}`}>{fmt(row.grade)}</td>
-                      <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>
-                      <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate60)}</td>
-                      <td
-                        className={`py-1.5 px-2 text-right tabular-nums ${
-                          row.hitRateOpp != null ? gradeColor(row.hitRateOpp * 100) : 'text-gray-600'
-                        }`}
-                        title={oppTitle}
+                    <>
+                      <tr
+                        key={rowKey}
+                        className="border-b border-gray-800 cursor-pointer hover:bg-gray-900/40 transition-colors"
+                        onClick={() => setExpandedRowKey((prev) => prev === rowKey ? null : rowKey)}
                       >
-                        {oppPct}
-                        {row.sampleSizeOpp != null && (
-                          <span className="text-gray-600 text-xs ml-0.5">({row.sampleSizeOpp})</span>
-                        )}
-                      </td>
-                      <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize20 ?? '-'}</td>
-                      <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize60 ?? '-'}</td>
-                      <td className={`py-1.5 pl-2 text-right tabular-nums text-xs ${
-                        def.rank != null ? rankColor(def.rank) : 'text-gray-600'
-                      }`}>{def.label}</td>
-                    </tr>
+                        <td className="py-1.5 pr-3">
+                          <div className="flex items-center gap-1.5">
+                            <Link
+                              href={playerHref(row)}
+                              className="text-gray-100 hover:text-blue-400 transition-colors"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {row.playerName}
+                            </Link>
+                            {row.outcome === 'Won' && (
+                              <span className="text-xs font-medium text-green-400 bg-green-900/40 px-1 rounded">W</span>
+                            )}
+                            {row.outcome === 'Lost' && (
+                              <span className="text-xs font-medium text-red-400 bg-red-900/40 px-1 rounded">L</span>
+                            )}
+                            {isLive && (
+                              <span className="text-xs text-green-500">&#9679;</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">{marketAbbr(row.marketKey)}</td>
+
+                        <td className="py-1.5 px-2 text-right text-gray-300 tabular-nums">
+                          <div className="flex items-center justify-end gap-1">
+                            {showLink ? (
+                              <a
+                                href={row.link!}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="hover:text-blue-400 transition-colors"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                {lineLabel}
+                              </a>
+                            ) : (
+                              lineLabel
+                            )}
+                            {liveStat !== null && (
+                              <span className={`text-xs font-semibold tabular-nums ${
+                                liveStat > row.lineValue ? 'text-green-400' : 'text-red-400'
+                              }`}>
+                                ({liveStat})
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        <td className="py-1.5 px-2 text-right tabular-nums">
+                          {showLink ? (
+                            <a
+                              href={row.link!}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className={`hover:text-blue-400 transition-colors ${isLive ? 'text-green-400' : oddsColor(displayPrice)}`}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {fmtOdds(displayPrice)}
+                              {isLive && displayPrice != null && (
+                                <span className="text-gray-600 text-xs ml-0.5">L</span>
+                              )}
+                            </a>
+                          ) : oddsContent}
+                        </td>
+
+                        <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">{impliedProb(displayPrice)}</td>
+                        <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.compositeGrade)}`}>{fmt(row.compositeGrade)}</td>
+                        <td className={`py-1.5 px-2 text-right ${gradeColor(row.grade)}`}>{fmt(row.grade)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate60)}</td>
+                        <td
+                          className={`py-1.5 px-2 text-right tabular-nums ${
+                            row.hitRateOpp != null ? gradeColor(row.hitRateOpp * 100) : 'text-gray-600'
+                          }`}
+                          title={oppTitle}
+                        >
+                          {oppPct}
+                          {row.sampleSizeOpp != null && (
+                            <span className="text-gray-600 text-xs ml-0.5">({row.sampleSizeOpp})</span>
+                          )}
+                        </td>
+                        <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize20 ?? '-'}</td>
+                        <td className="py-1.5 px-2 text-right text-gray-500">{row.sampleSize60 ?? '-'}</td>
+                        <td className={`py-1.5 pl-2 text-right tabular-nums text-xs ${
+                          def.rank != null ? rankColor(def.rank) : 'text-gray-600'
+                        }`}>{def.label}</td>
+                      </tr>
+
+                      {isExpanded && (
+                        <tr key={`${rowKey}-exp`} className="border-b border-gray-800 bg-gray-900/30">
+                          <td colSpan={13} className="px-4 py-3">
+                            {livePlayer ? (
+                              <div className="flex flex-wrap gap-4 text-xs">
+                                <div className="text-gray-400">
+                                  <span className="text-gray-600 mr-1">PTS</span>
+                                  <span className={`font-semibold tabular-nums ${livePlayer.pts > row.lineValue && MARKET_STAT[row.marketKey] === 'pts' ? 'text-green-400' : 'text-gray-200'}`}>
+                                    {livePlayer.pts}
+                                  </span>
+                                </div>
+                                <div className="text-gray-400">
+                                  <span className="text-gray-600 mr-1">REB</span>
+                                  <span className={`font-semibold tabular-nums ${livePlayer.reb > row.lineValue && MARKET_STAT[row.marketKey] === 'reb' ? 'text-green-400' : 'text-gray-200'}`}>
+                                    {livePlayer.reb}
+                                  </span>
+                                </div>
+                                <div className="text-gray-400">
+                                  <span className="text-gray-600 mr-1">AST</span>
+                                  <span className={`font-semibold tabular-nums ${livePlayer.ast > row.lineValue && MARKET_STAT[row.marketKey] === 'ast' ? 'text-green-400' : 'text-gray-200'}`}>
+                                    {livePlayer.ast}
+                                  </span>
+                                </div>
+                                <div className="text-gray-400">
+                                  <span className="text-gray-600 mr-1">3PM</span>
+                                  <span className={`font-semibold tabular-nums ${livePlayer.fg3m > row.lineValue && MARKET_STAT[row.marketKey] === 'fg3m' ? 'text-green-400' : 'text-gray-200'}`}>
+                                    {livePlayer.fg3m}
+                                  </span>
+                                </div>
+                                <div className="text-gray-400">
+                                  <span className="text-gray-600 mr-1">STL</span>
+                                  <span className="font-semibold tabular-nums text-gray-200">{livePlayer.stl}</span>
+                                </div>
+                                <div className="text-gray-400">
+                                  <span className="text-gray-600 mr-1">BLK</span>
+                                  <span className="font-semibold tabular-nums text-gray-200">{livePlayer.blk}</span>
+                                </div>
+                                <div className="text-gray-400">
+                                  <span className="text-gray-600 mr-1">TOV</span>
+                                  <span className="font-semibold tabular-nums text-gray-200">{livePlayer.tov}</span>
+                                </div>
+                                <div className="text-gray-400">
+                                  <span className="text-gray-600 mr-1">MIN</span>
+                                  <span className="font-semibold tabular-nums text-gray-200">{livePlayer.min.toFixed(0)}</span>
+                                </div>
+                                {livePlayer.oncourt && (
+                                  <span className="text-green-500 text-xs">&#9679; on court</span>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-xs text-gray-600">
+                                {row.outcome != null
+                                  ? `Game finished. ${row.playerName} ${row.outcome === 'Won' ? 'hit' : 'missed'} ${fmtLineLabel(row.marketKey, row.outcomeName ?? 'Over', row.lineValue)}.`
+                                  : 'Live stats not yet available for this game.'}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </>
                   );
                 })}
               </tbody>
