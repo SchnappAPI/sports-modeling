@@ -9,9 +9,9 @@ import {
   getAllSignals,
   getPlayerSignals,
   getCellValueSignals,
-  SIGNAL_DEFS as SIGNAL_DEFS_LIB,
-  type Signal as LibSignal,
-  type SignalType as LibSignalType,
+  SIGNAL_DEFS,
+  type Signal,
+  type SignalType,
 } from '@/lib/signals';
 
 interface GradeRow {
@@ -79,56 +79,30 @@ interface LivePlayer {
 type LiveBoxScores = Record<number, LivePlayer>;
 
 // ---------------------------------------------------------------------------
-// Signal system
+// Signal helpers (using shared @/lib/signals)
 // ---------------------------------------------------------------------------
 
-export type SignalType = 'HOT' | 'COLD' | 'DUE' | 'FADE' | 'STREAK' | 'SLUMP';
-
-export interface Signal {
-  type: SignalType;
-  label: string;
-  title: string;
-  chipClass: string;
+// All signals for a row — used for filter matching and signal counts
+function getSignals(row: GradeRow): Signal[] {
+  return getAllSignals({
+    trendGrade:      row.trendGrade,
+    regressionGrade: row.regressionGrade,
+    momentumGrade:   row.momentumGrade,
+    overPrice:       row.overPrice,
+    hitRate20:       row.hitRate20,
+    hitRate60:       row.hitRate60,
+  }).all;
 }
 
-const SIGNAL_DEFS: Record<SignalType, { label: string; title: string; chipClass: string }> = {
-  HOT:    { label: 'HOT',    chipClass: 'bg-amber-900/50 text-amber-300 border-amber-700/50',    title: 'Performing above recent baseline (trend up)' },
-  COLD:   { label: 'COLD',   chipClass: 'bg-blue-900/50 text-blue-300 border-blue-700/50',       title: 'Performing below recent baseline (trend down)' },
-  DUE:    { label: 'DUE',    chipClass: 'bg-green-900/50 text-green-300 border-green-700/50',    title: 'Below season average — bounce-back candidate' },
-  FADE:   { label: 'FADE',   chipClass: 'bg-red-900/50 text-red-300 border-red-700/50',          title: 'Above season average — regression risk' },
-  STREAK: { label: 'STK',    chipClass: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50', title: 'On a hit streak for this prop line' },
-  SLUMP:  { label: 'SLP',    chipClass: 'bg-orange-900/50 text-orange-300 border-orange-700/50', title: 'On a miss streak for this prop line' },
-};
+// Player-level signals only (HOT/COLD/DUE/FADE) for row-level chips.
+// STREAK/SLUMP/LONGSHOT are line-specific and shown only in expanded panels.
+function getRowSignals(row: GradeRow): Signal[] {
+  return getPlayerSignals({ trendGrade: row.trendGrade, regressionGrade: row.regressionGrade });
+}
 
-function getSignals(row: GradeRow): Signal[] {
-  const signals: Signal[] = [];
-  const { trendGrade, regressionGrade, momentumGrade } = row;
-
-  // trend_grade: L10 vs L30 stat mean.
-  // >72 = performing above baseline recently (HOT)
-  // <28 = performing below baseline recently (COLD)
-  if (trendGrade != null) {
-    if (trendGrade > 72) signals.push({ type: 'HOT',  ...SIGNAL_DEFS.HOT  });
-    if (trendGrade < 28) signals.push({ type: 'COLD', ...SIGNAL_DEFS.COLD });
-  }
-
-  // regression_grade: z-score of L10 vs full season.
-  // >72 = below season avg, due to bounce back (DUE)
-  // <28 = above season avg, due to regress (FADE)
-  if (regressionGrade != null) {
-    if (regressionGrade > 72) signals.push({ type: 'DUE',  ...SIGNAL_DEFS.DUE  });
-    if (regressionGrade < 28) signals.push({ type: 'FADE', ...SIGNAL_DEFS.FADE });
-  }
-
-  // momentum_grade: current hit/miss streak length for this specific line.
-  // >75 = on a hit streak (STREAK)
-  // <25 = on a miss streak (SLUMP)
-  if (momentumGrade != null) {
-    if (momentumGrade > 75) signals.push({ type: 'STREAK', ...SIGNAL_DEFS.STREAK });
-    if (momentumGrade < 25) signals.push({ type: 'SLUMP',  ...SIGNAL_DEFS.SLUMP  });
-  }
-
-  return signals;
+// Cell-level value signals (LONGSHOT) for expanded panel.
+function getRowValueSignals(row: GradeRow): Signal[] {
+  return getCellValueSignals({ overPrice: row.overPrice, hitRate20: row.hitRate20, hitRate60: row.hitRate60 });
 }
 
 function SignalChip({ signal }: { signal: Signal }) {
@@ -327,12 +301,13 @@ function MiniDotPlot({ values, lineValue }: { values: number[]; lineValue: numbe
 
 function SignalLegend() {
   const items: { type: SignalType; desc: string }[] = [
-    { type: 'HOT',    desc: 'L10 stat avg above L30 avg' },
-    { type: 'COLD',   desc: 'L10 stat avg below L30 avg' },
-    { type: 'DUE',    desc: 'L10 below season avg (bounce-back candidate)' },
-    { type: 'FADE',   desc: 'L10 above season avg (regression risk)' },
-    { type: 'STREAK', desc: 'Active hit streak for this line' },
-    { type: 'SLUMP',  desc: 'Active miss streak for this line' },
+    { type: 'HOT',      desc: 'L10 stat avg above L30 avg' },
+    { type: 'COLD',     desc: 'L10 stat avg below L30 avg' },
+    { type: 'DUE',      desc: 'L10 below season avg (bounce-back candidate)' },
+    { type: 'FADE',     desc: 'L10 above season avg (regression risk)' },
+    { type: 'STREAK',   desc: 'Active hit streak for this line' },
+    { type: 'SLUMP',    desc: 'Active miss streak for this line' },
+    { type: 'LONGSHOT', desc: 'Long odds (+250) but has hit recently and in 12%+ of L60' },
   ];
   return (
     <div className="flex flex-wrap gap-2 px-4 py-2 border-b border-gray-800">
