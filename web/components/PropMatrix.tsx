@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 
 // ---------------------------------------------------------------------------
@@ -17,6 +17,8 @@ export interface MatrixRow {
   compositeGrade: number | null;
   hitRate20: number | null;
   gameId: string | null;
+  homeTeamAbbr: string | null;
+  awayTeamAbbr: string | null;
   oppTeamAbbr: string | null;
   position: string | null;
   outcome: string | null;
@@ -46,7 +48,7 @@ interface PlayerStats {
 interface PlayerPanelProps {
   playerId: number;
   playerName: string;
-  focusStat: string;   // e.g. 'pts', 'reb', 'fg3m'
+  focusStat: StatKey;
   gradeDate: string;
   gameId: string | null;
   onClose: () => void;
@@ -110,12 +112,6 @@ function gradeColor(grade: number | null): string {
   return 'text-gray-500';
 }
 
-function oddsColor(price: number | null): string {
-  if (price == null) return 'text-gray-700';
-  if (price >= -115) return 'text-gray-300';
-  return 'text-gray-400';
-}
-
 function statForKey(game: PlayerStats['log'][0], key: StatKey): number {
   switch (key) {
     case 'pts':  return game.pts;
@@ -141,10 +137,11 @@ function PlayerPanel({ playerId, playerName, focusStat, gradeDate, gameId, onClo
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
 
-  const focusKey = focusStat as StatKey;
-  const cols = MATRIX_COLS[focusKey] ?? [];
+  const cols = MATRIX_COLS[focusStat] ?? [];
 
   const load = useCallback(() => {
+    setLoading(true);
+    setError(null);
     const params = new URLSearchParams({ playerId: String(playerId), games: '20' });
     if (gameId) params.set('gameId', gameId);
     fetch(`/api/player?${params}`)
@@ -154,16 +151,12 @@ function PlayerPanel({ playerId, playerName, focusStat, gradeDate, gameId, onClo
       .finally(() => setLoading(false));
   }, [playerId, gameId]);
 
-  // Load on mount via useEffect equivalent — we use a ref trick to avoid
-  // a dependency on useEffect being imported in this file.
-  const loadedRef = { current: false };
-  if (!loadedRef.current) {
-    loadedRef.current = true;
-    // Schedule load after initial render
-    Promise.resolve().then(load);
-  }
+  useEffect(() => { load(); }, [load]);
 
-  const playerHref = `/nba/player/${playerId}?${new URLSearchParams({ date: gradeDate, ...(gameId ? { gameId } : {}) })}`;
+  const playerHref = `/nba/player/${playerId}?${new URLSearchParams({
+    date: gradeDate,
+    ...(gameId ? { gameId } : {}),
+  })}`;
 
   const games = data?.log.filter((g) => !g.dnp).slice(0, 20) ?? [];
 
@@ -179,7 +172,7 @@ function PlayerPanel({ playerId, playerName, focusStat, gradeDate, gameId, onClo
             {playerName}
           </Link>
           <span className="text-xs text-gray-500 uppercase tracking-wider">
-            {GROUP_LABELS[focusKey] ?? focusStat}
+            {GROUP_LABELS[focusStat]}
           </span>
         </div>
         <button onClick={onClose} className="text-gray-500 hover:text-gray-200 text-lg leading-none px-1">
@@ -196,12 +189,12 @@ function PlayerPanel({ playerId, playerName, focusStat, gradeDate, gameId, onClo
         )}
         {!loading && !error && games.length > 0 && (
           <>
-            {/* Hit rate summary row */}
+            {/* Hit rate summary */}
             <div className="flex gap-3 mb-4 flex-wrap">
               {cols.map((line) => {
-                const hits   = games.filter((g) => statForKey(g, focusKey) > line).length;
-                const pct    = games.length > 0 ? hits / games.length : null;
-                const color  = pct == null ? 'text-gray-600'
+                const hits  = games.filter((g) => statForKey(g, focusStat) > line).length;
+                const pct   = games.length > 0 ? hits / games.length : null;
+                const color = pct == null ? 'text-gray-600'
                   : pct >= 0.65 ? 'text-green-400'
                   : pct >= 0.50 ? 'text-yellow-400'
                   : 'text-gray-500';
@@ -231,7 +224,7 @@ function PlayerPanel({ playerId, playerName, focusStat, gradeDate, gameId, onClo
               </thead>
               <tbody>
                 {games.map((g, i) => {
-                  const val = statForKey(g, focusKey);
+                  const val = statForKey(g, focusStat);
                   return (
                     <tr key={i} className="border-b border-gray-900">
                       <td className="py-1 pr-2 text-gray-500">{g.gameDate.slice(5)}</td>
@@ -258,7 +251,7 @@ function PlayerPanel({ playerId, playerName, focusStat, gradeDate, gameId, onClo
 }
 
 // ---------------------------------------------------------------------------
-// Props
+// PropMatrix props
 // ---------------------------------------------------------------------------
 
 interface PropMatrixProps {
@@ -279,53 +272,62 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
     gameId: string | null;
   } | null>(null);
 
-  // Build per-group data: { statKey -> { gameLabel -> { playerId -> { line -> row } } } }
-  // We group first by game (awayTeamAbbr @ homeTeamAbbr), then by player within that game.
+  // Suppress unused warning — outcomeFilter reserved for future under matrix support
+  void outcomeFilter;
 
-  type CellData = { price: number | null; compositeGrade: number | null; outcome: string | null; link: string | null };
-  type PlayerEntry = { playerId: number; playerName: string; gameId: string | null; oppTeamAbbr: string | null; cells: Record<number, CellData> };
+  type CellData = {
+    price: number | null;
+    compositeGrade: number | null;
+    outcome: string | null;
+    link: string | null;
+  };
+  type PlayerEntry = {
+    playerId: number;
+    playerName: string;
+    gameId: string | null;
+    cells: Record<number, CellData>;
+  };
   type GameGroup = { label: string; players: PlayerEntry[] };
   type GroupData = { stat: StatKey; games: GameGroup[] };
+
+  // Build game label map from rows (first row seen per gameId wins)
+  const gameLabelMap = new Map<string, string>();
+  for (const row of rows) {
+    if (row.gameId && !gameLabelMap.has(row.gameId)) {
+      const label = row.awayTeamAbbr && row.homeTeamAbbr
+        ? `${row.awayTeamAbbr} @ ${row.homeTeamAbbr}`
+        : row.gameId;
+      gameLabelMap.set(row.gameId, label);
+    }
+  }
 
   const groups: GroupData[] = [];
 
   for (const stat of GROUP_ORDER) {
-    // Filter rows for this stat group
-    const statRows = rows.filter((r) => {
-      const s = marketToStat(r.marketKey);
-      return s === stat;
-    });
+    const statRows = rows.filter((r) => marketToStat(r.marketKey) === stat);
     if (statRows.length === 0) continue;
 
     const cols = MATRIX_COLS[stat];
 
-    // Build game -> player -> line map
-    const gameMap = new Map<string, { label: string; playerMap: Map<number, PlayerEntry> }>();
+    const gameMap = new Map<string, { playerMap: Map<number, PlayerEntry> }>();
 
     for (const row of statRows) {
-      // Game label
-      const gameLabel = row.gameId ?? 'Unknown';
-      // We'll derive a display label from the rows themselves; use gameId as key
-      if (!gameMap.has(gameLabel)) {
-        gameMap.set(gameLabel, { label: gameLabel, playerMap: new Map() });
-      }
-      const gEntry = gameMap.get(gameLabel)!;
+      const gameKey = row.gameId ?? 'unknown';
+      if (!gameMap.has(gameKey)) gameMap.set(gameKey, { playerMap: new Map() });
+      const gEntry = gameMap.get(gameKey)!;
 
       if (!gEntry.playerMap.has(row.playerId)) {
         gEntry.playerMap.set(row.playerId, {
           playerId: row.playerId,
           playerName: row.playerName,
           gameId: row.gameId,
-          oppTeamAbbr: row.oppTeamAbbr,
           cells: {},
         });
       }
       const pEntry = gEntry.playerMap.get(row.playerId)!;
 
-      // Only store if lineValue is one of our canonical columns
-      const line = row.lineValue;
-      if (cols.includes(line)) {
-        pEntry.cells[line] = {
+      if (cols.includes(row.lineValue)) {
+        pEntry.cells[row.lineValue] = {
           price: row.overPrice,
           compositeGrade: row.compositeGrade,
           outcome: row.outcome,
@@ -334,45 +336,27 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
       }
     }
 
-    // Convert to sorted arrays; sort players by name
     const games: GameGroup[] = [];
-    for (const [, gEntry] of gameMap) {
+    for (const [gameKey, gEntry] of gameMap) {
       const players = Array.from(gEntry.playerMap.values())
         .filter((p) => Object.keys(p.cells).length > 0)
         .sort((a, b) => a.playerName.localeCompare(b.playerName));
-      if (players.length > 0) games.push({ label: gEntry.label, players });
+      if (players.length > 0) {
+        games.push({ label: gameLabelMap.get(gameKey) ?? gameKey, players });
+      }
     }
 
     if (games.length > 0) groups.push({ stat, games });
   }
 
-  // Build a game display label map from rows
-  const gameLabelMap = new Map<string, string>();
-  for (const row of rows) {
-    if (row.gameId && !gameLabelMap.has(row.gameId)) {
-      // We don't have homeTeamAbbr/awayTeamAbbr on MatrixRow; derive from gameId or just use gameId
-      // GradesPageInner passes these in the rows — we'll use oppTeamAbbr as a fallback
-      gameLabelMap.set(row.gameId, row.gameId);
-    }
-  }
-
-  function playerHref(playerId: number, gameId: string | null): string {
-    const params = new URLSearchParams({ date: gradeDate });
-    if (gameId) params.set('gameId', gameId);
-    return `/nba/player/${playerId}?${params}`;
-  }
-
   return (
     <>
-      {/* Overlay when panel is open */}
+      {/* Backdrop */}
       {panelPlayer && (
-        <div
-          className="fixed inset-0 z-40 bg-black/30"
-          onClick={() => setPanelPlayer(null)}
-        />
+        <div className="fixed inset-0 z-40 bg-black/30" onClick={() => setPanelPlayer(null)} />
       )}
 
-      {/* Player stats panel */}
+      {/* Slide-in panel */}
       {panelPlayer && (
         <PlayerPanel
           playerId={panelPlayer.playerId}
@@ -399,7 +383,6 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
 
               {games.map(({ label, players }) => (
                 <div key={label} className="mb-4">
-                  {/* Game sub-header (only if multiple games) */}
                   {games.length > 1 && (
                     <div className="text-xs text-gray-600 mb-1 ml-1">{label}</div>
                   )}
@@ -443,24 +426,19 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                               }
                               const won  = cell.outcome === 'Won';
                               const lost = cell.outcome === 'Lost';
-                              const bgClass = won ? 'bg-green-900/20' : lost ? 'bg-red-900/20' : '';
-                              const content = (
+                              const bg   = won ? 'bg-green-900/20' : lost ? 'bg-red-900/20' : '';
+                              const text = (
                                 <span className={`tabular-nums ${gradeColor(cell.compositeGrade)}`}>
                                   {fmtOdds(cell.price)}
                                 </span>
                               );
                               return (
-                                <td key={line} className={`py-1.5 px-2 text-right ${bgClass}`}>
+                                <td key={line} className={`py-1.5 px-2 text-right ${bg}`}>
                                   {cell.link && cell.outcome == null ? (
-                                    <a
-                                      href={cell.link}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="hover:text-blue-400 transition-colors"
-                                    >
-                                      {content}
+                                    <a href={cell.link} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 transition-colors">
+                                      {text}
                                     </a>
-                                  ) : content}
+                                  ) : text}
                                 </td>
                               );
                             })}
@@ -476,9 +454,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
         })}
 
         {groups.length === 0 && (
-          <div className="text-sm text-gray-500">
-            No props match the current filters.
-          </div>
+          <div className="text-sm text-gray-500">No props match the current filters.</div>
         )}
       </div>
     </>
