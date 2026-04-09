@@ -2,7 +2,13 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { getSignals, SIGNAL_DEFS, type Signal, type SignalType } from '@/lib/signals';
+import {
+  getPlayerSignals,
+  getLineSignals,
+  getCellValueSignals,
+  SIGNAL_DEFS,
+  type Signal,
+} from '@/lib/signals';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,6 +26,7 @@ export interface MatrixRow {
   regressionGrade: number | null;
   momentumGrade: number | null;
   hitRate20: number | null;
+  hitRate60: number | null;
   gameId: string | null;
   homeTeamAbbr: string | null;
   awayTeamAbbr: string | null;
@@ -52,7 +59,7 @@ interface PlayerStats {
 interface PlayerPanelProps {
   playerId: number;
   playerName: string;
-  signals: Signal[];
+  playerSignals: Signal[];
   focusStat: StatKey;
   gradeDate: string;
   gameId: string | null;
@@ -143,11 +150,34 @@ function SignalChip({ signal }: { signal: Signal }) {
   );
 }
 
+// Small dot indicators for individual cells — less intrusive than full chips
+function CellSignalDots({ signals }: { signals: Signal[] }) {
+  if (signals.length === 0) return null;
+  return (
+    <span className="inline-flex gap-0.5 ml-0.5 align-middle">
+      {signals.map((s) => (
+        <span
+          key={s.type}
+          className={`inline-block text-[8px] font-bold leading-none ${
+            s.type === 'STREAK'   ? 'text-emerald-400' :
+            s.type === 'SLUMP'    ? 'text-orange-400'  :
+            s.type === 'LONGSHOT' ? 'text-purple-400'  :
+            'text-gray-500'
+          }`}
+          title={s.title}
+        >
+          &#9679;
+        </span>
+      ))}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Player stats slide-in panel
 // ---------------------------------------------------------------------------
 
-function PlayerPanel({ playerId, playerName, signals, focusStat, gradeDate, gameId, onClose }: PlayerPanelProps) {
+function PlayerPanel({ playerId, playerName, playerSignals, focusStat, gradeDate, gameId, onClose }: PlayerPanelProps) {
   const [data, setData]       = useState<PlayerStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
@@ -183,7 +213,7 @@ function PlayerPanel({ playerId, playerName, signals, focusStat, gradeDate, game
             {playerName}
           </Link>
           <span className="text-xs text-gray-500 uppercase tracking-wider">{GROUP_LABELS[focusStat]}</span>
-          {signals.map((s) => <SignalChip key={s.type} signal={s} />)}
+          {playerSignals.map((s) => <SignalChip key={s.type} signal={s} />)}
         </div>
         <button onClick={onClose} className="text-gray-500 hover:text-gray-200 text-lg leading-none px-1 ml-2 flex-none">
           &times;
@@ -271,7 +301,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
   const [panelPlayer, setPanelPlayer] = useState<{
     playerId: number;
     playerName: string;
-    signals: Signal[];
+    playerSignals: Signal[];
     focusStat: StatKey;
     gameId: string | null;
   } | null>(null);
@@ -279,17 +309,21 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
   void outcomeFilter;
 
   type CellData = {
-    price: number | null;
+    price:          number | null;
     compositeGrade: number | null;
-    outcome: string | null;
-    link: string | null;
+    outcome:        string | null;
+    link:           string | null;
+    // stored for per-cell signal computation
+    momentumGrade:  number | null;
+    hitRate20:      number | null;
+    hitRate60:      number | null;
   };
   type PlayerEntry = {
-    playerId: number;
-    playerName: string;
-    gameId: string | null;
-    signals: Signal[];
-    cells: Record<number, CellData>;
+    playerId:      number;
+    playerName:    string;
+    gameId:        string | null;
+    playerSignals: Signal[];   // HOT/COLD/DUE/FADE only — player-level
+    cells:         Record<number, CellData>;
   };
   type GameGroup = { label: string; players: PlayerEntry[] };
   type GroupData = { stat: StatKey; games: GameGroup[] };
@@ -326,20 +360,17 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
       const gEntry = gameMap.get(gameKey)!;
 
       if (!gEntry.playerMap.has(row.playerId)) {
-        // Derive player-level signals from the first row seen for this player in this stat group.
-        // trendGrade and regressionGrade are per player+market (not per line), so any row works.
-        // momentumGrade is per line — we'll take the one with the best composite grade below.
-        const rowSignals = getSignals({
+        // Player-level signals only: trend + regression. Not momentum (that's line-specific).
+        const playerSignals = getPlayerSignals({
           trendGrade:      row.trendGrade,
           regressionGrade: row.regressionGrade,
-          momentumGrade:   row.momentumGrade,
         });
         gEntry.playerMap.set(row.playerId, {
-          playerId:   row.playerId,
-          playerName: row.playerName,
-          gameId:     row.gameId,
-          signals:    rowSignals,
-          cells:      {},
+          playerId:      row.playerId,
+          playerName:    row.playerName,
+          gameId:        row.gameId,
+          playerSignals,
+          cells:         {},
         });
       }
       const pEntry = gEntry.playerMap.get(row.playerId)!;
@@ -351,13 +382,10 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
           compositeGrade: row.compositeGrade,
           outcome:        row.outcome,
           link:           row.link,
+          momentumGrade:  row.momentumGrade,
+          hitRate20:      row.hitRate20,
+          hitRate60:      row.hitRate60 ?? null,
         };
-        // Re-derive signals when we find a better-graded row (momentum is line-specific)
-        pEntry.signals = getSignals({
-          trendGrade:      row.trendGrade,
-          regressionGrade: row.regressionGrade,
-          momentumGrade:   row.momentumGrade,
-        });
       }
     }
 
@@ -383,13 +411,19 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
         <PlayerPanel
           playerId={panelPlayer.playerId}
           playerName={panelPlayer.playerName}
-          signals={panelPlayer.signals}
+          playerSignals={panelPlayer.playerSignals}
           focusStat={panelPlayer.focusStat}
           gradeDate={gradeDate}
           gameId={panelPlayer.gameId}
           onClose={() => setPanelPlayer(null)}
         />
       )}
+
+      {/* Legend */}
+      <div className="flex flex-wrap gap-3 mb-4 text-xs text-gray-600">
+        <span>Odds color: <span className="text-green-400">green</span>=grade&ge;70 <span className="text-yellow-400">yellow</span>=grade&ge;55 <span className="text-gray-500">gray</span>=below</span>
+        <span>Dots: <span className="text-emerald-400">&#9679;</span>hit streak <span className="text-orange-400">&#9679;</span>miss streak <span className="text-purple-400">&#9679;</span>long odds, has history</span>
+      </div>
 
       <div className="space-y-8 pb-8">
         {groups.map(({ stat, games }) => {
@@ -415,7 +449,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                         <tr className="text-gray-600">
                           <th className="text-left py-1 pr-4 font-normal min-w-[160px]">Player</th>
                           {cols.map((line) => (
-                            <th key={line} className="text-right py-1 px-2 font-normal tabular-nums whitespace-nowrap min-w-[44px]">
+                            <th key={line} className="text-right py-1 px-2 font-normal tabular-nums whitespace-nowrap min-w-[52px]">
                               {line}+
                             </th>
                           ))}
@@ -429,16 +463,17 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                                 <button
                                   className="text-gray-100 hover:text-blue-400 transition-colors text-left"
                                   onClick={() => setPanelPlayer({
-                                    playerId:   player.playerId,
-                                    playerName: player.playerName,
-                                    signals:    player.signals,
-                                    focusStat:  stat,
-                                    gameId:     player.gameId,
+                                    playerId:      player.playerId,
+                                    playerName:    player.playerName,
+                                    playerSignals: player.playerSignals,
+                                    focusStat:     stat,
+                                    gameId:        player.gameId,
                                   })}
                                 >
                                   {player.playerName}
                                 </button>
-                                {player.signals.map((s) => (
+                                {/* Player-level signals only: HOT/COLD/DUE/FADE */}
+                                {player.playerSignals.map((s) => (
                                   <SignalChip key={s.type} signal={s} />
                                 ))}
                               </div>
@@ -455,18 +490,33 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                               const won  = cell.outcome === 'Won';
                               const lost = cell.outcome === 'Lost';
                               const bg   = won ? 'bg-green-900/20' : lost ? 'bg-red-900/20' : '';
-                              const text = (
+
+                              // Line-specific signals: STREAK/SLUMP from momentum of this exact cell
+                              const lineSignals = getLineSignals({ momentumGrade: cell.momentumGrade });
+                              // Value signals: LONGSHOT
+                              const valueSignals = getCellValueSignals({
+                                overPrice:  cell.price,
+                                hitRate20:  cell.hitRate20,
+                                hitRate60:  cell.hitRate60,
+                              });
+                              const cellSignals = [...lineSignals, ...valueSignals];
+
+                              const oddsText = (
                                 <span className={`tabular-nums ${gradeColor(cell.compositeGrade)}`}>
                                   {fmtOdds(cell.price)}
                                 </span>
                               );
+
                               return (
-                                <td key={line} className={`py-1.5 px-2 text-right ${bg}`}>
-                                  {cell.link && cell.outcome == null ? (
-                                    <a href={cell.link} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 transition-colors">
-                                      {text}
-                                    </a>
-                                  ) : text}
+                                <td key={line} className={`py-1.5 px-2 text-right ${bg} whitespace-nowrap`}>
+                                  <span className="inline-flex items-center gap-0.5 justify-end">
+                                    {cell.link && cell.outcome == null ? (
+                                      <a href={cell.link} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 transition-colors">
+                                        {oddsText}
+                                      </a>
+                                    ) : oddsText}
+                                    <CellSignalDots signals={cellSignals} />
+                                  </span>
                                 </td>
                               );
                             })}

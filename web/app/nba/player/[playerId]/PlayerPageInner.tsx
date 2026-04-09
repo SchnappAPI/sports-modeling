@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import MatchupDefense from '@/components/MatchupDefense';
 import { getTeamPrimary } from '@/lib/teams';
-import { getSignals, SIGNAL_DEFS, type Signal } from '@/lib/signals';
+import { getPlayerSignals as getSignals, SIGNAL_DEFS, type Signal } from '@/lib/signals';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -515,7 +515,6 @@ function PlayerSignalsSection({ groups }: { groups: MarketGroup[] }) {
         ? getSignals({
             trendGrade:      g.bestRow.trendGrade,
             regressionGrade: g.bestRow.regressionGrade,
-            momentumGrade:   g.bestRow.momentumGrade,
           })
         : [],
     }))
@@ -769,7 +768,6 @@ function TodayPropsSection({
               ? getSignals({
                   trendGrade:      group.bestRow.trendGrade,
                   regressionGrade: group.bestRow.regressionGrade,
-                  momentumGrade:   group.bestRow.momentumGrade,
                 })
               : [];
             const hasPositive = cellSignals.some((s) => s.type === 'DUE' || s.type === 'STREAK' || s.type === 'HOT');

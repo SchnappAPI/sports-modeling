@@ -5,6 +5,14 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import RefreshDataButton from '@/components/RefreshDataButton';
 import PropMatrix from '@/components/PropMatrix';
+import {
+  getAllSignals,
+  getPlayerSignals,
+  getCellValueSignals,
+  SIGNAL_DEFS as SIGNAL_DEFS_LIB,
+  type Signal as LibSignal,
+  type SignalType as LibSignalType,
+} from '@/lib/signals';
 
 interface GradeRow {
   gradeId: number;
@@ -955,7 +963,9 @@ export default function GradesPageInner() {
               <tbody>
                 {sorted.map((row) => {
                   const def = defRankCell(row);
-                  const signals = getSignals(row);
+                  const rowSignals = getRowSignals(row);
+                  const allSignals = getSignals(row);
+                  const valueSignals = getRowValueSignals(row);
                   const oppPct   = fmtPct(row.hitRateOpp);
                   const oppTitle = row.sampleSizeOpp
                     ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'} (full season)`
@@ -1012,7 +1022,7 @@ export default function GradesPageInner() {
                             {isLive && (
                               <span className="text-xs text-green-500">&#9679;</span>
                             )}
-                            {signals.map((s) => (
+                            {rowSignals.map((s) => (
                               <SignalChip key={s.type} signal={s} />
                             ))}
                           </div>
@@ -1102,9 +1112,14 @@ export default function GradesPageInner() {
                                   </div>
                                 </div>
                               ))}
-                              {signals.length > 0 && (
+                              {allSignals.filter(s => s.type === 'STREAK' || s.type === 'SLUMP').length > 0 && (
+                                <div className="flex items-center gap-1 ml-2 flex-wrap" title="Line-specific signals for this exact prop line">
+                                  {allSignals.filter(s => s.type === 'STREAK' || s.type === 'SLUMP').map((s) => <SignalChip key={s.type} signal={s} />)}
+                                </div>
+                              )}
+                              {valueSignals.length > 0 && (
                                 <div className="flex items-center gap-1 ml-2 flex-wrap">
-                                  {signals.map((s) => <SignalChip key={s.type} signal={s} />)}
+                                  {valueSignals.map((s) => <SignalChip key={s.type} signal={s} />)}
                                 </div>
                               )}
                             </div>
