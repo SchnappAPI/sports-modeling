@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import RefreshDataButton from '@/components/RefreshDataButton';
+import PropMatrix from '@/components/PropMatrix';
 
 interface GradeRow {
   gradeId: number;
@@ -202,6 +203,7 @@ const ODDS_DEFAULT = -600;
 
 type OutcomeFilter = 'Over' | 'Under';
 type ResultFilter  = 'all' | 'open' | 'Won' | 'Lost';
+type ViewMode      = 'list' | 'matrix';
 
 type SortKey =
   | 'playerName' | 'marketKey' | 'lineValue' | 'overPrice'
@@ -257,6 +259,7 @@ export default function GradesPageInner() {
   const [outcomeFilter, setOutcomeFilter]   = useState<OutcomeFilter>('Over');
   const [resultFilter, setResultFilter]     = useState<ResultFilter>('all');
   const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
+  const [viewMode, setViewMode]             = useState<ViewMode>('list');
 
   const [livePrices, setLivePrices]         = useState<LivePrices>({});
   const [liveEventIds, setLiveEventIds]     = useState<Set<string>>(new Set());
@@ -276,20 +279,17 @@ export default function GradesPageInner() {
 
   const fetchLiveData = useCallback(async () => {
     try {
-      // live props (odds)
       const propsRes = await fetch('/api/live-props');
       if (propsRes.ok) {
         const data = await propsRes.json();
         setLivePrices(data.prices ?? {});
         setLiveEventIds(new Set(data.liveEventIds ?? []));
       }
-      // scoreboard
       const sbRes = await fetch('/api/scoreboard');
       if (sbRes.ok) {
         const sbData = await sbRes.json();
         const games: LiveGame[] = sbData.games ?? [];
         setLiveGames(games);
-        // fetch box scores for in-progress games
         const liveGameIds = games.filter((g) => g.gameStatus === 2).map((g) => g.gameId);
         if (liveGameIds.length > 0) {
           const results = await Promise.allSettled(
@@ -298,9 +298,7 @@ export default function GradesPageInner() {
           const merged: LiveBoxScores = {};
           for (const r of results) {
             if (r.status === 'fulfilled' && r.value?.players) {
-              for (const p of r.value.players) {
-                merged[p.playerId] = p;
-              }
+              for (const p of r.value.players) merged[p.playerId] = p;
             }
           }
           setLiveBoxScores(merged);
@@ -308,9 +306,7 @@ export default function GradesPageInner() {
           setLiveBoxScores({});
         }
       }
-    } catch {
-      // silently ignore
-    }
+    } catch { /* silently ignore */ }
   }, []);
 
   const loadGrades = useCallback(() => {
@@ -352,9 +348,7 @@ export default function GradesPageInner() {
     }
     fetchLiveData();
     liveIntervalRef.current = setInterval(fetchLiveData, 30_000);
-    return () => {
-      if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
-    };
+    return () => { if (liveIntervalRef.current) clearInterval(liveIntervalRef.current); };
   }, [isToday, fetchLiveData]);
 
   useEffect(() => {
@@ -566,11 +560,9 @@ export default function GradesPageInner() {
 
   const totalForFilter = grades.filter(r => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter).length;
 
-  // Scoreboard strip: merge liveGames with gameOptions so we show all today's games
-  // even if grades haven't loaded yet, keyed by gameId for filter toggle
+  // Scoreboard strip: merge liveGames with gameOptions
   const scoreboardGames = useMemo(() => {
     if (liveGames.length > 0) return liveGames;
-    // fall back to game options from grades while scoreboard loads
     return gameOptions.map(([gid, label]) => {
       const parts = label.split(' @ ');
       return {
@@ -587,6 +579,7 @@ export default function GradesPageInner() {
 
   return (
     <div className="flex flex-col min-h-screen">
+      {/* Top bar */}
       <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3 flex-wrap">
         <Link href={backHref} className="text-gray-400 hover:text-gray-200 text-sm">
           &#8592; Games
@@ -674,63 +667,85 @@ export default function GradesPageInner() {
           <RefreshDataButton onComplete={handleRefreshComplete} />
         )}
 
-        {!loading && !error && (
-          <span className="text-xs text-gray-600 ml-auto">
-            {sorted.length}{sorted.length !== totalForFilter
-              ? ` / ${totalForFilter}` : ''} props
+        {/* View toggle */}
+        {!loading && !error && grades.length > 0 && (
+          <div className="flex rounded border border-gray-700 overflow-hidden text-xs font-medium ml-auto">
+            <button
+              onClick={() => setViewMode('list')}
+              className={`px-3 py-1 transition-colors ${
+                viewMode === 'list' ? 'bg-gray-700 text-gray-100' : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              List
+            </button>
+            <button
+              onClick={() => setViewMode('matrix')}
+              className={`px-3 py-1 transition-colors border-l border-gray-700 ${
+                viewMode === 'matrix' ? 'bg-gray-700 text-gray-100' : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Matrix
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && viewMode === 'list' && (
+          <span className="text-xs text-gray-600">
+            {sorted.length}{sorted.length !== totalForFilter ? ` / ${totalForFilter}` : ''} props
           </span>
         )}
       </div>
 
-      {/* Live scoreboard strip */}
+      {/* Condensed scoreboard strip */}
       {isToday && scoreboardGames.length > 0 && (
-        <div className="border-b border-gray-800 px-4 py-2">
-          <div className="flex gap-2 overflow-x-auto pb-1">
+        <div className="border-b border-gray-800 px-4 py-1.5">
+          <div className="flex gap-1.5 overflow-x-auto flex-wrap">
             {scoreboardGames.map((g) => {
-              const isActive  = selectedGameId === g.gameId;
-              const isLive    = g.gameStatus === 2;
-              const isFinal   = g.gameStatus === 3;
+              const isActive   = selectedGameId === g.gameId;
+              const isLive     = g.gameStatus === 2;
+              const isFinal    = g.gameStatus === 3;
               const isUpcoming = g.gameStatus === 1;
-              const awayWin = isFinal && g.awayScore > g.homeScore;
-              const homeWin = isFinal && g.homeScore > g.awayScore;
+              const awayWin    = isFinal && g.awayScore > g.homeScore;
+              const homeWin    = isFinal && g.homeScore > g.awayScore;
+              const statusText = isUpcoming
+                ? (g.gameStatusText || '')
+                : g.gameStatusText;
               return (
                 <button
                   key={g.gameId}
                   onClick={() => setSelectedGameId((prev) => prev === g.gameId ? '' : g.gameId)}
-                  className={`flex-none rounded border text-left px-3 py-2 transition-colors min-w-[110px] ${
+                  className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors border whitespace-nowrap ${
                     isActive
-                      ? 'border-blue-500 bg-blue-950/40'
-                      : 'border-gray-700 hover:border-gray-500'
+                      ? 'border-blue-500 bg-blue-950/40 text-gray-100'
+                      : 'border-gray-800 hover:border-gray-600 text-gray-400 hover:text-gray-200'
                   }`}
                 >
-                  {/* Score line */}
-                  <div className="flex items-center justify-between gap-2 text-xs tabular-nums">
-                    <span className={`font-medium ${awayWin ? 'text-gray-100' : isFinal ? 'text-gray-500' : 'text-gray-200'}`}>
-                      {g.awayTeamAbbr}
+                  {/* Away */}
+                  <span className={awayWin ? 'font-semibold text-gray-100' : isFinal ? 'text-gray-600' : ''}>
+                    {g.awayTeamAbbr}
+                  </span>
+                  {!isUpcoming && (
+                    <span className={`tabular-nums font-semibold ${awayWin ? 'text-gray-100' : isFinal ? 'text-gray-600' : 'text-gray-200'}`}>
+                      {g.awayScore}
                     </span>
-                    {isUpcoming ? (
-                      <span className="text-gray-600 text-xs">{g.gameStatusText}</span>
-                    ) : (
-                      <span className={`font-semibold tabular-nums ${awayWin ? 'text-gray-100' : isFinal ? 'text-gray-500' : 'text-gray-200'}`}>
-                        {g.awayScore}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center justify-between gap-2 text-xs tabular-nums mt-0.5">
-                    <span className={`font-medium ${homeWin ? 'text-gray-100' : isFinal ? 'text-gray-500' : 'text-gray-200'}`}>
-                      {g.homeTeamAbbr}
+                  )}
+                  <span className="text-gray-700">&#8211;</span>
+                  {!isUpcoming && (
+                    <span className={`tabular-nums font-semibold ${homeWin ? 'text-gray-100' : isFinal ? 'text-gray-600' : 'text-gray-200'}`}>
+                      {g.homeScore}
                     </span>
-                    {!isUpcoming && (
-                      <span className={`font-semibold tabular-nums ${homeWin ? 'text-gray-100' : isFinal ? 'text-gray-500' : 'text-gray-200'}`}>
-                        {g.homeScore}
-                      </span>
-                    )}
-                  </div>
+                  )}
+                  {/* Home */}
+                  <span className={homeWin ? 'font-semibold text-gray-100' : isFinal ? 'text-gray-600' : ''}>
+                    {g.homeTeamAbbr}
+                  </span>
                   {/* Status */}
-                  <div className={`mt-1 text-xs ${isLive ? 'text-green-400' : isFinal ? 'text-gray-600' : 'text-gray-600'}`}>
-                    {isLive && <span className="mr-1">&#9679;</span>}
-                    {g.gameStatusText}
-                  </div>
+                  {statusText && (
+                    <span className={`ml-0.5 ${isLive ? 'text-green-400' : isFinal ? 'text-gray-600' : 'text-gray-600'}`}>
+                      {isLive && <span className="mr-0.5">&#9679;</span>}
+                      {statusText}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -738,6 +753,7 @@ export default function GradesPageInner() {
         </div>
       )}
 
+      {/* Odds range slider */}
       {!loading && !error && grades.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
           <span className="text-xs text-gray-600 whitespace-nowrap">Min odds</span>
@@ -769,7 +785,18 @@ export default function GradesPageInner() {
             No grades available for {gradeDate}. Grades populate nightly after the ETL runs.
           </div>
         )}
-        {!loading && !error && grades.length > 0 && (
+
+        {/* Matrix view */}
+        {!loading && !error && grades.length > 0 && viewMode === 'matrix' && (
+          <PropMatrix
+            rows={filtered}
+            gradeDate={gradeDate}
+            outcomeFilter={outcomeFilter}
+          />
+        )}
+
+        {/* List view */}
+        {!loading && !error && grades.length > 0 && viewMode === 'list' && (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -813,12 +840,6 @@ export default function GradesPageInner() {
 
                   const rowKey = `${row.gradeId}`;
                   const isExpanded = expandedRowKey === rowKey;
-
-                  // recent values for dot plot (reuse grades hit rate history isn't available here,
-                  // so the dot plot just shows the inline live stat; a richer version would need
-                  // the game log which we don't fetch on this page)
-                  // We skip the dot plot on grades page since we don't have the game log data;
-                  // instead the expanded panel shows just the live stat line.
 
                   const oddsContent = (
                     <span className={isLive ? 'text-green-400' : oddsColor(displayPrice)}>
