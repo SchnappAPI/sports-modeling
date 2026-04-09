@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import MatchupDefense from '@/components/MatchupDefense';
 import { getTeamPrimary } from '@/lib/teams';
+import { getSignals, SIGNAL_DEFS, type Signal } from '@/lib/signals';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -57,6 +58,9 @@ interface TodayGradeRow {
   weightedHitRate: number | null;
   grade: number | null;
   compositeGrade: number | null;
+  trendGrade: number | null;
+  regressionGrade: number | null;
+  momentumGrade: number | null;
   oppTeamId: number | null;
   position: string | null;
   gameId: string | null;
@@ -243,6 +247,21 @@ function PlayerHeadshot({ playerId, size = 36 }: { playerId: string; size?: numb
 }
 
 // ---------------------------------------------------------------------------
+// Signal chip
+// ---------------------------------------------------------------------------
+
+function SignalChip({ signal }: { signal: Signal }) {
+  return (
+    <span
+      className={`inline-block text-[9px] font-semibold px-1 py-0.5 rounded border leading-none tracking-wide ${signal.chipClass}`}
+      title={signal.title}
+    >
+      {signal.label}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Volume heatmap helper
 // ---------------------------------------------------------------------------
 
@@ -410,6 +429,8 @@ interface MarketGroup {
   label: string;
   standardLines: LinePair[];
   altLines: LinePair[];
+  // Best-grade row across all lines for this market (used for signals)
+  bestRow: TodayGradeRow | null;
 }
 
 function postedLine(pairs: LinePair[]): LinePair | undefined {
@@ -464,12 +485,56 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   const sortPairs = (m: Map<number, LinePair> | undefined): LinePair[] =>
     m ? Array.from(m.values()).sort((a, b) => a.lineValue - b.lineValue) : [];
 
-  return order.map((base) => ({
-    baseKey: base,
-    label: marketLabel(base),
-    standardLines: sortPairs(stdPaired.get(base)),
-    altLines:      sortPairs(altPaired.get(base)),
-  })).filter((g) => g.standardLines.length > 0);
+  return order.map((base) => {
+    const standardLines = sortPairs(stdPaired.get(base));
+    const altLines      = sortPairs(altPaired.get(base));
+
+    // Find the Over row with the best composite grade for signal derivation
+    const allOverRows = [
+      ...standardLines.map((p) => p.over),
+      ...altLines.map((p) => p.over),
+    ].filter((r): r is TodayGradeRow => r != null);
+    const bestRow = allOverRows.reduce<TodayGradeRow | null>((best, r) => {
+      if (!best) return r;
+      return (r.compositeGrade ?? -Infinity) > (best.compositeGrade ?? -Infinity) ? r : best;
+    }, null);
+
+    return { baseKey: base, label: marketLabel(base), standardLines, altLines, bestRow };
+  }).filter((g) => g.standardLines.length > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Player signals section — shown inside TodayPropsSection
+// ---------------------------------------------------------------------------
+
+function PlayerSignalsSection({ groups }: { groups: MarketGroup[] }) {
+  const markets = groups
+    .map((g) => ({
+      label:   g.label,
+      signals: g.bestRow
+        ? getSignals({
+            trendGrade:      g.bestRow.trendGrade,
+            regressionGrade: g.bestRow.regressionGrade,
+            momentumGrade:   g.bestRow.momentumGrade,
+          })
+        : [],
+    }))
+    .filter((m) => m.signals.length > 0);
+
+  if (markets.length === 0) return null;
+
+  return (
+    <div className="px-4 py-2 border-b border-gray-800">
+      <div className="flex flex-wrap gap-3">
+        {markets.map(({ label, signals }) => (
+          <div key={label} className="flex items-center gap-1.5">
+            <span className="text-xs text-gray-500 font-medium">{label}</span>
+            {signals.map((s) => <SignalChip key={s.type} signal={s} />)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -663,7 +728,7 @@ function TodayPropsSection({
 
   return (
     <div className="border-b border-gray-800">
-      {/* Header row — always visible */}
+      {/* Header row */}
       <div className="flex items-center px-4 py-1.5 border-b border-gray-800">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today&apos;s Props</span>
         <div className="flex gap-1 ml-auto items-center">
@@ -689,13 +754,26 @@ function TodayPropsSection({
         </div>
       </div>
 
-      {/* Market strip — always visible */}
+      {/* Signals section — only when there are signals to show */}
+      <PlayerSignalsSection groups={groups} />
+
+      {/* Market strip */}
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
             const posted   = postedLine(group.standardLines);
             const grade    = posted?.over?.compositeGrade ?? null;
             const isActive = group.baseKey === activeBase;
+            // Per-cell signal dot — show a colored dot if any signal fires for this market
+            const cellSignals = group.bestRow
+              ? getSignals({
+                  trendGrade:      group.bestRow.trendGrade,
+                  regressionGrade: group.bestRow.regressionGrade,
+                  momentumGrade:   group.bestRow.momentumGrade,
+                })
+              : [];
+            const hasPositive = cellSignals.some((s) => s.type === 'DUE' || s.type === 'STREAK' || s.type === 'HOT');
+            const hasNegative = cellSignals.some((s) => s.type === 'FADE' || s.type === 'SLUMP' || s.type === 'COLD');
             return (
               <button
                 key={group.baseKey}
@@ -718,13 +796,21 @@ function TodayPropsSection({
                 ) : (
                   <span className="text-gray-700 leading-none">--</span>
                 )}
+                {/* Small signal indicator dot under grade */}
+                {cellSignals.length > 0 && (
+                  <span className={`mt-0.5 text-[8px] leading-none ${
+                    hasPositive && !hasNegative ? 'text-green-500'
+                    : hasNegative && !hasPositive ? 'text-orange-500'
+                    : 'text-yellow-500'
+                  }`}>&#9679;</span>
+                )}
               </button>
             );
           })}
         </div>
       </div>
 
-      {/* Chart + alt lines — only when expanded and a market is selected */}
+      {/* Chart + alt lines */}
       {expanded && activeGroup && (
         <MarketPanel
           group={activeGroup}
@@ -852,7 +938,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
   const gradeDate = backDate ?? todayLocal();
 
-  // ---- persisted filter state (survives player navigation) ----
   const persistedPeriods       = useRef<Set<QuarterKey>>(new Set());
   const persistedRole          = useRef<RoleFilter>('all');
   const persistedPropsExpanded = useRef<boolean>(true);
@@ -1185,8 +1270,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
             value={playerId}
             onChange={(e) => {
               const params = new URLSearchParams(searchParams.toString());
-              // Use replace so player-to-player navigation does not stack history entries.
-              // The back button then returns to the page before the first player was opened.
               router.replace(`/nba/player/${e.target.value}?${params.toString()}`);
             }}
             className="bg-transparent text-sm font-semibold text-gray-200 border-none outline-none cursor-pointer flex-none"
