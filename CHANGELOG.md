@@ -649,3 +649,91 @@
 ### Schema | common.daily_grades
 - `ensure_tables()` uses ADD COLUMN IF NOT EXISTS pattern to add new columns without dropping the table.
 - UNIQUE constraint name changed to `uq_daily_grades_v3` to allow recreation with the new column set.
+
+---
+
+## 2026-04-09
+
+### UI | At a Glance — condensed game strip
+- Replaced card-style game buttons with compact single-line pill buttons.
+- Each pill shows: away score — home score with status text inline (e.g. `MIA 112 — BOS 108 Q3 5:22`).
+- Live games show a green dot before status text. Final winner side is bold, loser side is dim.
+- Filter behavior unchanged — tap to filter, tap again to clear.
+
+### UI | At a Glance — List/Matrix view toggle
+- Added List/Matrix toggle in the top bar (right side, pushes to ml-auto).
+- List view: existing sortable table, unchanged.
+- Matrix view: new PropMatrix component — see below.
+
+### UI | PropMatrix.tsx (new component)
+- Groups all filtered props by stat category (PTS, REB, AST, 3PM, PRA, PR, PA, RA, STL, BLK).
+- Rows are players, columns are canonical integer thresholds (5+, 10+, etc.).
+- DB stores N-0.5 line values (e.g. 4.5) — `Math.round(row.lineValue)` maps them to integer column keys.
+- When standard and alternate markets round to the same column key, keeps the row with the better composite grade.
+- Cell values are odds, colored by composite grade (green ≥70, yellow ≥55, gray below).
+- Won/Lost outcome cells get faint green/red background.
+- Cells with a sportsbook link are tappable.
+- Multiple games in the same stat group show a game sub-label row.
+
+### UI | PropMatrix — player stats panel
+- Tapping a player name opens a slide-in panel from the right.
+- Calls `/api/player?playerId=X&games=20` for last 20 played games.
+- Shows hit rate summary bar across all canonical thresholds for that stat.
+- Game log table: date, opponent, checkmark per threshold, raw value.
+- Panel header links to full player page.
+
+### UI | signals.ts (new shared module at web/lib/signals.ts)
+- Single source of truth for signal type definitions, thresholds, and derivation functions.
+- Three separate functions by signal scope:
+  - `getPlayerSignals(row)`: HOT/COLD/DUE/FADE — derived from trendGrade + regressionGrade
+  - `getLineSignals(row)`: STREAK/SLUMP — derived from momentumGrade, line-specific
+  - `getCellValueSignals(row)`: LONGSHOT — derived from overPrice + hitRate20 + hitRate60
+- `getAllSignals(row)`: returns all three categories plus a combined `.all` array.
+- `getSignals(row)`: legacy alias for `.all`, maintained for backward compatibility.
+
+### UI | At a Glance — signal badges (list view)
+- HOT/COLD/DUE/FADE chips appear in the player name cell (row-level, player-wide).
+- STREAK/SLUMP moved to expanded row panel only — they are line-specific, not player-level.
+- LONGSHOT appears in expanded row panel.
+- Signal filter dropdown in top bar filters to rows matching a specific signal type.
+- Signal counts shown per type in the dropdown.
+- `?` button beside signal filter toggles a legend row explaining each signal.
+- Expanded row panel now shows Trend/Regression/Momentum/Matchup component scores individually.
+
+### UI | At a Glance — LONGSHOT signal (new)
+- Fires when: overPrice > 250 AND hitRate20 > 0 AND hitRate60 >= 0.12.
+- Meaning: long odds but player has hit this line recently and at ~12%+ over 60 games.
+- Shown as purple chip in expanded list row panel and purple dot in matrix cells.
+
+### UI | PropMatrix — signal architecture fix
+- Root cause of SLP-on-everyone: matrix was deriving momentum from the best-composite-grade row.
+  That row is near the posted line (set at ~50/50), where any 2-3 game miss streak fires SLUMP.
+- Fix: player column shows ONLY player-level signals (HOT/COLD/DUE/FADE via getPlayerSignals).
+- STREAK/SLUMP shown as tiny colored dots on individual cells (emerald/orange).
+- LONGSHOT shown as purple dot on individual cells.
+- Cell dots have hover tooltips, a legend appears at the top of the matrix.
+- PlayerPanel header shows player-level signals (HOT/COLD/DUE/FADE) only.
+
+### UI | Player page — signals in Today's Props
+- `TodayGradeRow` interface extended with trendGrade, regressionGrade, momentumGrade.
+- `MarketGroup` extended with `bestRow` (highest composite grade row for signal derivation).
+- `PlayerSignalsSection` component: renders between the "Today's Props" header and market strip.
+  Shows per-market signals as `PTS HOT DUE` / `REB STREAK` grouped entries.
+  Only renders when at least one market has an active signal.
+- Each market strip cell gets a small colored dot below the grade number:
+  green for positive signals (HOT/DUE/STK), orange for negative (COLD/FADE/SLP), yellow for mixed.
+- Player page imports `getPlayerSignals` from shared signals.ts (aliased as getSignals locally).
+
+### UI | HelpPanel.tsx (new component)
+- `HelpButton` component: small `?` button for page headers, renders a slide-in help panel.
+- Content defined as structured data keyed by page: `grades-list`, `grades-matrix`, `player`.
+- Each page has sections with headings, body text, and optional glossary tables.
+- At a Glance button switches content between list and matrix descriptions based on active viewMode.
+- Player page button placed after team game count in header.
+- Panel is max-w-sm, scrollable, closes on backdrop tap or × button.
+
+### Fix | Multiple build failures this session
+- Cause: Python str.replace() scripts ran on files already partially modified in prior runs,
+  inserting duplicate imports and JSX elements.
+- Resolution: line-range replacements with grep verification before each edit.
+- Going forward: always grep to verify current state before any file modification script.
