@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import RefreshDataButton from '@/components/RefreshDataButton';
 import PropMatrix from '@/components/PropMatrix';
+import { HelpButton } from '@/components/HelpPanel';
 import {
   getAllSignals,
   getPlayerSignals,
@@ -682,6 +683,7 @@ export default function GradesPageInner() {
           At a Glance
         </span>
         <span className="text-xs text-gray-600">{gradeDate}</span>
+        <HelpButton page={viewMode === 'matrix' ? 'grades-matrix' : 'grades-list'} />
 
         {hasLiveGames && (
           <span className="text-xs text-green-500 font-medium">&#9679; Live</span>
