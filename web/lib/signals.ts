@@ -44,7 +44,6 @@ export interface PlayerSignalInputs {
 
 export interface LineSignalInputs {
   momentumGrade: number | null;
-  hitRate60?:    number | null;  // optional — used to suppress noise on low-probability lines
 }
 
 export interface CellValueInputs {
@@ -89,10 +88,10 @@ export function getPlayerSignals(row: PlayerSignalInputs): Signal[] {
  * Without these gates, nearly every high line shows SLUMP because players
  * naturally miss high thresholds most of the time.
  */
-export function getLineSignals(row: LineSignalInputs): Signal[] {
+export function getLineSignals(row: LineSignalInputs, hitRate60: number | null = null): Signal[] {
   const signals: Signal[] = [];
-  const { momentumGrade, hitRate60 } = row;
-  const hr = hitRate60 ?? null;
+  const { momentumGrade } = row;
+  const hr = hitRate60;
 
   if (momentumGrade != null) {
     // STREAK: on a hit run, only meaningful if they don't always hit it (hr <= 0.80)
@@ -150,7 +149,7 @@ export interface FullRowSignalInputs extends PlayerSignalInputs, LineSignalInput
 
 export function getAllSignals(row: FullRowSignalInputs): AllSignals {
   const player = getPlayerSignals(row);
-  const line   = getLineSignals(row);
+  const line   = getLineSignals(row, row.hitRate60);
   const cell   = getCellValueSignals(row);
   return { player, line, cell, all: [...player, ...line, ...cell] };
 }

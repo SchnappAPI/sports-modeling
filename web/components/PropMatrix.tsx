@@ -38,22 +38,80 @@ export interface MatrixRow {
   eventId: string | null;
 }
 
+interface ApiGameRow {
+  gameId: string;
+  gameDate: string;
+  opponentAbbr: string;
+  isHome: boolean;
+  dnp: boolean;
+  period: string;
+  pts: number | null;
+  reb: number | null;
+  ast: number | null;
+  fg3m: number | null;
+  stl: number | null;
+  blk: number | null;
+  tov: number | null;
+  min: number | null;
+}
+
+interface GameSummary {
+  gameId: string;
+  gameDate: string;
+  oppAbbr: string;
+  home: boolean;
+  dnp: boolean;
+  pts: number;
+  reb: number;
+  ast: number;
+  fg3m: number;
+  stl: number;
+  blk: number;
+  tov: number;
+  min: number;
+}
+
 interface PlayerStats {
-  log: Array<{
-    gameDate: string;
-    oppAbbr: string;
-    home: boolean;
-    pts: number;
-    reb: number;
-    ast: number;
-    fg3m: number;
-    stl: number;
-    blk: number;
-    tov: number;
-    min: number;
-    dnp: boolean;
-  }>;
+  log: ApiGameRow[];
   playerName: string | null;
+}
+
+// Aggregate per-quarter API rows into full-game summaries
+function aggregateGames(rows: ApiGameRow[]): GameSummary[] {
+  const order: string[] = [];
+  const meta = new Map<string, { gameDate: string; oppAbbr: string; home: boolean; dnp: boolean }>();
+  const totals = new Map<string, { pts: number; reb: number; ast: number; fg3m: number; stl: number; blk: number; tov: number; min: number }>();
+
+  for (const r of rows) {
+    if (!meta.has(r.gameId)) {
+      order.push(r.gameId);
+      meta.set(r.gameId, {
+        gameDate: r.gameDate,
+        oppAbbr:  r.opponentAbbr,
+        home:     r.isHome,
+        dnp:      r.dnp,
+      });
+    }
+    if (!r.dnp) {
+      const t = totals.get(r.gameId) ?? { pts: 0, reb: 0, ast: 0, fg3m: 0, stl: 0, blk: 0, tov: 0, min: 0 };
+      t.pts  += r.pts  ?? 0;
+      t.reb  += r.reb  ?? 0;
+      t.ast  += r.ast  ?? 0;
+      t.fg3m += r.fg3m ?? 0;
+      t.stl  += r.stl  ?? 0;
+      t.blk  += r.blk  ?? 0;
+      t.tov  += r.tov  ?? 0;
+      t.min  += r.min  ?? 0;
+      totals.set(r.gameId, t);
+    }
+  }
+
+  const zero = { pts: 0, reb: 0, ast: 0, fg3m: 0, stl: 0, blk: 0, tov: 0, min: 0 };
+  return order.map((gid) => ({
+    gameId: gid,
+    ...meta.get(gid)!,
+    ...(totals.get(gid) ?? zero),
+  }));
 }
 
 interface PlayerPanelProps {
@@ -123,7 +181,7 @@ function gradeColor(grade: number | null): string {
   return 'text-gray-500';
 }
 
-function statForKey(game: PlayerStats['log'][0], key: StatKey): number {
+function statForKey(game: GameSummary, key: StatKey): number {
   switch (key) {
     case 'pts':  return game.pts;
     case 'reb':  return game.reb;
@@ -203,7 +261,7 @@ function PlayerPanel({ playerId, playerName, playerSignals, focusStat, gradeDate
     ...(gameId ? { gameId } : {}),
   })}`;
 
-  const games = data?.log.filter((g) => !g.dnp).slice(0, 20) ?? [];
+  const games = aggregateGames(data?.log ?? []).filter((g) => !g.dnp).slice(0, 20);
 
   return (
     <div className="fixed inset-y-0 right-0 z-50 w-full max-w-md bg-gray-950 border-l border-gray-700 shadow-2xl flex flex-col">
@@ -492,7 +550,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                               const bg   = won ? 'bg-green-900/20' : lost ? 'bg-red-900/20' : '';
 
                               // Line-specific signals: STREAK/SLUMP from momentum of this exact cell
-                              const lineSignals = getLineSignals({ momentumGrade: cell.momentumGrade, hitRate60: cell.hitRate60 });
+                              const lineSignals = getLineSignals({ momentumGrade: cell.momentumGrade }, cell.hitRate60);
                               // Value signals: LONGSHOT
                               const valueSignals = getCellValueSignals({
                                 overPrice:  cell.price,
