@@ -56,6 +56,9 @@ interface PlayerPanelProps {
 
 // ---------------------------------------------------------------------------
 // Constants — canonical matrix columns per market group
+// Column values are integers representing the "N+" display label.
+// Database line_values are stored as N-0.5 (e.g. 4.5 = 5+), so we round
+// row.lineValue to the nearest integer before matching.
 // ---------------------------------------------------------------------------
 
 type StatKey = 'pts' | 'reb' | 'ast' | 'fg3m' | 'pra' | 'pr' | 'pa' | 'ra' | 'stl' | 'blk';
@@ -192,7 +195,8 @@ function PlayerPanel({ playerId, playerName, focusStat, gradeDate, gameId, onClo
             {/* Hit rate summary */}
             <div className="flex gap-3 mb-4 flex-wrap">
               {cols.map((line) => {
-                const hits  = games.filter((g) => statForKey(g, focusStat) > line).length;
+                // Stats are integers; "5+" means val >= 5
+                const hits  = games.filter((g) => statForKey(g, focusStat) >= line).length;
                 const pct   = games.length > 0 ? hits / games.length : null;
                 const color = pct == null ? 'text-gray-600'
                   : pct >= 0.65 ? 'text-green-400'
@@ -230,7 +234,7 @@ function PlayerPanel({ playerId, playerName, focusStat, gradeDate, gameId, onClo
                       <td className="py-1 pr-2 text-gray-500">{g.gameDate.slice(5)}</td>
                       <td className="py-1 pr-2 text-gray-400">{g.home ? '' : '@'}{g.oppAbbr}</td>
                       {cols.map((line) => {
-                        const hit = val > line;
+                        const hit = val >= line;
                         return (
                           <td key={line} className={`py-1 px-1 text-right tabular-nums ${hit ? 'text-green-500' : 'text-gray-700'}`}>
                             {hit ? '\u2714' : '\u2013'}
@@ -272,7 +276,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
     gameId: string | null;
   } | null>(null);
 
-  // Suppress unused warning — outcomeFilter reserved for future under matrix support
+  // Reserved for future under matrix support
   void outcomeFilter;
 
   type CellData = {
@@ -290,14 +294,16 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
   type GameGroup = { label: string; players: PlayerEntry[] };
   type GroupData = { stat: StatKey; games: GameGroup[] };
 
-  // Build game label map from rows (first row seen per gameId wins)
+  // Build game label map: gameId -> "AWAY @ HOME"
   const gameLabelMap = new Map<string, string>();
   for (const row of rows) {
     if (row.gameId && !gameLabelMap.has(row.gameId)) {
-      const label = row.awayTeamAbbr && row.homeTeamAbbr
-        ? `${row.awayTeamAbbr} @ ${row.homeTeamAbbr}`
-        : row.gameId;
-      gameLabelMap.set(row.gameId, label);
+      gameLabelMap.set(
+        row.gameId,
+        row.awayTeamAbbr && row.homeTeamAbbr
+          ? `${row.awayTeamAbbr} @ ${row.homeTeamAbbr}`
+          : row.gameId
+      );
     }
   }
 
@@ -308,10 +314,15 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
     if (statRows.length === 0) continue;
 
     const cols = MATRIX_COLS[stat];
+    const colSet = new Set(cols);
 
     const gameMap = new Map<string, { playerMap: Map<number, PlayerEntry> }>();
 
     for (const row of statRows) {
+      // DB stores N-0.5 thresholds (e.g. 4.5); round to integer "N+" display key
+      const colKey = Math.round(row.lineValue);
+      if (!colSet.has(colKey)) continue;
+
       const gameKey = row.gameId ?? 'unknown';
       if (!gameMap.has(gameKey)) gameMap.set(gameKey, { playerMap: new Map() });
       const gEntry = gameMap.get(gameKey)!;
@@ -326,8 +337,10 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
       }
       const pEntry = gEntry.playerMap.get(row.playerId)!;
 
-      if (cols.includes(row.lineValue)) {
-        pEntry.cells[row.lineValue] = {
+      // If standard and alternate both map to the same rounded key, keep the better grade
+      const existing = pEntry.cells[colKey];
+      if (!existing || (row.compositeGrade ?? -Infinity) > (existing.compositeGrade ?? -Infinity)) {
+        pEntry.cells[colKey] = {
           price: row.overPrice,
           compositeGrade: row.compositeGrade,
           outcome: row.outcome,
