@@ -7,7 +7,6 @@ import MatchupDefense from '@/components/MatchupDefense';
 import { getTeamPrimary } from '@/lib/teams';
 import { getPlayerSignals as getSignals, SIGNAL_DEFS, type Signal } from '@/lib/signals';
 import { HelpButton } from '@/components/HelpPanel';
-import { HelpButton } from '@/components/HelpPanel';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1307,7 +1306,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
         <span className="text-xs text-gray-600 flex-none">
           {playedCount} GP / {teamGameCount} team games
         </span>
-        <HelpButton page="player" />
       </div>
 
       {/* Splits table */}
