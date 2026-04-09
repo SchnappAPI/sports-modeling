@@ -70,6 +70,74 @@ interface LivePlayer {
 
 type LiveBoxScores = Record<number, LivePlayer>;
 
+// ---------------------------------------------------------------------------
+// Signal system
+// ---------------------------------------------------------------------------
+
+export type SignalType = 'HOT' | 'COLD' | 'DUE' | 'FADE' | 'STREAK' | 'SLUMP';
+
+export interface Signal {
+  type: SignalType;
+  label: string;
+  title: string;
+  chipClass: string;
+}
+
+const SIGNAL_DEFS: Record<SignalType, { label: string; title: string; chipClass: string }> = {
+  HOT:    { label: 'HOT',    chipClass: 'bg-amber-900/50 text-amber-300 border-amber-700/50',    title: 'Performing above recent baseline (trend up)' },
+  COLD:   { label: 'COLD',   chipClass: 'bg-blue-900/50 text-blue-300 border-blue-700/50',       title: 'Performing below recent baseline (trend down)' },
+  DUE:    { label: 'DUE',    chipClass: 'bg-green-900/50 text-green-300 border-green-700/50',    title: 'Below season average — bounce-back candidate' },
+  FADE:   { label: 'FADE',   chipClass: 'bg-red-900/50 text-red-300 border-red-700/50',          title: 'Above season average — regression risk' },
+  STREAK: { label: 'STK',    chipClass: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50', title: 'On a hit streak for this prop line' },
+  SLUMP:  { label: 'SLP',    chipClass: 'bg-orange-900/50 text-orange-300 border-orange-700/50', title: 'On a miss streak for this prop line' },
+};
+
+function getSignals(row: GradeRow): Signal[] {
+  const signals: Signal[] = [];
+  const { trendGrade, regressionGrade, momentumGrade } = row;
+
+  // trend_grade: L10 vs L30 stat mean.
+  // >72 = performing above baseline recently (HOT)
+  // <28 = performing below baseline recently (COLD)
+  if (trendGrade != null) {
+    if (trendGrade > 72) signals.push({ type: 'HOT',  ...SIGNAL_DEFS.HOT  });
+    if (trendGrade < 28) signals.push({ type: 'COLD', ...SIGNAL_DEFS.COLD });
+  }
+
+  // regression_grade: z-score of L10 vs full season.
+  // >72 = below season avg, due to bounce back (DUE)
+  // <28 = above season avg, due to regress (FADE)
+  if (regressionGrade != null) {
+    if (regressionGrade > 72) signals.push({ type: 'DUE',  ...SIGNAL_DEFS.DUE  });
+    if (regressionGrade < 28) signals.push({ type: 'FADE', ...SIGNAL_DEFS.FADE });
+  }
+
+  // momentum_grade: current hit/miss streak length for this specific line.
+  // >75 = on a hit streak (STREAK)
+  // <25 = on a miss streak (SLUMP)
+  if (momentumGrade != null) {
+    if (momentumGrade > 75) signals.push({ type: 'STREAK', ...SIGNAL_DEFS.STREAK });
+    if (momentumGrade < 25) signals.push({ type: 'SLUMP',  ...SIGNAL_DEFS.SLUMP  });
+  }
+
+  return signals;
+}
+
+function SignalChip({ signal }: { signal: Signal }) {
+  return (
+    <span
+      className={`inline-block text-[9px] font-semibold px-1 py-0.5 rounded border leading-none tracking-wide ${signal.chipClass}`}
+      title={signal.title}
+    >
+      {signal.label}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Market / odds helpers
+// ---------------------------------------------------------------------------
+
 const MARKET_ABBR: Record<string, string> = {
   player_points:                           'PTS',
   player_points_alternate:                 'PTS',
@@ -204,6 +272,7 @@ const ODDS_DEFAULT = -600;
 type OutcomeFilter = 'Over' | 'Under';
 type ResultFilter  = 'all' | 'open' | 'Won' | 'Lost';
 type ViewMode      = 'list' | 'matrix';
+type SignalFilter  = '' | SignalType;
 
 type SortKey =
   | 'playerName' | 'marketKey' | 'lineValue' | 'overPrice'
@@ -244,6 +313,31 @@ function MiniDotPlot({ values, lineValue }: { values: number[]; lineValue: numbe
   );
 }
 
+// ---------------------------------------------------------------------------
+// Signal legend tooltip
+// ---------------------------------------------------------------------------
+
+function SignalLegend() {
+  const items: { type: SignalType; desc: string }[] = [
+    { type: 'HOT',    desc: 'L10 stat avg above L30 avg' },
+    { type: 'COLD',   desc: 'L10 stat avg below L30 avg' },
+    { type: 'DUE',    desc: 'L10 below season avg (bounce-back candidate)' },
+    { type: 'FADE',   desc: 'L10 above season avg (regression risk)' },
+    { type: 'STREAK', desc: 'Active hit streak for this line' },
+    { type: 'SLUMP',  desc: 'Active miss streak for this line' },
+  ];
+  return (
+    <div className="flex flex-wrap gap-2 px-4 py-2 border-b border-gray-800">
+      {items.map(({ type, desc }) => (
+        <span key={type} className="flex items-center gap-1 text-xs text-gray-500" title={desc}>
+          <SignalChip signal={{ type, ...SIGNAL_DEFS[type] }} />
+          <span className="hidden sm:inline">{desc}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export default function GradesPageInner() {
   const searchParams = useSearchParams();
   const [grades, setGrades]         = useState<GradeRow[]>([]);
@@ -260,6 +354,8 @@ export default function GradesPageInner() {
   const [resultFilter, setResultFilter]     = useState<ResultFilter>('all');
   const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
   const [viewMode, setViewMode]             = useState<ViewMode>('list');
+  const [signalFilter, setSignalFilter]     = useState<SignalFilter>('');
+  const [showLegend, setShowLegend]         = useState(false);
 
   const [livePrices, setLivePrices]         = useState<LivePrices>({});
   const [liveEventIds, setLiveEventIds]     = useState<Set<string>>(new Set());
@@ -327,6 +423,7 @@ export default function GradesPageInner() {
     setDefenseCache({});
     setResultFilter('all');
     setExpandedRowKey(null);
+    setSignalFilter('');
     loadGrades();
   }, [loadGrades]);
 
@@ -450,6 +547,9 @@ export default function GradesPageInner() {
     if (minOdds > ODDS_MIN) {
       rows = rows.filter((r) => r.overPrice != null && r.overPrice >= minOdds);
     }
+    if (signalFilter) {
+      rows = rows.filter((r) => getSignals(r).some((s) => s.type === signalFilter));
+    }
     if (outcomeFilter === 'Over') {
       const standardKeys = new Set<string>();
       for (const r of rows) {
@@ -461,7 +561,7 @@ export default function GradesPageInner() {
       });
     }
     return rows;
-  }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds, outcomeFilter, resultFilter]);
+  }, [grades, selectedGameId, selectedMarket, playerFilter, minOdds, outcomeFilter, resultFilter, signalFilter]);
 
   function getDefRank(row: GradeRow): number | null {
     const pg = posGroup(row.position);
@@ -560,7 +660,6 @@ export default function GradesPageInner() {
 
   const totalForFilter = grades.filter(r => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter).length;
 
-  // Scoreboard strip: merge liveGames with gameOptions
   const scoreboardGames = useMemo(() => {
     if (liveGames.length > 0) return liveGames;
     return gameOptions.map(([gid, label]) => {
@@ -576,6 +675,18 @@ export default function GradesPageInner() {
       } as LiveGame;
     });
   }, [liveGames, gameOptions]);
+
+  // Signal counts for filter dropdown labels
+  const signalCounts = useMemo(() => {
+    const base = grades.filter((r) => r.overPrice != null && (r.outcomeName ?? 'Over') === outcomeFilter);
+    const counts: Partial<Record<SignalType, number>> = {};
+    for (const row of base) {
+      for (const s of getSignals(row)) {
+        counts[s.type] = (counts[s.type] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [grades, outcomeFilter]);
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -663,6 +774,33 @@ export default function GradesPageInner() {
           </>
         )}
 
+        {/* Signal filter */}
+        {!loading && !error && grades.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            <select
+              value={signalFilter}
+              onChange={(e) => setSignalFilter(e.target.value as SignalFilter)}
+              className={`bg-gray-900 border text-xs rounded px-2 py-1 focus:outline-none focus:border-gray-500 ${
+                signalFilter ? 'border-blue-500 text-blue-300' : 'border-gray-700 text-gray-300'
+              }`}
+            >
+              <option value="">All signals</option>
+              {(Object.keys(SIGNAL_DEFS) as SignalType[]).map((t) => (
+                <option key={t} value={t}>
+                  {SIGNAL_DEFS[t].label}{signalCounts[t] ? ` (${signalCounts[t]})` : ''}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => setShowLegend((v) => !v)}
+              className="text-gray-600 hover:text-gray-400 text-xs"
+              title="Signal legend"
+            >
+              ?
+            </button>
+          </div>
+        )}
+
         {!loading && !error && (
           <RefreshDataButton onComplete={handleRefreshComplete} />
         )}
@@ -696,6 +834,9 @@ export default function GradesPageInner() {
         )}
       </div>
 
+      {/* Signal legend (collapsible) */}
+      {showLegend && <SignalLegend />}
+
       {/* Condensed scoreboard strip */}
       {isToday && scoreboardGames.length > 0 && (
         <div className="border-b border-gray-800 px-4 py-1.5">
@@ -707,9 +848,7 @@ export default function GradesPageInner() {
               const isUpcoming = g.gameStatus === 1;
               const awayWin    = isFinal && g.awayScore > g.homeScore;
               const homeWin    = isFinal && g.homeScore > g.awayScore;
-              const statusText = isUpcoming
-                ? (g.gameStatusText || '')
-                : g.gameStatusText;
+              const statusText = isUpcoming ? (g.gameStatusText || '') : g.gameStatusText;
               return (
                 <button
                   key={g.gameId}
@@ -720,7 +859,6 @@ export default function GradesPageInner() {
                       : 'border-gray-800 hover:border-gray-600 text-gray-400 hover:text-gray-200'
                   }`}
                 >
-                  {/* Away */}
                   <span className={awayWin ? 'font-semibold text-gray-100' : isFinal ? 'text-gray-600' : ''}>
                     {g.awayTeamAbbr}
                   </span>
@@ -735,11 +873,9 @@ export default function GradesPageInner() {
                       {g.homeScore}
                     </span>
                   )}
-                  {/* Home */}
                   <span className={homeWin ? 'font-semibold text-gray-100' : isFinal ? 'text-gray-600' : ''}>
                     {g.homeTeamAbbr}
                   </span>
-                  {/* Status */}
                   {statusText && (
                     <span className={`ml-0.5 ${isLive ? 'text-green-400' : isFinal ? 'text-gray-600' : 'text-gray-600'}`}>
                       {isLive && <span className="mr-0.5">&#9679;</span>}
@@ -819,6 +955,7 @@ export default function GradesPageInner() {
               <tbody>
                 {sorted.map((row) => {
                   const def = defRankCell(row);
+                  const signals = getSignals(row);
                   const oppPct   = fmtPct(row.hitRateOpp);
                   const oppTitle = row.sampleSizeOpp
                     ? `${row.sampleSizeOpp} game${row.sampleSizeOpp === 1 ? '' : 's'} vs ${row.oppTeamAbbr ?? 'opp'} (full season)`
@@ -858,7 +995,7 @@ export default function GradesPageInner() {
                         onClick={() => setExpandedRowKey((prev) => prev === rowKey ? null : rowKey)}
                       >
                         <td className="py-1.5 pr-3">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <Link
                               href={playerHref(row)}
                               className="text-gray-100 hover:text-blue-400 transition-colors"
@@ -875,6 +1012,9 @@ export default function GradesPageInner() {
                             {isLive && (
                               <span className="text-xs text-green-500">&#9679;</span>
                             )}
+                            {signals.map((s) => (
+                              <SignalChip key={s.type} signal={s} />
+                            ))}
                           </div>
                         </td>
                         <td className="py-1.5 pr-1 text-gray-400 text-xs font-mono">{marketAbbr(row.marketKey)}</td>
@@ -947,48 +1087,49 @@ export default function GradesPageInner() {
                       {isExpanded && (
                         <tr key={`${rowKey}-exp`} className="border-b border-gray-800 bg-gray-900/30">
                           <td colSpan={13} className="px-4 py-3">
+                            {/* Grade component breakdown */}
+                            <div className="flex flex-wrap gap-4 text-xs mb-3">
+                              {[
+                                { label: 'Trend',      val: row.trendGrade,      title: 'L10 vs L30 stat mean. >50 = trending up.' },
+                                { label: 'Regression', val: row.regressionGrade, title: 'L10 vs season avg. >50 = below avg (due up).' },
+                                { label: 'Momentum',   val: row.momentumGrade,   title: 'Hit/miss streak for this line. >50 = hit streak.' },
+                                { label: 'Matchup',    val: row.matchupGrade,    title: 'Opponent defense rank for this position+stat.' },
+                              ].map(({ label, val, title }) => (
+                                <div key={label} className="text-center" title={title}>
+                                  <div className="text-gray-600 text-xs">{label}</div>
+                                  <div className={`text-sm font-semibold tabular-nums ${gradeColor(val)}`}>
+                                    {val != null ? val.toFixed(0) : '-'}
+                                  </div>
+                                </div>
+                              ))}
+                              {signals.length > 0 && (
+                                <div className="flex items-center gap-1 ml-2 flex-wrap">
+                                  {signals.map((s) => <SignalChip key={s.type} signal={s} />)}
+                                </div>
+                              )}
+                            </div>
+                            {/* Live stat line */}
                             {livePlayer ? (
                               <div className="flex flex-wrap gap-4 text-xs">
-                                <div className="text-gray-400">
-                                  <span className="text-gray-600 mr-1">PTS</span>
-                                  <span className={`font-semibold tabular-nums ${livePlayer.pts > row.lineValue && MARKET_STAT[row.marketKey] === 'pts' ? 'text-green-400' : 'text-gray-200'}`}>
-                                    {livePlayer.pts}
-                                  </span>
-                                </div>
-                                <div className="text-gray-400">
-                                  <span className="text-gray-600 mr-1">REB</span>
-                                  <span className={`font-semibold tabular-nums ${livePlayer.reb > row.lineValue && MARKET_STAT[row.marketKey] === 'reb' ? 'text-green-400' : 'text-gray-200'}`}>
-                                    {livePlayer.reb}
-                                  </span>
-                                </div>
-                                <div className="text-gray-400">
-                                  <span className="text-gray-600 mr-1">AST</span>
-                                  <span className={`font-semibold tabular-nums ${livePlayer.ast > row.lineValue && MARKET_STAT[row.marketKey] === 'ast' ? 'text-green-400' : 'text-gray-200'}`}>
-                                    {livePlayer.ast}
-                                  </span>
-                                </div>
-                                <div className="text-gray-400">
-                                  <span className="text-gray-600 mr-1">3PM</span>
-                                  <span className={`font-semibold tabular-nums ${livePlayer.fg3m > row.lineValue && MARKET_STAT[row.marketKey] === 'fg3m' ? 'text-green-400' : 'text-gray-200'}`}>
-                                    {livePlayer.fg3m}
-                                  </span>
-                                </div>
-                                <div className="text-gray-400">
-                                  <span className="text-gray-600 mr-1">STL</span>
-                                  <span className="font-semibold tabular-nums text-gray-200">{livePlayer.stl}</span>
-                                </div>
-                                <div className="text-gray-400">
-                                  <span className="text-gray-600 mr-1">BLK</span>
-                                  <span className="font-semibold tabular-nums text-gray-200">{livePlayer.blk}</span>
-                                </div>
-                                <div className="text-gray-400">
-                                  <span className="text-gray-600 mr-1">TOV</span>
-                                  <span className="font-semibold tabular-nums text-gray-200">{livePlayer.tov}</span>
-                                </div>
-                                <div className="text-gray-400">
-                                  <span className="text-gray-600 mr-1">MIN</span>
-                                  <span className="font-semibold tabular-nums text-gray-200">{livePlayer.min.toFixed(0)}</span>
-                                </div>
+                                {[
+                                  { label: 'PTS', val: livePlayer.pts, stat: 'pts' },
+                                  { label: 'REB', val: livePlayer.reb, stat: 'reb' },
+                                  { label: 'AST', val: livePlayer.ast, stat: 'ast' },
+                                  { label: '3PM', val: livePlayer.fg3m, stat: 'fg3m' },
+                                  { label: 'STL', val: livePlayer.stl, stat: 'stl' },
+                                  { label: 'BLK', val: livePlayer.blk, stat: 'blk' },
+                                  { label: 'TOV', val: livePlayer.tov, stat: 'tov' },
+                                  { label: 'MIN', val: Math.round(livePlayer.min), stat: '' },
+                                ].map(({ label, val, stat }) => (
+                                  <div key={label} className="text-gray-400">
+                                    <span className="text-gray-600 mr-1">{label}</span>
+                                    <span className={`font-semibold tabular-nums ${
+                                      stat && MARKET_STAT[row.marketKey] === stat && val > row.lineValue
+                                        ? 'text-green-400'
+                                        : 'text-gray-200'
+                                    }`}>{val}</span>
+                                  </div>
+                                ))}
                                 {livePlayer.oncourt && (
                                   <span className="text-green-500 text-xs">&#9679; on court</span>
                                 )}
