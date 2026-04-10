@@ -4,32 +4,33 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Analysis mode'
+        description: 'Analysis mode (all/signals/odds)'
         required: false
         default: 'all'
         type: choice
         options: [all, signals, odds]
       days:
-        description: 'Lookback window (days)'
+        description: 'Lookback window in days'
         required: false
         default: '90'
 
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
 jobs:
   backtest:
-    runs-on: self-hosted
+    runs-on: [self-hosted, schnapp-runner]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Activate virtualenv
         run: echo "$HOME/venv/bin" >> $GITHUB_PATH
 
       - name: Run signal backtest
-        env:
-          AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
-          AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
-          AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
-          AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
         run: |
-          python3 etl/signal_backtest.py \
+          python etl/signal_backtest.py \
             --mode ${{ github.event.inputs.mode || 'all' }} \
             --days ${{ github.event.inputs.days || '90' }}
