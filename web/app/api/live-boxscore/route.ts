@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const RUNNER_URL = 'http://20.109.181.21:5000';
+const RUNNER_URL = 'http://172.173.126.81:5000';
 const RUNNER_KEY = 'runner-Lake4971';
 const TIMEOUT_MS = 10_000;
 
