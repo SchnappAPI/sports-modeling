@@ -200,6 +200,7 @@ CREATE TABLE #stage_patterns (
 )
 """))
 
+        # Bulk insert via executemany — much faster than row-by-row
         batch = [
             (
                 int(r.player_id), r.market_key, float(r.line_value),
@@ -213,12 +214,10 @@ CREATE TABLE #stage_patterns (
             )
             for _, r in df.iterrows()
         ]
-
-        for i in range(0, len(batch), 500):
-            conn.exec_driver_sql(
-                "INSERT INTO #stage_patterns VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                batch[i:i+500]
-            )
+        conn.exec_driver_sql(
+            "INSERT INTO #stage_patterns VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            batch
+        )
 
         conn.execute(text(f"""
 MERGE common.player_line_patterns AS t
