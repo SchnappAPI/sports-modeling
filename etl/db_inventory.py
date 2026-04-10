@@ -1,54 +1,40 @@
-import os, pyodbc
+import os, subprocess, sys
+out = "/tmp/mappings_verify.txt"
+script = """
+import os
+from sqlalchemy import create_engine, text
 
-CONN_STR = (
-    f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-    f"SERVER={os.environ['AZURE_SQL_SERVER']};"
-    f"DATABASE={os.environ['AZURE_SQL_DATABASE']};"
-    f"UID={os.environ['AZURE_SQL_USERNAME']};"
-    f"PWD={os.environ['AZURE_SQL_PASSWORD']};"
-    "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
+conn_str = (
+    f"mssql+pyodbc://{os.environ['AZURE_SQL_USERNAME']}:"
+    f"{os.environ['AZURE_SQL_PASSWORD']}@"
+    f"{os.environ['AZURE_SQL_SERVER']}/"
+    f"{os.environ['AZURE_SQL_DATABASE']}"
+    "?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=no&Connection+Timeout=90"
 )
-conn = pyodbc.connect(CONN_STR)
-cur = conn.cursor()
+engine = create_engine(conn_str, fast_executemany=False)
 
-out = []
-def p(line=""): print(line); out.append(line)
+with engine.connect() as conn:
+    r = conn.execute(text("SELECT COUNT(*) FROM odds.player_map WHERE sport_key='basketball_nba' AND player_id IS NULL"))
+    print(f"Still unmapped: {r.scalar():,}")
 
-cur.execute("""
-    SELECT player_id, player_name, team_id, team_tricode, roster_status
-    FROM nba.players WHERE player_name LIKE '%McCollum%'
-""")
-p("=== players ===")
-for r in cur.fetchall(): p(str(r))
+with engine.connect() as conn:
+    r = conn.execute(text("SELECT COUNT(*) FROM odds.player_map WHERE sport_key='basketball_nba' AND player_id IS NOT NULL"))
+    print(f"Mapped:         {r.scalar():,}")
 
-cur.execute("""
-    SELECT COUNT(DISTINCT game_id) AS games, MIN(game_date) AS first, MAX(game_date) AS last
-    FROM nba.player_box_score_stats
-    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
-""")
-p("=== pbs game count ===")
-for r in cur.fetchall(): p(str(r))
+with engine.connect() as conn:
+    r = conn.execute(text(\"\"\"
+        SELECT TOP 10 pm.odds_player_name, pm.player_id
+        FROM odds.player_map pm
+        WHERE pm.sport_key='basketball_nba' AND pm.player_id IS NULL
+        ORDER BY pm.odds_player_name
+    \"\"\"))
+    print("\\nRemaining unmapped (sample):")
+    for row in r:
+        print(f"  {row[0]}")
 
-cur.execute("""
-    SELECT TOP 5 game_id, CONVERT(VARCHAR(10), game_date, 120) AS game_date, matchup
-    FROM nba.player_box_score_stats
-    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
-    ORDER BY game_date DESC
-""")
-p("=== recent pbs rows ===")
-for r in cur.fetchall(): p(str(r))
-
-cur.execute("""
-    SELECT TOP 5 game_id, CONVERT(VARCHAR(10), game_date, 120) AS game_date, matchup
-    FROM nba.player_box_score_stats
-    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
-    ORDER BY game_date ASC
-""")
-p("=== oldest pbs rows ===")
-for r in cur.fetchall(): p(str(r))
-
-conn.close()
-
-with open("/tmp/db_inventory_output.txt", "w") as f:
-    f.write("\n".join(out))
-p("Done.")
+print("Done.")
+"""
+with open(out, "w") as f:
+    subprocess.run([sys.executable, "-c", script], stdout=f, stderr=subprocess.STDOUT)
+with open(out) as f:
+    print(f.read())
