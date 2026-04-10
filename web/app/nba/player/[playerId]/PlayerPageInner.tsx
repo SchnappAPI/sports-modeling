@@ -708,7 +708,7 @@ function TodayPropsSection({
   const [grades, setGrades]         = useState<TodayGradeRow[]>([]);
   const [loading, setLoading]       = useState(true);
   const [activeBase, setActiveBase] = useState<string | null>(null);
-  const [dotWindow, setDotWindow]   = useState<DotWindow>('L10');
+  const [dotWindow, setDotWindow]   = useState<DotWindow>('L30');
 
   useEffect(() => {
     setLoading(true);
