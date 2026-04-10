@@ -9,6 +9,30 @@
 
 ---
 
+## 2026-04-10 (session 3)
+
+### Infra | VM migration — schnapp-runner-2 (172.173.126.81, B1s, Central US)
+- Provisioned new Azure VM: Standard B1s (1 vCPU, 1 GB RAM), Ubuntu 24.04, Central US. IP: `172.173.126.81`.
+- Installed: ODBC Driver 18, Python 3.12, venv at `~/venv` with all pinned deps + flask.
+- Cloned repo to `~/sports-modeling`. Git credentials stored in `~/.git-credentials` (credential.helper=store).
+- Registered GitHub Actions runner as systemd service under label `schnapp-runner` (replaced old registration with `--replace` flag).
+- Installed `schnapp-flask.service` (port 5000) — confirmed active and serving CDN data.
+- Installed `schnapp-mcp.service` (port 8000) — confirmed active. WorkingDirectory is `~/sports-modeling` (not actions-runner work dir, which doesn't exist until first job runs).
+- Installed cloudflared 2026.3.0. Copied tunnel credentials and config from old VM. Tunnel reconnected with 4 connections (ord12, dfw11, dfw06). `cloudflared.service` enabled and active.
+- Sudoers rule written via Azure Run Command: passwordless `systemctl restart/status` for both Flask and MCP services.
+- Old VM (schnapp-runner, 20.109.181.21, B2s_v2, West US 2) is still running — stop and delete it after confirming workflows run successfully on new VM.
+
+### API | web/app/api/live-boxscore/route.ts — updated runner IP
+- Changed `RUNNER_URL` from `http://20.109.181.21:5000` to `http://172.173.126.81:5000`.
+
+### Docs | PROJECT_REFERENCE.md — updated VM details
+- Runner section updated: B1s, Central US, IP 172.173.126.81.
+- Removed "downsize VM" from Known Issues (already done).
+- Updated live-boxscore API route comment with new IP.
+- Added decision log entry for MCP WorkingDirectory choice.
+
+---
+
 ## 2026-04-10 (session 2)
 
 ### Grading | grading/grade_props.py — fix: fetch player patterns in run_backfill
