@@ -1142,7 +1142,7 @@ def run_backfill(sport, api_key, games_limit, season_year, engine, fresh=False):
     missing.sort(key=lambda e: str(e["commence_time"]))
     work = missing[:games_limit]
     print(f"  Discovered: {len(discovered)}  Loaded: {len(loaded_ids)}  "
-          f"Missing: {len(missing)}  Processing: {len(work)} (oldest first).")
+        f"Missing: {len(missing)}  Processing: {len(work)} (oldest first).")
 
     for ev in work:
         eid   = ev["event_id"]
@@ -1361,12 +1361,18 @@ _NAME_SUFFIXES = re.compile(
 )
 
 _NBA_PLAYER_ALIASES = {
-    "Moe Wagner":          "Moritz Wagner",
-    "Herb Jones":          "Herbert Jones",
-    "Nicolas Claxton":     "Nic Claxton",
-    "Vincent Williams Jr": "Vince Williams Jr.",
-    "Ron Holland":         "Ronald Holland II",
-    "Carlton Carrington":  "Bub Carrington",
+    # Nickname / common name -> full name as stored in nba.players
+    "Moe Wagner":             "Moritz Wagner",
+    "Herb Jones":             "Herbert Jones",
+    "Nicolas Claxton":        "Nic Claxton",
+    "Vincent Williams Jr":    "Vince Williams Jr.",
+    "Ron Holland":            "Ronald Holland II",
+    "Carlton Carrington":     "Bub Carrington",
+    # Abbreviated first name forms used by The Odds API
+    "G Antetokounmpo":        "Giannis Antetokounmpo",
+    "S Gilgeous-Alexander":   "Shai Gilgeous-Alexander",
+    "N Alexander-Walker":     "Nickeil Alexander-Walker",
+    "K Caldwell-Pope":        "Kentavious Caldwell-Pope",
 }
 
 
