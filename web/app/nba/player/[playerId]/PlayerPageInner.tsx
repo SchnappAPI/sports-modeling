@@ -1345,7 +1345,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
 
       <TodayPropsSection
         playerId={playerId}
-        gradeDate={gradeDate}
+        gradeDate={todayLocal()}
         summaries={summaries}
         expanded={propsExpanded}
         onToggleExpanded={() => setPropsExpanded((v) => !v)}
