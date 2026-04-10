@@ -59,20 +59,29 @@ export interface CellValueInputs {
  *
  * trendGrade:      L10 vs L30 stat mean. >72 = trending up (HOT), <28 = trending down (COLD).
  * regressionGrade: z-score of L10 vs full season. >72 = below avg, due up (DUE). <28 = above avg (FADE).
+ *
+ * Conflict resolution:
+ *   HOT suppresses FADE — a player who is actively trending up has already
+ *   exceeded their season average; showing FADE alongside HOT is contradictory
+ *   and undercuts an otherwise strong grade. The regression risk is already
+ *   reflected in the composite grade.
+ *
+ *   DUE suppresses COLD — a bounce-back candidate should not also show COLD.
+ *   The two signals point in opposite directions for the same player.
  */
 export function getPlayerSignals(row: PlayerSignalInputs): Signal[] {
   const signals: Signal[] = [];
   const { trendGrade, regressionGrade } = row;
 
-  if (trendGrade != null) {
-    if (trendGrade > 72) signals.push({ type: 'HOT',  ...SIGNAL_DEFS.HOT  });
-    if (trendGrade < 28) signals.push({ type: 'COLD', ...SIGNAL_DEFS.COLD });
-  }
+  const isHot  = trendGrade      != null && trendGrade      > 72;
+  const isCold = trendGrade      != null && trendGrade      < 28;
+  const isDue  = regressionGrade != null && regressionGrade > 72;
+  const isFade = regressionGrade != null && regressionGrade < 28;
 
-  if (regressionGrade != null) {
-    if (regressionGrade > 72) signals.push({ type: 'DUE',  ...SIGNAL_DEFS.DUE  });
-    if (regressionGrade < 28) signals.push({ type: 'FADE', ...SIGNAL_DEFS.FADE });
-  }
+  if (isHot)              signals.push({ type: 'HOT',  ...SIGNAL_DEFS.HOT  });
+  if (isCold && !isDue)   signals.push({ type: 'COLD', ...SIGNAL_DEFS.COLD });
+  if (isDue)              signals.push({ type: 'DUE',  ...SIGNAL_DEFS.DUE  });
+  if (isFade && !isHot)   signals.push({ type: 'FADE', ...SIGNAL_DEFS.FADE });
 
   return signals;
 }
