@@ -1,48 +1,54 @@
-import os, subprocess, sys
-out = "/tmp/mappings_debug2.txt"
-script = """
-import os
-from sqlalchemy import create_engine, text
+import os, pyodbc
 
-conn_str = (
-    f"mssql+pyodbc://{os.environ['AZURE_SQL_USERNAME']}:"
-    f"{os.environ['AZURE_SQL_PASSWORD']}@"
-    f"{os.environ['AZURE_SQL_SERVER']}/"
-    f"{os.environ['AZURE_SQL_DATABASE']}"
-    "?driver=ODBC+Driver+18+for+SQL+Server&Encrypt=yes&TrustServerCertificate=no&Connection+Timeout=90"
+CONN_STR = (
+    f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+    f"SERVER={os.environ['AZURE_SQL_SERVER']};"
+    f"DATABASE={os.environ['AZURE_SQL_DATABASE']};"
+    f"UID={os.environ['AZURE_SQL_USERNAME']};"
+    f"PWD={os.environ['AZURE_SQL_PASSWORD']};"
+    "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
 )
-engine = create_engine(conn_str, fast_executemany=False)
+conn = pyodbc.connect(CONN_STR)
+cur = conn.cursor()
 
-with engine.connect() as conn:
-    r = conn.execute(text(\"\"\"
-        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA='nba' AND TABLE_NAME='players'
-        ORDER BY ORDINAL_POSITION
-    \"\"\"))
-    cols = [row[0] for row in r]
-    print(f"nba.players columns: {cols}")
+out = []
+def p(line=""): print(line); out.append(line)
 
-with engine.connect() as conn:
-    # Check what name column exists and find sample players
-    r = conn.execute(text("SELECT TOP 3 * FROM nba.players"))
-    cols = [d[0] for d in r.cursor.description]
-    rows = list(r)
-    print(f"\\nSample rows, cols={cols}")
-    for row in rows:
-        print(f"  {dict(zip(cols, row))}")
+cur.execute("""
+    SELECT player_id, player_name, team_id, team_tricode, roster_status
+    FROM nba.players WHERE player_name LIKE '%McCollum%'
+""")
+p("=== players ===")
+for r in cur.fetchall(): p(str(r))
 
-with engine.connect() as conn:
-    # Now check how odds_etl does its matching - look at player_map
-    r = conn.execute(text("SELECT TOP 3 * FROM odds.player_map WHERE sport_key='basketball_nba'"))
-    cols2 = [d[0] for d in r.cursor.description]
-    rows2 = list(r)
-    print(f"\\nodds.player_map cols: {cols2}")
-    for row in rows2:
-        print(f"  {dict(zip(cols2, row))}")
+cur.execute("""
+    SELECT COUNT(DISTINCT game_id) AS games, MIN(game_date) AS first, MAX(game_date) AS last
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
+""")
+p("=== pbs game count ===")
+for r in cur.fetchall(): p(str(r))
 
-print("Done.")
-"""
-with open(out, "w") as f:
-    subprocess.run([sys.executable, "-c", script], stdout=f, stderr=subprocess.STDOUT)
-with open(out) as f:
-    print(f.read())
+cur.execute("""
+    SELECT TOP 5 game_id, CONVERT(VARCHAR(10), game_date, 120) AS game_date, matchup
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
+    ORDER BY game_date DESC
+""")
+p("=== recent pbs rows ===")
+for r in cur.fetchall(): p(str(r))
+
+cur.execute("""
+    SELECT TOP 5 game_id, CONVERT(VARCHAR(10), game_date, 120) AS game_date, matchup
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
+    ORDER BY game_date ASC
+""")
+p("=== oldest pbs rows ===")
+for r in cur.fetchall(): p(str(r))
+
+conn.close()
+
+with open("/tmp/db_inventory_output.txt", "w") as f:
+    f.write("\n".join(out))
+p("Done.")
