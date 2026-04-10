@@ -11,47 +11,38 @@
 
 ---
 
-## Current State (updated 2026-04-05 session 3)
+## Current State (updated 2026-04-10)
 
 **What is working:**
 - NBA data pipeline fully active. Box scores, live updates, odds, lineup poll, grading all running.
-- Lineup poll: two-stage architecture. Stage 1 = official JSON (starters, 5 per team). Stage 2 = boxscorepreviewv3 (full roster). Both run every cycle. Full rosters (starters + bench + inactive) now written correctly.
-- Grading: all components live, Over + Under grades written daily. `grade_props.py` verified OK.
-- Web: all views live at schnapp.bet. Player page, stats tab, At a Glance, matchup defense, grades all functional.
-- Matchups tab live on game page: defense grid by G/F/C position groups, 7 stat columns, rank out of 30. Position grouping fixed — compound positions (F-G, G-F, C-F) now correctly mapped using LEFT(1) logic. Lineup hybrid position: starters use game-specific PG/SG/SF/PF/C, bench uses canonical position from nba.players.
-- Player page: headshot from CDN, team color left border accent, lineup position used for matchup defense (precise PG/SG/SF/PF/C over compound G-F values).
-- Today's Props strip: horizontal market cells, tap to expand dot plot + alt lines.
-- PWA active. Self-hosted runner live. Uptime Robot active. Refresh Data button live.
-- Live box score fully working. Flask runner fetches NBA CDN, returns 36 players with correct stats. Score header in Live tab shows AWY score vs HME score + period/clock, refreshes every 30s. Green dot on players currently on court.
-- Flask runner: `/scoreboard` route returns today's game statuses from CDN without DB round trip. `/boxscore` route serves live player stats. `/ping` health check. All confirmed working via MCP.
-- Game strip for today: served via Flask CDN path — no DB, no cron dependency, always live-accurate. Fallback to DB if Flask unreachable.
-- Game strip scores: live and final games now show scores in the card (awayScore @ homeScore, leading score brighter). Upcoming games still show spread/total. Historical game strip returns scores from DB.
-- Game status tracking: `nba_live.py` uses `todaysScoreboard_00.json` CDN — no proxy dependency.
-- Schnapp Ops MCP: 6 tools working. `live_scoreboard` confirmed returning correct game data.
-- Odds backfill run 23916639705 confirmed complete. NBA mappings dispatched (mode=mappings, sport=nba).
+- Lineup poll: two-stage architecture. Stage 1 = official JSON starters (5/team). Stage 2 = boxscorepreviewv3 full roster. PREVIEW_TIMEOUT=20s, no retry.
+- Live box scores: nba_live.py uses todaysScoreboard CDN. LiveBoxScore.tsx refreshes every 30s. Flask /scoreboard route on runner.
+- At a Glance: list view + matrix view (PropMatrix.tsx). Help panel (HelpPanel.tsx) with ? button in header.
+- Player page: full game log, splits, VS Defense, Today's Props strip with dot plot, signal chips.
+- Grading v3: daily_grades has outcome_name + over_price. Over and Under rows written. UNIQUE key v3 includes outcome_name.
+- Signal system: shared signals.ts. Signals split into player-level (HOT/COLD/DUE/FADE) and line-level (STREAK/DUE). STREAK fires when momentum_grade > 70. DUE (formerly SLUMP) fires when momentum_grade > 65 AND hr60 >= 0.35 for miss streak bounce-back.
+- Personal pattern table: common.player_line_patterns populated with 27,765 rows (lag-1 transition probabilities per player-line combo). Updated nightly by compute-patterns.yml.
+- Grading uses personal patterns: precompute_line_grades() looks up p_hit_after_hit / p_hit_after_miss from common.player_line_patterns. Fallback to season hit rate when no pattern exists.
+- Refresh Data button live (At a Glance + player page header).
+- Auth: common.user_codes, common.user_activations, common.demo_config. PasscodeGate.tsx. /admin page.
+- MLB web layer: game strip + box score tables. MLB ETL backfilled 2023-2026.
+- Schnapp Ops MCP: FastMCP on port 8000, Cloudflare tunnel at https://mcp.schnapp.bet/mcp. 8 tools including shell_exec and read_file.
 
-**Known issues:**
-- `etl/lineup_fix_fragment.py` is a stub file left from an accidental create — safe to delete.
-- PasscodeGate `BYPASS = true` — gate disabled for dev. Re-enable before sharing with users (`PasscodeGate.tsx`).
-- Odds/grading backfill gap — pre-April 2026 dates still being backfilled by nightly chain.
-- NFL workflow missing — `nfl_etl.py` exists, `nfl-etl.yml` does not.
-- NFL and MLB `run_mappings` not implemented in odds_etl.py — only NBA branch exists.
-- VS Defense does not show combo market columns (PRA/PR/PA/RA) — deferred.
-- Game log prop coloring may use wrong line if alt line appears in gradeMap before standard line.
-- `dev` branch has stale merge conflict on `PlayerPageInner.tsx`. Close PR #29 without merging.
-- VM resize pending — downsize to B1s_v2 after trial credits expire.
-- At a Glance duplicate prop rows: standard vs alt market keys both abbreviating to same label in UI.
-- **PENDING:** `nba-game-day.yml` cron gap — 22:00-23:59 UTC (5-7pm ET) not covered. Game strip now unaffected (uses Flask CDN). But odds/grading/lineup still miss this window. Fix: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`. Edit directly on GitHub.com.
+**Known issues / pending:**
+- Cron gap: nba-game-day.yml missing coverage for 22:00-23:59 UTC. Add \`*/15 22-23 * * *\` cron entry.
+- NBA odds backfill run 23916639705 — status unknown. If complete, run mappings (mode=mappings sport=nba).
+- compute_patterns.py first run took 17 min (looped batched inserts). Fixed to single executemany call — next run should be under 2 min.
+- PROJECT_REFERENCE.md and CHANGELOG.md not updated after every session — catch up needed.
+- VM downsize to B1s_v2 after free trial credits expire.
 
-**Next up:**
-- Fix `nba-game-day.yml` cron gap: add `- cron: '*/15 22-23 * * *'` and change `*/30 0-6` to `*/15 0-6`. Edit directly on GitHub.com.
-- At a Glance duplicate prop row fix (display layer — market key abbreviation collision).
-- Re-enable PasscodeGate (BYPASS = false) before sharing with users.
-- MLB ETL wiring, web views, grading backfill.
-- NFL/MLB run_mappings branches in odds_etl.py.
-- Downsize schnapp-runner VM to B1s_v2 after free trial credits expire.
+**Build status:** Green. Last successful deploy: commit 80e34be.
 
----
+**Grading pipeline dependency order:**
+1. odds-etl.yml — fetches FanDuel lines
+2. grading.yml (triggered by workflow_run after odds) — runs grade_props.py run_upcoming
+3. compute-grade-outcomes.yml — resolves Won/Lost after games finish
+4. compute-patterns.yml — nightly at 07:30 UTC, updates player_line_patterns from resolved outcomes
+
 
 ## Infrastructure
 

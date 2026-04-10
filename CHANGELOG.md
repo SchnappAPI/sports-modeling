@@ -737,3 +737,68 @@
   inserting duplicate imports and JSX elements.
 - Resolution: line-range replacements with grep verification before each edit.
 - Going forward: always grep to verify current state before any file modification script.
+
+---
+
+## 2026-04-10
+
+### Analysis | signal_backtest.py
+- Runs against all resolved Over rows in common.daily_grades
+- Signal table: for each signal condition, computes N fired, win rate, baseline win rate, lift, avg EV, z-score
+- Composite grade bucket table: win rate by grade band (<40 through 70+)
+- Odds calibration: actual win rate vs implied probability across 8 price buckets
+- Market edge table: sorted by edge (player_points_assists_alternate only positive at +3.8%)
+- Grade vs odds cross-tab: high grade (65+) underdogs show +0.9% edge; only segment with positive EV
+- Odds tendency: implied prob buckets uniformly show -1% to -4% edge; no sweet spot by price range
+- workflow: signal-backtest.yml (workflow_dispatch, runs on schnapp-runner)
+- Key findings: HOT=noise, COLD/FADE=contrarian, STREAK=strong (+21.4% lift z=25), SLUMP=positive (bounce-back +7.8%), LONGSHOT=strong negative (-21.9%)
+- Composite grade monotonically predictive: 20.8% (grade<40) to 74.2% (grade>=70)
+
+### Analysis | streak_analysis.py
+- Computes streak continuation rates from resolved historical data
+- Groups by streak type (hit/miss), streak length (1-5+), hr60 bucket (0-3)
+- Key finding: continuation rate depends almost entirely on player's base hit rate for that line
+  - High hr60 (65%+) hit streak len=3: 83.6% continuation
+  - Low hr60 (0-25%) hit streak len=1: 22.8% continuation (mean reversion)
+  - High hr60 miss streak len=1: 34.6% continuation (bounce-back signal)
+  - Low hr60 miss streak: 88.7%+ continuation (normal behavior, not a signal)
+
+### Analysis | per-player autocorrelation (db_inventory temp run)
+- 26,448 player-line combos with >= 10 games
+- ~42% show random autocorrelation, ~29% show meaningful patterns (>5pp lift)
+- Strong momentum (>15pp after hit): 9.1% of combos
+- Strong reversion (>-15pp after hit): 8.8% of combos
+- Strong bounce-back (>15pp after miss): 7.5% of combos
+
+### ETL | etl/compute_patterns.py (new)
+- Computes per-player-line lag-1 transition probabilities from all resolved outcomes
+- Stores in common.player_line_patterns (new table, PK: player_id + market_key + line_value)
+- Columns: n, hr_overall, p_hit_after_hit, p_hit_after_miss, hit_momentum, miss_momentum, pattern_strength, is_momentum_player, is_reversion_player, is_bouncy_player, last_updated
+- MIN_GAMES=10, MIN_TRANSITION_OBS=3 per state
+- MERGE upsert — safe to run repeatedly
+- Upsert uses single exec_driver_sql executemany call (fast, not looped batches)
+- First run: populated 27,765 rows, avg n=32, max n=78
+- 3,976 momentum players, 3,299 reversion, 2,949 bouncy, 3,578 strong patterns (>=20pp)
+- workflow: compute-patterns.yml — scheduled nightly 07:30 UTC, also workflow_dispatch
+- First run took ~17 min due to batched upsert; fixed to single executemany call
+
+### Grading | grade_props.py — personal pattern lookup
+- Added fetch_player_patterns(engine, player_ids) — loads from common.player_line_patterns
+- precompute_line_grades() now accepts patterns=dict kwarg
+- When personal pattern exists and n >= 10:
+  - On hit streak: momentum_grade = p_hit_after_hit * 100 (player's own probability)
+  - On miss streak: momentum_grade = p_hit_after_miss * 100 (player's own probability)
+  - pattern_grade = pattern_strength scaled 0-100 + sample size bonus (up to +20 for 30+ games)
+- Fallback when no pattern: uses player's season hit rate as baseline
+- _common_grade_data() now fetches patterns and returns them as 6th return value
+- grade_props_for_date() now accepts patterns= kwarg, passes to precompute_line_grades
+- All three callers (run_upcoming, run_backfill, run_historical) updated
+- Removes hardcoded _STREAK_CONTINUATION aggregate table entirely
+- CRITICAL: run_upcoming now returns 6-tuple from _common_grade_data — do not revert to 5-tuple
+
+### Signals | web/lib/signals.ts — SLUMP relabeled DUE
+- SLUMP chip label changed from 'SLP' to 'DUE' with green styling
+- Reflects backtest finding: SLUMP fires after miss streak for high-hr60 players, which is a bounce-back signal, not a warning
+- getLineSignals() updated: SLUMP fires only when momentumGrade > 65 AND hitRate60 >= 0.35
+- STREAK fires when momentumGrade > 70 (personal probability >= 70% of hitting)
+- Both signals are now driven by personal pattern probability, not aggregate thresholds
