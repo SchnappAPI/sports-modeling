@@ -394,6 +394,38 @@ FROM td
     return result
 
 
+def fetch_player_patterns(engine, player_ids: list) -> dict:
+    """
+    Load personal autocorrelation patterns from common.player_line_patterns.
+    Returns dict keyed by (player_id, market_key, line_value).
+    """
+    if not player_ids:
+        return {}
+    pid_list = ", ".join(str(int(p)) for p in player_ids)
+    df = pd.read_sql(text(f"""
+        SELECT player_id, market_key, line_value,
+               hr_overall, p_hit_after_hit, p_hit_after_miss,
+               hit_momentum, miss_momentum, pattern_strength, n
+        FROM common.player_line_patterns
+        WHERE player_id IN ({pid_list})
+    """), engine)
+    result = {}
+    for _, row in df.iterrows():
+        key = (int(row["player_id"]), row["market_key"], float(row["line_value"]))
+        result[key] = {
+            "hr_overall":        row["hr_overall"],
+            "p_hit_after_hit":   row["p_hit_after_hit"]  if pd.notna(row["p_hit_after_hit"])  else None,
+            "p_hit_after_miss":  row["p_hit_after_miss"] if pd.notna(row["p_hit_after_miss"]) else None,
+            "hit_momentum":      row["hit_momentum"]     if pd.notna(row["hit_momentum"])      else None,
+            "miss_momentum":     row["miss_momentum"]    if pd.notna(row["miss_momentum"])     else None,
+            "pattern_strength":  row["pattern_strength"] if pd.notna(row["pattern_strength"])  else None,
+            "n":                 int(row["n"]),
+        }
+    log.info(f"  Player patterns: {len(result)} player-line combos loaded.")
+    return result
+
+
+
 def fetch_under_prices(engine, table="odds.upcoming_player_props", date_filter="", params=None):
     std_mkt_list = ", ".join(f"'{m}'" for m in STANDARD_MARKETS)
     sql = text(
@@ -700,90 +732,51 @@ def precompute_player_market_grades(season_df, props_df):
     return result
 
 
-# ---------------------------------------------------------------------------
-# Empirical continuation rate table derived from 24k resolved historical rows.
-# Format: {(streak_type, hr60_bucket, streak_len): continuation_rate}
-# streak_type: 'hit' or 'miss'
-# hr60_bucket: 0=low(0-25%), 1=mid(25-45%), 2=good(45-65%), 3=high(65%+)
-# streak_len: 1-5 (longer streaks mapped to nearest available length)
-# Continuation rate = P(next game same result as current streak)
-# ---------------------------------------------------------------------------
-_STREAK_CONTINUATION = {
-    # Hit streaks — high hr60 players sustain hit streaks; low hr60 players revert
-    ("hit", 3, 1): 0.756, ("hit", 3, 2): 0.801, ("hit", 3, 3): 0.836,
-    ("hit", 2, 1): 0.522, ("hit", 2, 2): 0.454, ("hit", 2, 3): 0.526,
-    ("hit", 1, 1): 0.434, ("hit", 1, 2): 0.348, ("hit", 1, 3): 0.348,
-    ("hit", 0, 1): 0.228, ("hit", 0, 2): 0.318, ("hit", 0, 3): 0.318,
-    # Miss streaks — high hr60 players bounce back; low hr60 players stay cold
-    ("miss", 3, 1): 0.346, ("miss", 3, 2): 0.500, ("miss", 3, 3): 0.500,
-    ("miss", 2, 1): 0.506, ("miss", 2, 2): 0.538, ("miss", 2, 3): 0.500,
-    ("miss", 1, 1): 0.582, ("miss", 1, 2): 0.631, ("miss", 1, 3): 0.675,
-    ("miss", 0, 1): 0.834, ("miss", 0, 2): 0.887, ("miss", 0, 3): 0.897,
-}
-
-
-def _hr60_bucket(hr60: float) -> int:
-    """Map hit_rate_60 to 0-3 bucket for continuation table lookup."""
-    if hr60 < 0.25: return 0  # low
-    if hr60 < 0.45: return 1  # mid
-    if hr60 < 0.65: return 2  # good
-    return 3                   # high
-
-
-def _momentum_from_continuation(cont_rate: float, is_hit_streak: bool) -> float:
+def precompute_line_grades(season_df, props_df, patterns: dict = None):
     """
-    Convert a continuation probability to a 0-100 momentum score.
-    For hit streaks:  high continuation = high score (Over likely to hit)
-    For miss streaks: low continuation  = high score (Over due to bounce back)
-    Both directions are measured from the Over perspective.
-    Score 50 = neutral (no edge), 100 = very likely to hit Over.
-    """
-    if is_hit_streak:
-        # cont_rate = P(hit again) — maps directly to Over probability
-        return _safe(cont_rate * 100.0)
-    else:
-        # cont_rate = P(miss again) — invert for Over
-        return _safe((1.0 - cont_rate) * 100.0)
+    Compute momentum_grade and pattern_grade per (player, market, line).
 
+    Uses personal autocorrelation patterns from common.player_line_patterns
+    when available (patterns dict from fetch_player_patterns). Falls back to
+    a population-average approach when no personal pattern exists.
 
-def precompute_line_grades(season_df, props_df):
-    """
-    Compute momentum_grade and pattern_grade for each (player, market, line).
+    momentum_grade: estimated probability (0-100) of hitting the Over,
+        derived from the player's own P(hit|prev hit) or P(hit|prev miss).
+        Score of 80 means 80% personal probability based on their history.
 
-    momentum_grade: Empirically-derived score based on current streak length
-        AND the player's base hit rate for that line. Replaces the naive
-        log-scale formula with actual observed continuation probabilities.
-        Score reflects probability of hitting the Over:
-          - Hit streak + high hr60 => high score (streak likely continues)
-          - Hit streak + low hr60  => low score (mean reversion expected)
-          - Miss streak + high hr60 => high score (bounce-back likely)
-          - Miss streak + low hr60  => low score (misses are normal)
-
-    pattern_grade: Retained for composite grade continuity. Uses same
-        empirical table but smoothed for longer streaks.
+    pattern_strength_grade: how predictable this player is (0-100).
+        Derived from pattern_strength in the patterns table — high means
+        their history repeats consistently, low means random/noisy.
+        This is stored as pattern_grade in the DB.
     """
     combos = props_df[["player_id", "market_key", "line_value"]].drop_duplicates()
     result = {}
-    player_groups = {pid: grp.sort_values("game_date") for pid, grp in season_df.groupby("player_id")}
+    player_groups = {pid: grp.sort_values("game_date")
+                     for pid, grp in season_df.groupby("player_id")}
+    patterns = patterns or {}
+
     for _, row in combos.iterrows():
-        pid = int(row["player_id"]); mkt = row["market_key"]; lv = float(row["line_value"])
+        pid = int(row["player_id"])
+        mkt = row["market_key"]
+        lv  = float(row["line_value"])
         key = (pid, mkt, lv)
+
         stat_col = MARKET_STAT_COL.get(mkt)
-        pdf = player_groups.get(pid)
+        pdf      = player_groups.get(pid)
+
         if stat_col is None or pdf is None or pdf.empty or stat_col not in pdf.columns:
             result[key] = {"momentum_grade": None, "pattern_grade": None}
             continue
+
         vals = pdf[stat_col].dropna().values
         if len(vals) == 0:
             result[key] = {"momentum_grade": None, "pattern_grade": None}
             continue
 
         hits = [bool(v > lv) for v in vals]
-        hr60 = float(np.mean(hits))  # use full season as base rate proxy
-        hr_bucket = _hr60_bucket(hr60)
         is_hit_streak = hits[-1]
 
-        # Measure current streak length
+        # Current streak length (for reference, not used directly in scoring)
         streak = 0
         for h in reversed(hits):
             if h == is_hit_streak:
@@ -791,37 +784,47 @@ def precompute_line_grades(season_df, props_df):
             else:
                 break
 
-        # Cap lookup at 3 (table only has data up to 3; longer streaks use len=3)
-        lookup_len = min(streak, 3)
-        stype = "hit" if is_hit_streak else "miss"
-
-        cont_rate = _STREAK_CONTINUATION.get((stype, hr_bucket, lookup_len))
-
         momentum = None
         pattern  = None
 
-        if cont_rate is not None:
-            momentum = _momentum_from_continuation(cont_rate, is_hit_streak)
-            # pattern_grade mirrors momentum but applies an additional length
-            # penalty/bonus: streaks longer than 3 become mean-reversion signals
-            # since the table shows diminishing continuation for most hr60 groups
-            if streak <= 3:
-                pattern = momentum
+        # --- Personal pattern lookup ---
+        pat = patterns.get(key)
+        if pat is not None and pat["n"] >= 10:
+            if is_hit_streak and pat["p_hit_after_hit"] is not None:
+                # Player has hit this line. Use their personal P(hit again).
+                momentum = _safe(pat["p_hit_after_hit"] * 100.0)
+            elif not is_hit_streak and pat["p_hit_after_miss"] is not None:
+                # Player has missed this line. Use their personal P(hit next).
+                momentum = _safe(pat["p_hit_after_miss"] * 100.0)
+            # else: personal transition prob not available (too few obs in that state)
+
+            # Pattern strength grade: how reliable is this player's pattern?
+            # 0 = completely random, 100 = very consistent repeating pattern
+            # We scale pattern_strength (0.0-1.0 lift) to 0-100
+            if pat["pattern_strength"] is not None:
+                pattern = _safe(min(100.0, pat["pattern_strength"] * 300.0))
+            # Minimum sample size bonus: more games = more confidence
+            # Add up to 20 points for sample size (30+ games = full bonus)
+            if pattern is not None and momentum is not None:
+                sample_bonus = min(20.0, (pat["n"] - 10) * (20.0 / 20.0))
+                pattern = _safe(min(100.0, pattern + sample_bonus))
+
+        # --- Fallback: use season hit rate as a simple baseline ---
+        if momentum is None and len(hits) >= 5:
+            hr60 = float(np.mean(hits))
+            # Without personal pattern, score is just the hit rate
+            # from the player's perspective (no streak information)
+            if is_hit_streak:
+                # Slight upward nudge for being on a hit streak vs base rate
+                momentum = _safe(min(100.0, hr60 * 100.0 + streak * 2.0))
             else:
-                # Beyond 3 games, apply mean-reversion pressure scaled by hr60
-                # High hr60 hit streaks: still likely to continue (less penalty)
-                # Low hr60 miss streaks: reversion imminent
-                reversion_factor = 1.0 - (streak - 3) * 0.08
-                reversion_factor = max(0.3, reversion_factor)
-                if is_hit_streak:
-                    adj_cont = cont_rate * reversion_factor
-                    pattern = _momentum_from_continuation(adj_cont, is_hit_streak)
-                else:
-                    adj_cont = cont_rate + (1 - cont_rate) * (1 - reversion_factor)
-                    pattern = _momentum_from_continuation(adj_cont, is_hit_streak)
+                # On a miss streak — use base rate (no pattern to refine)
+                momentum = _safe(hr60 * 100.0)
 
         result[key] = {"momentum_grade": momentum, "pattern_grade": pattern}
     return result
+
+
 
 
 def compute_matchup_grade(market_key, opp_team_id, position, matchup_cache):
@@ -907,12 +910,12 @@ WHEN NOT MATCHED THEN INSERT(
     return len(rows)
 
 
-def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=None):
+def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=None, patterns=None):
     if props_df.empty: return []
     props_df = props_df.drop_duplicates(subset=["player_id", "market_key", "line_value"]).copy()
     graded_df   = compute_all_hit_rates(props_df, history_df, opp_info, direction=direction, opp_history_df=opp_history_df)
     pm_grades   = precompute_player_market_grades(season_df, graded_df)
-    line_grades = precompute_line_grades(season_df, graded_df)
+    line_grades = precompute_line_grades(season_df, graded_df, patterns=patterns)
     is_under = (direction == "under")
     rows = []
     for _, r in graded_df.iterrows():
@@ -983,7 +986,9 @@ def _common_grade_data(engine, all_over, under_props, today):
         if pg and info.get("opp_team_id"):
             matchup_pairs.append((int(info["opp_team_id"]), pg))
     matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
-    return history_df, season_df, opp_info, matchup_cache, opp_history_df
+    player_ids = list(all_over["player_id"].dropna().astype(int).unique())
+    patterns   = fetch_player_patterns(engine, player_ids)
+    return history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns
 
 
 def run_upcoming(engine):
@@ -1003,9 +1008,9 @@ def run_upcoming(engine):
     under_prices = fetch_under_prices(engine)
     under_props  = build_under_props(posted, under_prices)
     log.info(f"  {len(under_props)} under prop rows.")
-    history_df, season_df, opp_info, matchup_cache, opp_history_df = _common_grade_data(engine, all_over, under_props, today)
-    over_rows  = grade_props_for_date(engine, today, all_over, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df)
-    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df) if not under_props.empty else []
+    history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns = _common_grade_data(engine, all_over, under_props, today)
+    over_rows  = grade_props_for_date(engine, today, all_over, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns)
+    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df, patterns=patterns) if not under_props.empty else []
     written = upsert_grades(engine, over_rows + under_rows)
     log.info(f"  {written} total rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
@@ -1044,9 +1049,9 @@ def run_intraday(engine):
     if over_bracket.empty: return
     under_prices = fetch_under_prices(engine)
     under_props  = build_under_props(moved_posted, under_prices)
-    history_df, season_df, opp_info, matchup_cache, opp_history_df = _common_grade_data(engine, over_bracket, under_props, today)
-    over_rows  = grade_props_for_date(engine, today, over_bracket, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df)
-    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df) if not under_props.empty else []
+    history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns = _common_grade_data(engine, over_bracket, under_props, today)
+    over_rows  = grade_props_for_date(engine, today, over_bracket, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns)
+    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df, patterns=patterns) if not under_props.empty else []
     written = upsert_grades(engine, over_rows + under_rows)
     log.info(f"  {written} rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
@@ -1085,7 +1090,7 @@ def run_backfill(engine, batch_size, specific_date=None):
             if pg and info.get("opp_team_id"):
                 matchup_pairs.append((int(info["opp_team_id"]), pg))
         matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
-        rows  = grade_props_for_date(engine, gd, props, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df)
+        rows  = grade_props_for_date(engine, gd, props, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns)
         total += upsert_grades(engine, rows)
     log.info(f"Backfill complete. {total} total rows written.")
 
