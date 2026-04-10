@@ -1,5 +1,5 @@
 import os, subprocess, sys
-out = "/tmp/mappings_verify.txt"
+out = "/tmp/mappings_debug.txt"
 script = """
 import os
 from sqlalchemy import create_engine, text
@@ -13,24 +13,34 @@ conn_str = (
 )
 engine = create_engine(conn_str, fast_executemany=False)
 
-with engine.connect() as conn:
-    r = conn.execute(text("SELECT COUNT(*) FROM odds.player_map WHERE sport_key='basketball_nba' AND player_id IS NULL"))
-    print(f"Still unmapped: {r.scalar():,}")
-
-with engine.connect() as conn:
-    r = conn.execute(text("SELECT COUNT(*) FROM odds.player_map WHERE sport_key='basketball_nba' AND player_id IS NOT NULL"))
-    print(f"Mapped:         {r.scalar():,}")
-
+# Check if these names exist in nba.players at all
 with engine.connect() as conn:
     r = conn.execute(text(\"\"\"
-        SELECT TOP 10 pm.odds_player_name, pm.player_id
-        FROM odds.player_map pm
-        WHERE pm.sport_key='basketball_nba' AND pm.player_id IS NULL
-        ORDER BY pm.odds_player_name
+        SELECT display_name, player_id FROM nba.players
+        WHERE display_name IN (
+            'Spencer Dinwiddie','Malik Beasley','Malcolm Brogdon',
+            'Ben Simmons','Georges Niang','Cam Johnson','Alec Burks'
+        )
     \"\"\"))
-    print("\\nRemaining unmapped (sample):")
-    for row in r:
-        print(f"  {row[0]}")
+    found = list(r)
+    print(f"Players found in nba.players matching unmapped names: {len(found)}")
+    for row in found:
+        print(f"  {row[0]} -> pid={row[1]}")
+
+with engine.connect() as conn:
+    # Check what columns odds.player_map has
+    r = conn.execute(text(\"\"\"
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='player_map'
+        ORDER BY ORDINAL_POSITION
+    \"\"\"))
+    print(f"\\nodds.player_map columns: {[row[0] for row in r]}")
+
+with engine.connect() as conn:
+    # Check if there's a name_normalized or match_attempted column
+    r = conn.execute(text("SELECT TOP 3 * FROM odds.player_map WHERE sport_key='basketball_nba' AND player_id IS NOT NULL"))
+    cols = [d[0] for d in r.cursor.description]
+    print(f"Sample mapped row columns: {cols}")
 
 print("Done.")
 """
