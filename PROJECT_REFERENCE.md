@@ -32,10 +32,10 @@
 
 **Known issues / pending:**
 - compute_patterns.py first run took 17 min (looped batched inserts). Fixed to single executemany call — verify next nightly run completes under 2 min.
-- VM downsize to B1s_v2 after free trial credits expire.
 - Signal backtest pending re-run in 2-3 weeks once personal pattern grades have accumulated more resolved outcomes.
+- After MCP reconnects to new VM, verify Schnapp Ops tools (flask_status, live_scoreboard) work end-to-end.
 
-**Build status:** Green. Last successful deploy: commit 31c0cba.
+**Build status:** Green. Last successful deploy: commit 1b622f7.
 
 **Grading pipeline dependency order:**
 1. odds-etl.yml — fetches FanDuel lines
@@ -58,10 +58,9 @@
 
 ### GitHub Actions / Runner
 - Repo: `SchnappAPI/sports-modeling` (private)
-- **Self-hosted runner:** `schnapp-runner` Azure VM (West US 2, Standard B2s_v2, Ubuntu 24.04). IP: `20.109.181.21`. Admin: `schnapp-admin` / `Sports#2026VM`.
+- **Self-hosted runner:** `schnapp-runner` Azure VM (Central US, Standard B1s, Ubuntu 24.04). IP: `172.173.126.81`. Admin: `schnapp-admin` / `Sports#2026VM`.
 - Runner service: systemd, starts on boot, always online. Python venv at `~/venv` with pinned deps pre-installed. ODBC Driver 18 pre-installed.
 - All active workflows use `runs-on: [self-hosted, schnapp-runner]`. No ODBC or pip install steps in any workflow.
-- After trial: downsize VM to B1s_v2 (~$15-20/month). Resize via Azure Portal, no data loss.
 - Secrets: `AZURE_SQL_SERVER`, `AZURE_SQL_DATABASE`, `AZURE_SQL_USERNAME`, `AZURE_SQL_PASSWORD`, `NBA_PROXY_URL`, `ODDS_API_KEY`, `AZURE_STATIC_WEB_APPS_API_TOKEN_RED_SMOKE_0BBE1FB10`, `GITHUB_PAT`, `MCP_AUTH_TOKEN`, `GH_PAT`
 - Always fetch file SHA before `create_or_update_file`. Use `push_files` for multi-file atomic commits — BUT NEVER for Python files OR TSX files with non-ASCII Unicode characters. Both cause corruption. Use `create_or_update_file` for all Python files and any TSX with Unicode symbols.
 
@@ -79,6 +78,7 @@
 - Tools: `flask_status`, `flask_restart`, `live_scoreboard`, `live_boxscore`, `workflow_trigger`, `workflow_status`.
 - Exposed via Cloudflare Tunnel: `https://mcp.schnapp.bet/mcp`. Connected as "Schnapp Ops" in claude.ai.
 - MCP venv: `~/mcp-venv`. Re-run `install-mcp.yml` after any change to `mcp/server.py`.
+- WorkingDirectory for schnapp-mcp.service: `/home/schnapp-admin/sports-modeling` (direct clone, not actions-runner work dir).
 
 ### Active Workflows
 | Workflow | Trigger | Purpose |
@@ -310,7 +310,7 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 - `/api/refresh-lines` POST — triggers `refresh-lines.yml` via GITHUB_PAT (no passcode)
 - `/api/refresh-data` POST — validates `ADMIN_REFRESH_CODE`, triggers `refresh-data.yml`
 - `/api/refresh-status?runId=` — polls workflow run status
-- `/api/live-boxscore?gameId=` — calls VM Flask at `http://20.109.181.21:5000/boxscore?gameId=`. Flask fetches CDN directly.
+- `/api/live-boxscore?gameId=` — calls VM Flask at `http://172.173.126.81:5000/boxscore?gameId=`. Flask fetches CDN directly.
 
 ### Navigation
 - `/nba` — game strip + tabs
@@ -363,7 +363,7 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | grading.yml uses workflow_run trigger | Grading starts immediately after odds finishes, not after a fixed 30-min buffer that can be wrong in both directions. |
 | Backfill isolated to nba-backfill.yml | Prevents expensive backfill competing with live score bandwidth in the same 12-min job window. |
 | requirements.txt pinned to exact versions | Prevents silent breakage from upstream package releases. |
-| VM B2s_v2 initially, downsize to B1s_v2 after trial | Free trial credits cover B2s_v2; B1s_v2 (~$15-20/month) is sufficient for I/O-bound ETL workloads. |
+| VM migrated to B1s Central US (schnapp-runner-2) | Old B2s_v2 West US 2 replaced. B1s is sufficient for I/O-bound ETL. Central US chosen for new VM creation. |
 | RefreshDataButton uses separate ADMIN_REFRESH_CODE | Keeps admin refresh distinct from user passcodes; allows sharing app without exposing the refresh trigger. |
 | NEVER use push_files for Python files | push_files serializes content with literal \n strings instead of real newlines, producing a single-line file that fails py_compile. Always use create_or_update_file for .py files. |
 | NEVER use push_files for TSX with non-ASCII Unicode | push_files also corrupts non-ASCII characters (arrows ▲▼, em dash —) in TSX, causing client-side JavaScript crash on load. Use create_or_update_file for any TSX with Unicode symbols. |
@@ -384,3 +384,4 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | gameLineupPosition preferred over nba.players.position for matchup defense | Starters get precise PG/SG/SF/PF/C from official NBA lineup JSON. nba.players.position may be compound (G-F) which is less precise for defense bucket matching. |
 | nba.daily_lineups preserves historical data | DELETE only runs for games in the current poll cycle (non-final games). Final game rows persist. Starter/bench split for defense analysis is possible from this table. |
 | SUM(BIT) not allowed in SQL Server | Must CAST BIT columns to INT before aggregating: SUM(CAST(is_momentum_player AS INT)). Applies to all BIT columns in common.player_line_patterns. |
+| schnapp-mcp.service WorkingDirectory is ~/sports-modeling, not actions-runner work dir | On initial VM setup the actions-runner work dir doesn't exist until the first job runs. Direct clone is always present. |
