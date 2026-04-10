@@ -430,6 +430,8 @@ interface MarketGroup {
   label: string;
   standardLines: LinePair[];
   altLines: LinePair[];
+  // True when there are no standard lines and altLines are being shown in their place
+  altOnly: boolean;
   // Best-grade row across all lines for this market (used for signals)
   bestRow: TodayGradeRow | null;
 }
@@ -489,6 +491,10 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   return order.map((base) => {
     const standardLines = sortPairs(stdPaired.get(base));
     const altLines      = sortPairs(altPaired.get(base));
+    // When no standard lines exist, promote alt lines into the standard strip
+    // so the section still renders for alt-only players (e.g. some FanDuel props
+    // only post alternate markets on certain days).
+    const altOnly       = standardLines.length === 0 && altLines.length > 0;
 
     // Find the Over row with the best composite grade for signal derivation
     const allOverRows = [
@@ -500,8 +506,8 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
       return (r.compositeGrade ?? -Infinity) > (best.compositeGrade ?? -Infinity) ? r : best;
     }, null);
 
-    return { baseKey: base, label: marketLabel(base), standardLines, altLines, bestRow };
-  }).filter((g) => g.standardLines.length > 0);
+    return { baseKey: base, label: marketLabel(base), standardLines, altLines, altOnly, bestRow };
+  }).filter((g) => g.standardLines.length > 0 || g.altOnly);
 }
 
 // ---------------------------------------------------------------------------
@@ -622,8 +628,15 @@ function MarketPanel({
   summaries: GameSummary[];
   dotWindow: DotWindow;
 }) {
-  const posted    = postedLine(group.standardLines);
-  const lineValue = posted?.lineValue ?? 0;
+  // For alt-only markets, use the alt lines as the primary dot plot source.
+  // Pick the line closest to -110 as the representative line for the chart.
+  const primaryLines = group.standardLines.length > 0 ? group.standardLines : group.altLines;
+  const posted       = postedLine(primaryLines);
+  const lineValue    = posted?.lineValue ?? 0;
+
+  // When alt-only, there's nothing extra to show in the "Alt lines" sub-section
+  // because all lines are already in the primary strip.
+  const showAltSection = !group.altOnly && group.altLines.length > 0;
 
   return (
     <div className="border-t border-gray-800 pt-3 pb-3">
@@ -636,7 +649,7 @@ function MarketPanel({
         />
       </div>
 
-      {group.altLines.length > 0 && (
+      {showAltSection && (
         <div className="mt-3 px-4">
           <div className="text-xs text-gray-600 mb-1.5">Alt lines</div>
           <div className="flex flex-nowrap gap-2 overflow-x-auto pb-1">
@@ -761,11 +774,13 @@ function TodayPropsSection({
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
-            const posted   = postedLine(group.standardLines);
-            const grade    = posted?.over?.compositeGrade ?? null;
-            const isActive = group.baseKey === activeBase;
-            // Per-cell signal dot — show a colored dot if any signal fires for this market
-            const cellSignals = group.bestRow
+            // For the strip cell, use the representative line from whichever
+            // line set is primary (standard preferred, alt as fallback).
+            const primaryLines = group.standardLines.length > 0 ? group.standardLines : group.altLines;
+            const posted       = postedLine(primaryLines);
+            const grade        = posted?.over?.compositeGrade ?? null;
+            const isActive     = group.baseKey === activeBase;
+            const cellSignals  = group.bestRow
               ? getSignals({
                   trendGrade:      group.bestRow.trendGrade,
                   regressionGrade: group.bestRow.regressionGrade,
@@ -795,7 +810,6 @@ function TodayPropsSection({
                 ) : (
                   <span className="text-gray-700 leading-none">--</span>
                 )}
-                {/* Small signal indicator dot under grade */}
                 {cellSignals.length > 0 && (
                   <span className={`mt-0.5 text-[8px] leading-none ${
                     hasPositive && !hasNegative ? 'text-green-500'
