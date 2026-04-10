@@ -922,6 +922,9 @@ def fetch_lineups_for_game_date(game_date):
             team    = g.get(side, {})
             tricode = safe_str(team.get("teamAbbreviation"))
             for p in team.get("players", []):
+                player_name = safe_str(p.get("playerName"))
+                if player_name is None:
+                    continue
                 pos    = safe_str(p.get("position"))
                 roster = safe_str(p.get("rosterStatus"))
                 lineup = safe_str(p.get("lineupStatus")) or ""
@@ -938,7 +941,7 @@ def fetch_lineups_for_game_date(game_date):
                     "game_date":      game_date,
                     "home_away":      home_away,
                     "team_tricode":   tricode,
-                    "player_name":    safe_str(p.get("playerName")),
+                    "player_name":    player_name,
                     "position":       pos,
                     "lineup_status":  lineup or None,
                     "roster_status":  roster,
