@@ -27,15 +27,15 @@
 - Auth: common.user_codes, common.user_activations, common.demo_config. PasscodeGate.tsx. /admin page.
 - MLB web layer: game strip + box score tables. MLB ETL backfilled 2023-2026.
 - Schnapp Ops MCP: FastMCP on port 8000, Cloudflare tunnel at https://mcp.schnapp.bet/mcp. 8 tools including shell_exec and read_file.
+- Cron gap fixed: nba-game-day.yml covers 22:00-23:59 UTC with */15 cron entry.
+- NBA odds backfill confirmed complete (Mar 24-Apr 3). Mappings ran — 135 remain unmapped, all inactive, not blocking grading.
 
 **Known issues / pending:**
-- Cron gap: nba-game-day.yml missing coverage for 22:00-23:59 UTC. Add \`*/15 22-23 * * *\` cron entry.
-- NBA odds backfill run 23916639705 — status unknown. If complete, run mappings (mode=mappings sport=nba).
-- compute_patterns.py first run took 17 min (looped batched inserts). Fixed to single executemany call — next run should be under 2 min.
-- PROJECT_REFERENCE.md and CHANGELOG.md not updated after every session — catch up needed.
+- compute_patterns.py first run took 17 min (looped batched inserts). Fixed to single executemany call — verify next nightly run completes under 2 min.
 - VM downsize to B1s_v2 after free trial credits expire.
+- Signal backtest pending re-run in 2-3 weeks once personal pattern grades have accumulated more resolved outcomes.
 
-**Build status:** Green. Last successful deploy: commit 80e34be.
+**Build status:** Green. Last successful deploy: commit 31c0cba.
 
 **Grading pipeline dependency order:**
 1. odds-etl.yml — fetches FanDuel lines
@@ -83,7 +83,7 @@
 ### Active Workflows
 | Workflow | Trigger | Purpose |
 |----------|---------|--------|
-| `nba-game-day.yml` | 09:30 UTC daily + every 30 min 00:00-06:00 UTC | Live scores, odds refresh, grading, lineup poll |
+| `nba-game-day.yml` | 09:30 UTC daily + every 15 min 00:00-06:00 + every 15 min 22:00-23:59 UTC | Live scores, odds refresh, grading, lineup poll |
 | `nba-etl.yml` | Daily UTC 09:00 | Box scores, PT stats, schedule, rosters |
 | `odds-etl.yml` | Daily UTC 10:00 | Today's FanDuel lines |
 | `grading.yml` | After odds-etl succeeds (workflow_run) | Grade today's props |
@@ -92,6 +92,7 @@
 | `refresh-data.yml` | POST /api/refresh-data from web app (admin passcode) | Full refresh: live box + odds + grading + lineups |
 | `restart-flask.yml` | workflow_dispatch | Restart schnapp-flask.service on VM, smoke test /ping |
 | `install-mcp.yml` | workflow_dispatch | Install/update MCP server on VM |
+| `compute-patterns.yml` | Nightly 07:30 UTC + workflow_dispatch | Update player_line_patterns from resolved outcomes |
 
 ### Retired Workflows (dispatch-only)
 `pregame-refresh.yml`, `nba-live.yml`, `lineup-poll.yml` — kept for manual one-off runs only. Do not re-add schedules.
@@ -155,6 +156,12 @@ Full columns: `grade_id`, `grade_date`, `event_id`, `game_id`, `player_id`, `pla
 UNIQUE: `(grade_date, event_id, player_id, market_key, bookmaker_key, line_value, outcome_name)`
 
 **Critical:** `getGrades` reads `dg.outcome_name` and `dg.over_price` DIRECTLY from this table. There is NO join to odds tables for prices. The old `best_price` CTE join was removed because it attached Over prices to Under rows. Do not reintroduce it.
+
+### common.player_line_patterns
+PK: `(player_id, market_key, line_value)`. Columns: `n`, `hr_overall`, `p_hit_after_hit`, `p_hit_after_miss`, `hit_momentum`, `miss_momentum`, `pattern_strength`, `is_momentum_player` (BIT), `is_reversion_player` (BIT), `is_bouncy_player` (BIT), `last_updated`.
+- MIN_GAMES=10 to create a row. MIN_TRANSITION_OBS=3 per state for p_hit_after_hit/p_hit_after_miss.
+- BIT columns: use CAST(col AS INT) in any SUM() — SQL Server does not allow SUM on BIT directly.
+- Updated nightly by compute-patterns.yml.
 
 ---
 
@@ -376,3 +383,4 @@ Column order: PTS, 3PM, REB, AST, STL, BLK, TOV. Matches game log order.
 | Player headshot from CDN, client-side only | No ETL needed. URL pattern is `cdn.nba.com/headshots/nba/latest/260x190/{player_id}.png`. CDN returns silhouette placeholder for missing players — no error handling required. |
 | gameLineupPosition preferred over nba.players.position for matchup defense | Starters get precise PG/SG/SF/PF/C from official NBA lineup JSON. nba.players.position may be compound (G-F) which is less precise for defense bucket matching. |
 | nba.daily_lineups preserves historical data | DELETE only runs for games in the current poll cycle (non-final games). Final game rows persist. Starter/bench split for defense analysis is possible from this table. |
+| SUM(BIT) not allowed in SQL Server | Must CAST BIT columns to INT before aggregating: SUM(CAST(is_momentum_player AS INT)). Applies to all BIT columns in common.player_line_patterns. |
