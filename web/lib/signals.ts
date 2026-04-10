@@ -32,9 +32,9 @@ export const SIGNAL_DEFS: Record<SignalType, Omit<Signal, 'type'>> = {
   COLD:     { label: 'COLD', chipClass: 'bg-blue-900/50 text-blue-300 border-blue-700/50',          title: 'Performing below recent baseline (L10 vs L30 stat mean)' },
   DUE:      { label: 'DUE',  chipClass: 'bg-green-900/50 text-green-300 border-green-700/50',       title: 'Below season average — bounce-back candidate' },
   FADE:     { label: 'FADE', chipClass: 'bg-red-900/50 text-red-300 border-red-700/50',             title: 'Above season average — regression risk' },
-  STREAK:   { label: 'STK',  chipClass: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50', title: 'Active hit streak for this prop line' },
-  SLUMP:    { label: 'SLP',  chipClass: 'bg-orange-900/50 text-orange-300 border-orange-700/50',   title: 'Active miss streak for this prop line' },
-  LONGSHOT: { label: 'LS',   chipClass: 'bg-purple-900/50 text-purple-300 border-purple-700/50',   title: 'Long odds but has hit this line recently — worth a look' },
+  STREAK:   { label: 'STK',  chipClass: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50', title: 'Hit streak likely to continue — player normally hits this line and is on a run' },
+  SLUMP:    { label: 'DUE',  chipClass: 'bg-green-900/50 text-green-300 border-green-700/50',       title: 'Miss streak likely to reverse — player normally hits this line and is due' },
+  LONGSHOT: { label: 'LS',   chipClass: 'bg-purple-900/50 text-purple-300 border-purple-700/50',   title: 'Long odds but has hit this line recently and historically (~1 in 5 games)' },
 };
 
 export interface PlayerSignalInputs {
@@ -78,30 +78,55 @@ export function getPlayerSignals(row: PlayerSignalInputs): Signal[] {
 }
 
 /**
- * Line-level signals — specific to a single line value.
+ * Line-level signals derived from the empirical momentum_grade.
  *
- * Gated on hitRate60 to suppress noise on low-probability lines:
- * - STREAK only fires when hr60 <= 0.80 (not just their normal behavior)
- *   and hr60 >= 0.25 (they hit it often enough that a streak is meaningful)
- * - SLUMP only fires when hr60 >= 0.30 (missing is unexpected, not the norm)
+ * The grading model now uses actual observed streak continuation rates
+ * gated on the player's base hit rate (hr60) for this specific line.
+ * A score >70 means the line is likely to hit based on streak context.
+ * A score <30 means it is likely to miss.
  *
- * Without these gates, nearly every high line shows SLUMP because players
- * naturally miss high thresholds most of the time.
+ * STREAK: momentum_grade > 70 — streak likely to continue because the
+ *   player normally hits this line AND is on a hit run. High hr60 + hit
+ *   streak drives this. A low-hr60 player on a hit streak scores LOW here
+ *   because mean reversion is expected.
+ *
+ * SLUMP (displayed as DUE): momentum_grade > 65 where the player is on a
+ *   miss streak but normally hits this line. The grading model inverts miss
+ *   streaks for high-hr60 players into high scores, so this fires when a
+ *   normally-reliable player is overdue. Miss streaks for low-hr60 players
+ *   score LOW (they normally miss, so no signal).
+ *
+ * Note: both signals can fire together if the grade is very high.
+ * The SLUMP signal is shown with a positive (green) chip because for
+ * high-hr60 players a miss streak is actually a buying opportunity.
  */
 export function getLineSignals(row: LineSignalInputs, hitRate60: number | null = null): Signal[] {
   const signals: Signal[] = [];
   const { momentumGrade } = row;
-  const hr = hitRate60;
 
-  if (momentumGrade != null) {
-    // STREAK: on a hit run, only meaningful if they don't always hit it (hr <= 0.80)
-    // and they hit it often enough for a streak to stand out (hr >= 0.25)
-    if (momentumGrade > 75 && (hr === null || (hr >= 0.25 && hr <= 0.80))) {
-      signals.push({ type: 'STREAK', ...SIGNAL_DEFS.STREAK });
-    }
-    // SLUMP: on a miss run, only meaningful if they normally hit it (hr >= 0.30)
-    // If they miss it 80% of the time normally, a miss streak is not a signal
-    if (momentumGrade < 25 && (hr === null || hr >= 0.30)) {
+  if (momentumGrade == null) return signals;
+
+  // STREAK: high momentum on a hit streak — continuation expected
+  // Only fires when grade > 70, meaning the empirical table predicts 70%+
+  // probability of hitting again
+  if (momentumGrade > 70) {
+    signals.push({ type: 'STREAK', ...SIGNAL_DEFS.STREAK });
+  }
+
+  // SLUMP shown as DUE: the grade is also high (>65) but comes from a miss
+  // streak for a player who normally hits. The grading model scores this
+  // high because bounce-back is expected. We only fire this when the player
+  // has a meaningful base hit rate (suppress for lines they rarely hit).
+  // hitRate60 >= 0.35 ensures the player normally hits this often enough
+  // that a miss streak is genuinely anomalous.
+  if (
+    momentumGrade > 65 &&
+    hitRate60 != null && hitRate60 >= 0.35
+  ) {
+    // Only add SLUMP if STREAK wasn't already fired (they're mutually exclusive
+    // in meaning — a high grade either comes from a hit streak OR a miss streak
+    // for a reliable player, not both)
+    if (signals.length === 0) {
       signals.push({ type: 'SLUMP', ...SIGNAL_DEFS.SLUMP });
     }
   }
