@@ -425,7 +425,6 @@ def fetch_player_patterns(engine, player_ids: list) -> dict:
     return result
 
 
-
 def fetch_under_prices(engine, table="odds.upcoming_player_props", date_filter="", params=None):
     std_mkt_list = ", ".join(f"'{m}'" for m in STANDARD_MARKETS)
     sql = text(
@@ -825,8 +824,6 @@ def precompute_line_grades(season_df, props_df, patterns: dict = None):
     return result
 
 
-
-
 def compute_matchup_grade(market_key, opp_team_id, position, matchup_cache):
     if opp_team_id is None or not position: return None
     rank_col = MARKET_DEF_RANK.get(market_key)
@@ -1090,6 +1087,7 @@ def run_backfill(engine, batch_size, specific_date=None):
             if pg and info.get("opp_team_id"):
                 matchup_pairs.append((int(info["opp_team_id"]), pg))
         matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
+        patterns = fetch_player_patterns(engine, player_ids)
         rows  = grade_props_for_date(engine, gd, props, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns)
         total += upsert_grades(engine, rows)
     log.info(f"Backfill complete. {total} total rows written.")
