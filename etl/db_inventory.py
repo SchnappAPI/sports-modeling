@@ -1,56 +1,54 @@
-import os, subprocess, sys
-out = "/tmp/backfill_check.txt"
-script = """
-import os
-from sqlalchemy import create_engine, text
+import os, pyodbc
 
-conn_str = (
-    f"mssql+pyodbc://{os.environ['AZURE_SQL_USERNAME']}:"
-    f"{os.environ['AZURE_SQL_PASSWORD']}@"
-    f"{os.environ['AZURE_SQL_SERVER']}/"
-    f"{os.environ['AZURE_SQL_DATABASE']}"
-    "?driver=ODBC+Driver+18+for+SQL+Server"
-    "&Encrypt=yes&TrustServerCertificate=no&Connection+Timeout=90"
+CONN_STR = (
+    f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+    f"SERVER={os.environ['AZURE_SQL_SERVER']};"
+    f"DATABASE={os.environ['AZURE_SQL_DATABASE']};"
+    f"UID={os.environ['AZURE_SQL_USERNAME']};"
+    f"PWD={os.environ['AZURE_SQL_PASSWORD']};"
+    "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
 )
-engine = create_engine(conn_str, fast_executemany=False)
+conn = pyodbc.connect(CONN_STR)
+cur = conn.cursor()
 
-with engine.connect() as conn:
-    # Get actual column names for odds.player_props
-    cols = conn.execute(text(\"\"\"
-        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='player_props'
-        ORDER BY ORDINAL_POSITION
-    \"\"\"))
-    print("odds.player_props columns:")
-    for c in cols:
-        print(f"  {c[0]}")
+out = []
+def p(line=""): print(line); out.append(line)
 
-    # Latest entries and date coverage
-    r = conn.execute(text(\"\"\"
-        SELECT TOP 5 COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='player_props'
-          AND COLUMN_NAME LIKE '%date%' OR COLUMN_NAME LIKE '%time%'
-    \"\"\"))
+cur.execute("""
+    SELECT player_id, player_name, team_id, team_tricode, roster_status
+    FROM nba.players WHERE player_name LIKE '%McCollum%'
+""")
+p("=== players ===")
+for r in cur.fetchall(): p(str(r))
 
-    # Check unmapped players
-    r2 = conn.execute(text(\"\"\"
-        SELECT COUNT(*) AS unmapped
-        FROM odds.player_map
-        WHERE sport_key = 'basketball_nba' AND player_id IS NULL
-    \"\"\"))
-    print(f"\\nUnmapped NBA players: {r2.scalar():,}")
+cur.execute("""
+    SELECT COUNT(DISTINCT game_id) AS games, MIN(game_date) AS first, MAX(game_date) AS last
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
+""")
+p("=== pbs game count ===")
+for r in cur.fetchall(): p(str(r))
 
-    # Latest grade date
-    r3 = conn.execute(text(\"\"\"
-        SELECT MAX(grade_date) AS latest, COUNT(DISTINCT grade_date) AS days
-        FROM common.daily_grades WHERE outcome_name = 'Over'
-    \"\"\"))
-    row = r3.fetchone()
-    print(f"Latest grade: {row[0]}  Days graded: {row[1]}")
+cur.execute("""
+    SELECT TOP 5 game_id, CONVERT(VARCHAR(10), game_date, 120) AS game_date, matchup
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
+    ORDER BY game_date DESC
+""")
+p("=== recent pbs rows ===")
+for r in cur.fetchall(): p(str(r))
 
-print("Done.")
-"""
-with open(out, "w") as f:
-    subprocess.run([sys.executable, "-c", script], stdout=f, stderr=subprocess.STDOUT)
-with open(out) as f:
-    print(f.read())
+cur.execute("""
+    SELECT TOP 5 game_id, CONVERT(VARCHAR(10), game_date, 120) AS game_date, matchup
+    FROM nba.player_box_score_stats
+    WHERE player_id IN (SELECT player_id FROM nba.players WHERE player_name LIKE '%McCollum%')
+    ORDER BY game_date ASC
+""")
+p("=== oldest pbs rows ===")
+for r in cur.fetchall(): p(str(r))
+
+conn.close()
+
+with open("/tmp/db_inventory_output.txt", "w") as f:
+    f.write("\n".join(out))
+p("Done.")
