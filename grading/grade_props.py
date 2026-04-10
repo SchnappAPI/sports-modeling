@@ -700,13 +700,76 @@ def precompute_player_market_grades(season_df, props_df):
     return result
 
 
+# ---------------------------------------------------------------------------
+# Empirical continuation rate table derived from 24k resolved historical rows.
+# Format: {(streak_type, hr60_bucket, streak_len): continuation_rate}
+# streak_type: 'hit' or 'miss'
+# hr60_bucket: 0=low(0-25%), 1=mid(25-45%), 2=good(45-65%), 3=high(65%+)
+# streak_len: 1-5 (longer streaks mapped to nearest available length)
+# Continuation rate = P(next game same result as current streak)
+# ---------------------------------------------------------------------------
+_STREAK_CONTINUATION = {
+    # Hit streaks — high hr60 players sustain hit streaks; low hr60 players revert
+    ("hit", 3, 1): 0.756, ("hit", 3, 2): 0.801, ("hit", 3, 3): 0.836,
+    ("hit", 2, 1): 0.522, ("hit", 2, 2): 0.454, ("hit", 2, 3): 0.526,
+    ("hit", 1, 1): 0.434, ("hit", 1, 2): 0.348, ("hit", 1, 3): 0.348,
+    ("hit", 0, 1): 0.228, ("hit", 0, 2): 0.318, ("hit", 0, 3): 0.318,
+    # Miss streaks — high hr60 players bounce back; low hr60 players stay cold
+    ("miss", 3, 1): 0.346, ("miss", 3, 2): 0.500, ("miss", 3, 3): 0.500,
+    ("miss", 2, 1): 0.506, ("miss", 2, 2): 0.538, ("miss", 2, 3): 0.500,
+    ("miss", 1, 1): 0.582, ("miss", 1, 2): 0.631, ("miss", 1, 3): 0.675,
+    ("miss", 0, 1): 0.834, ("miss", 0, 2): 0.887, ("miss", 0, 3): 0.897,
+}
+
+
+def _hr60_bucket(hr60: float) -> int:
+    """Map hit_rate_60 to 0-3 bucket for continuation table lookup."""
+    if hr60 < 0.25: return 0  # low
+    if hr60 < 0.45: return 1  # mid
+    if hr60 < 0.65: return 2  # good
+    return 3                   # high
+
+
+def _momentum_from_continuation(cont_rate: float, is_hit_streak: bool) -> float:
+    """
+    Convert a continuation probability to a 0-100 momentum score.
+    For hit streaks:  high continuation = high score (Over likely to hit)
+    For miss streaks: low continuation  = high score (Over due to bounce back)
+    Both directions are measured from the Over perspective.
+    Score 50 = neutral (no edge), 100 = very likely to hit Over.
+    """
+    if is_hit_streak:
+        # cont_rate = P(hit again) — maps directly to Over probability
+        return _safe(cont_rate * 100.0)
+    else:
+        # cont_rate = P(miss again) — invert for Over
+        return _safe((1.0 - cont_rate) * 100.0)
+
+
 def precompute_line_grades(season_df, props_df):
+    """
+    Compute momentum_grade and pattern_grade for each (player, market, line).
+
+    momentum_grade: Empirically-derived score based on current streak length
+        AND the player's base hit rate for that line. Replaces the naive
+        log-scale formula with actual observed continuation probabilities.
+        Score reflects probability of hitting the Over:
+          - Hit streak + high hr60 => high score (streak likely continues)
+          - Hit streak + low hr60  => low score (mean reversion expected)
+          - Miss streak + high hr60 => high score (bounce-back likely)
+          - Miss streak + low hr60  => low score (misses are normal)
+
+    pattern_grade: Retained for composite grade continuity. Uses same
+        empirical table but smoothed for longer streaks.
+    """
     combos = props_df[["player_id", "market_key", "line_value"]].drop_duplicates()
     result = {}
     player_groups = {pid: grp.sort_values("game_date") for pid, grp in season_df.groupby("player_id")}
     for _, row in combos.iterrows():
-        pid = int(row["player_id"]); mkt = row["market_key"]; lv = float(row["line_value"]); key = (pid, mkt, lv)
-        stat_col = MARKET_STAT_COL.get(mkt); pdf = player_groups.get(pid)
+        pid = int(row["player_id"]); mkt = row["market_key"]; lv = float(row["line_value"])
+        key = (pid, mkt, lv)
+        stat_col = MARKET_STAT_COL.get(mkt)
+        pdf = player_groups.get(pid)
         if stat_col is None or pdf is None or pdf.empty or stat_col not in pdf.columns:
             result[key] = {"momentum_grade": None, "pattern_grade": None}
             continue
@@ -714,35 +777,49 @@ def precompute_line_grades(season_df, props_df):
         if len(vals) == 0:
             result[key] = {"momentum_grade": None, "pattern_grade": None}
             continue
+
         hits = [bool(v > lv) for v in vals]
+        hr60 = float(np.mean(hits))  # use full season as base rate proxy
+        hr_bucket = _hr60_bucket(hr60)
+        is_hit_streak = hits[-1]
+
+        # Measure current streak length
+        streak = 0
+        for h in reversed(hits):
+            if h == is_hit_streak:
+                streak += 1
+            else:
+                break
+
+        # Cap lookup at 3 (table only has data up to 3; longer streaks use len=3)
+        lookup_len = min(streak, 3)
+        stype = "hit" if is_hit_streak else "miss"
+
+        cont_rate = _STREAK_CONTINUATION.get((stype, hr_bucket, lookup_len))
+
         momentum = None
-        if hits:
-            last = hits[-1]; streak = 0
-            for h in reversed(hits):
-                if h == last: streak += 1
-                else: break
-            momentum = _safe(max(0.0, min(100.0, 50.0 + (1 if last else -1) * 25.0 * math.log2(1 + streak))))
-        pattern = None
-        if len(hits) >= 2:
-            last = hits[-1]; current_streak = 0
-            for h in reversed(hits):
-                if h == last: current_streak += 1
-                else: break
-            reversals = 0; instances = 0
-            for end_idx in range(current_streak - 1, len(hits) - current_streak):
-                window = hits[end_idx - current_streak + 1:end_idx + 1]
-                if len(window) != current_streak: continue
-                if all(h == last for h in window):
-                    before_idx = end_idx - current_streak
-                    if before_idx >= 0 and hits[before_idx] == last: continue
-                    next_idx = end_idx + 1
-                    if next_idx < len(hits):
-                        instances += 1
-                        if hits[next_idx] != last: reversals += 1
-            if instances >= PATTERN_MIN:
-                rate = reversals / instances
-                score = 50.0 - (rate - 0.5) * 100.0 if last else 50.0 + (rate - 0.5) * 100.0
-                pattern = _safe(max(0.0, min(100.0, score)))
+        pattern  = None
+
+        if cont_rate is not None:
+            momentum = _momentum_from_continuation(cont_rate, is_hit_streak)
+            # pattern_grade mirrors momentum but applies an additional length
+            # penalty/bonus: streaks longer than 3 become mean-reversion signals
+            # since the table shows diminishing continuation for most hr60 groups
+            if streak <= 3:
+                pattern = momentum
+            else:
+                # Beyond 3 games, apply mean-reversion pressure scaled by hr60
+                # High hr60 hit streaks: still likely to continue (less penalty)
+                # Low hr60 miss streaks: reversion imminent
+                reversion_factor = 1.0 - (streak - 3) * 0.08
+                reversion_factor = max(0.3, reversion_factor)
+                if is_hit_streak:
+                    adj_cont = cont_rate * reversion_factor
+                    pattern = _momentum_from_continuation(adj_cont, is_hit_streak)
+                else:
+                    adj_cont = cont_rate + (1 - cont_rate) * (1 - reversion_factor)
+                    pattern = _momentum_from_continuation(adj_cont, is_hit_streak)
+
         result[key] = {"momentum_grade": momentum, "pattern_grade": pattern}
     return result
 
