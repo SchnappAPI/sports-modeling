@@ -71,6 +71,12 @@ jobs:
           python grading/grade_props.py --mode intraday
           python etl/lineup_poll.py --hours-ahead 6
 
+      - name: Resolve overnight outcomes
+        if: |
+          github.event.schedule == '30 9 * * *' ||
+          github.event.inputs.skip_gate == 'true'
+        run: python grading/grade_props.py --mode outcomes
+
       - name: Dispatch backfill for newly-final games
         if: steps.gate.outputs.has_final == 'true'
         env:
