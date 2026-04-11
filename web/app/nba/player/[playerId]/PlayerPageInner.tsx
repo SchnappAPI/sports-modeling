@@ -974,6 +974,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [showAllStats, setShowAllStats] = useState(false);
   const [vsOppOnly, setVsOppOnly]   = useState(false);
   const [todayGames, setTodayGames] = useState<TodayGame[]>([]);
+  const [liveGameRow, setLiveGameRow] = useState<GameSummary | null>(null);
+  const liveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isFullGame = selectedPeriods.size === 0;
 
@@ -1006,6 +1008,77 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (liveIntervalRef.current) {
+      clearInterval(liveIntervalRef.current);
+      liveIntervalRef.current = null;
+    }
+    if (!playerInfo.teamId || todayGames.length === 0) {
+      setLiveGameRow(null);
+      return;
+    }
+
+    const numericId = parseInt(playerId, 10);
+
+    async function fetchLive() {
+      try {
+        const sbRes = await fetch('/api/scoreboard');
+        if (!sbRes.ok) return;
+        const sbData = await sbRes.json();
+        const sbGames: { gameId: string; gameStatus: number }[] = sbData.games ?? [];
+
+        const todayGameIds = new Set(todayGames.map((g) => g.gameId));
+        const liveGame = sbGames.find((g) => g.gameStatus === 2 && todayGameIds.has(g.gameId));
+
+        if (!liveGame) {
+          setLiveGameRow(null);
+          return;
+        }
+
+        const bsRes = await fetch(`/api/live-boxscore?gameId=${liveGame.gameId}`);
+        if (!bsRes.ok) return;
+        const bsData = await bsRes.json();
+        const players: { playerId: number; pts: number; reb: number; ast: number; stl: number; blk: number; tov: number; min: number; fg3m: number; fg3a?: number; fgm?: number; fga?: number; ftm?: number; fta?: number }[] = bsData.players ?? [];
+
+        const p = players.find((pl) => pl.playerId === numericId);
+        if (!p) {
+          setLiveGameRow(null);
+          return;
+        }
+
+        const meta = todayGames.find((g) => g.gameId === liveGame.gameId)!;
+        const isHome = meta.homeTeamId === playerInfo.teamId;
+        setLiveGameRow({
+          gameId:       liveGame.gameId,
+          gameDate:     todayLocal(),
+          opponentAbbr: isHome ? meta.awayTeamAbbr : meta.homeTeamAbbr,
+          isHome,
+          dnp:          false,
+          started:      null,
+          pts:          p.pts,
+          reb:          p.reb,
+          ast:          p.ast,
+          stl:          p.stl,
+          blk:          p.blk,
+          tov:          p.tov,
+          min:          p.min,
+          fg3m:         p.fg3m,
+          fg3a:         p.fg3a  ?? 0,
+          fgm:          p.fgm   ?? 0,
+          fga:          p.fga   ?? 0,
+          ftm:          p.ftm   ?? 0,
+          fta:          p.fta   ?? 0,
+          potentialAst: null,
+          rebChances:   null,
+        });
+      } catch { /* ignore */ }
+    }
+
+    fetchLive();
+    liveIntervalRef.current = setInterval(fetchLive, 30_000);
+    return () => { if (liveIntervalRef.current) clearInterval(liveIntervalRef.current); };
+  }, [playerInfo.teamId, todayGames, playerId]);
 
   useEffect(() => {
     setLoading(true);
@@ -1135,8 +1208,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
       rows = rows.filter((g) => g.opponentAbbr === oppParam);
     }
 
+    if (liveGameRow && !rows.some((g) => g.gameId === liveGameRow.gameId)) {
+      rows = [liveGameRow, ...rows];
+    }
+
     return rows;
-  }, [summaries, roleFilter, vsOppOnly, oppParam]);
+  }, [summaries, roleFilter, vsOppOnly, oppParam, liveGameRow]);
 
   const splits = useMemo(
     () => computeSplit(summaries, oppParam),

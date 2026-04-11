@@ -367,7 +367,7 @@ export async function getPlayerGames(
          JOIN nba.teams at ON at.team_id = s.away_team_id
          WHERE (s.home_team_id = (SELECT team_id FROM player_team)
              OR s.away_team_id = (SELECT team_id FROM player_team))
-           AND s.game_date <= DATEADD(DAY, 1, CAST(GETUTCDATE() AS DATE))
+           AND s.game_date < CAST(GETUTCDATE() AS DATE)
        ),
        lineup_status AS (
          SELECT dl.game_id,
