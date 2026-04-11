@@ -965,12 +965,21 @@ export default function GradesPageInner() {
                   const rowKey = `${row.gradeId}`;
                   const isExpanded = expandedRowKey === rowKey;
 
-                  const oddsContent = (
+                  const openingPrice = row.overPrice;
+                  const priceChanged  = isLive && displayPrice != null && openingPrice != null && displayPrice !== openingPrice;
+                  const priceDrop     = priceChanged && displayPrice! > openingPrice!; // odds went up = less favorable
+                  const priceRise     = priceChanged && displayPrice! < openingPrice!; // odds went down = more favorable
+
+                  const oddsContent = isLive && displayPrice != null && priceChanged ? (
+                    <span className="inline-flex items-center gap-1">
+                      <span className="text-gray-600 text-xs tabular-nums line-through">{fmtOdds(openingPrice)}</span>
+                      <span className={priceRise ? 'text-green-400' : 'text-yellow-400'}>
+                        {priceRise ? '↓' : '↑'}{fmtOdds(displayPrice)}
+                      </span>
+                    </span>
+                  ) : (
                     <span className={isLive ? 'text-green-400' : oddsColor(displayPrice)}>
                       {fmtOdds(displayPrice)}
-                      {isLive && displayPrice != null && (
-                        <span className="text-gray-600 text-xs ml-0.5">L</span>
-                      )}
                     </span>
                   );
 
@@ -1037,18 +1046,20 @@ export default function GradesPageInner() {
                               href={row.link!}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className={`hover:text-blue-400 transition-colors ${isLive ? 'text-green-400' : oddsColor(displayPrice)}`}
+                              className="hover:text-blue-400 transition-colors"
                               onClick={(e) => e.stopPropagation()}
                             >
-                              {fmtOdds(displayPrice)}
-                              {isLive && displayPrice != null && (
-                                <span className="text-gray-600 text-xs ml-0.5">L</span>
-                              )}
+                              {oddsContent}
                             </a>
                           ) : oddsContent}
                         </td>
 
-                        <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">{impliedProb(displayPrice)}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums text-gray-500 text-xs">
+                          {priceChanged
+                            ? <span title={`Opening: ${impliedProb(openingPrice)}`}>{impliedProb(displayPrice)}</span>
+                            : impliedProb(displayPrice)
+                          }
+                        </td>
                         <td className={`py-1.5 px-2 text-right font-semibold ${gradeColor(row.compositeGrade)}`}>{fmt(row.compositeGrade)}</td>
                         <td className={`py-1.5 px-2 text-right ${gradeColor(row.grade)}`}>{fmt(row.grade)}</td>
                         <td className="py-1.5 px-2 text-right text-gray-300">{fmtPct(row.hitRate20)}</td>
