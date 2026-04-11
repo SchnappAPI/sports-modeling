@@ -345,7 +345,8 @@ export default function GradesPageInner() {
   const [liveEventIds, setLiveEventIds]     = useState<Set<string>>(new Set());
   const [liveGames, setLiveGames]           = useState<LiveGame[]>([]);
   const [liveBoxScores, setLiveBoxScores]   = useState<LiveBoxScores>({});
-  const liveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const liveIntervalRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const liveOddsIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const gradeDate = searchParams.get('date') ?? todayLocal();
   const isToday   = gradeDate === todayLocal();
@@ -357,7 +358,7 @@ export default function GradesPageInner() {
     return Math.max(...prices);
   }, [grades]);
 
-  const fetchLiveData = useCallback(async () => {
+  const fetchLiveOdds = useCallback(async () => {
     try {
       const propsRes = await fetch('/api/live-props');
       if (propsRes.ok) {
@@ -365,6 +366,11 @@ export default function GradesPageInner() {
         setLivePrices(data.prices ?? {});
         setLiveEventIds(new Set(data.liveEventIds ?? []));
       }
+    } catch { /* silently ignore */ }
+  }, []);
+
+  const fetchLiveScores = useCallback(async () => {
+    try {
       const sbRes = await fetch('/api/scoreboard');
       if (sbRes.ok) {
         const sbData = await sbRes.json();
@@ -388,6 +394,10 @@ export default function GradesPageInner() {
       }
     } catch { /* silently ignore */ }
   }, []);
+
+  const fetchLiveData = useCallback(async () => {
+    await Promise.all([fetchLiveOdds(), fetchLiveScores()]);
+  }, [fetchLiveOdds, fetchLiveScores]);
 
   const loadGrades = useCallback(() => {
     setLoading(true);
@@ -420,6 +430,10 @@ export default function GradesPageInner() {
       clearInterval(liveIntervalRef.current);
       liveIntervalRef.current = null;
     }
+    if (liveOddsIntervalRef.current) {
+      clearInterval(liveOddsIntervalRef.current);
+      liveOddsIntervalRef.current = null;
+    }
     if (!isToday) {
       setLivePrices({});
       setLiveEventIds(new Set());
@@ -427,10 +441,15 @@ export default function GradesPageInner() {
       setLiveBoxScores({});
       return;
     }
-    fetchLiveData();
-    liveIntervalRef.current = setInterval(fetchLiveData, 30_000);
-    return () => { if (liveIntervalRef.current) clearInterval(liveIntervalRef.current); };
-  }, [isToday, fetchLiveData]);
+    fetchLiveOdds();
+    fetchLiveScores();
+    liveIntervalRef.current     = setInterval(fetchLiveScores, 30_000);
+    liveOddsIntervalRef.current = setInterval(fetchLiveOdds,   60_000);
+    return () => {
+      if (liveIntervalRef.current)     clearInterval(liveIntervalRef.current);
+      if (liveOddsIntervalRef.current) clearInterval(liveOddsIntervalRef.current);
+    };
+  }, [isToday, fetchLiveOdds, fetchLiveScores]);
 
   useEffect(() => {
     if (grades.length === 0) return;
@@ -461,7 +480,7 @@ export default function GradesPageInner() {
   function handleRefreshComplete() {
     loadGrades();
     setDefenseCache({});
-    if (isToday) fetchLiveData();
+    if (isToday) { fetchLiveOdds(); fetchLiveScores(); }
   }
 
   function getLivePrice(row: GradeRow): number | null | 'live-unavailable' {
