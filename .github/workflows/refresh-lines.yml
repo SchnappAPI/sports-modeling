@@ -2,6 +2,10 @@ name: Refresh Lines
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 17 * * *'   # 12:00 PM ET — midday line check
+    - cron: '0 20 * * *'   # 03:00 PM ET — afternoon line drop
+    - cron: '0 23 * * *'   # 06:00 PM ET — final pre-game refresh
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
