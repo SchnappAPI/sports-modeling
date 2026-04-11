@@ -1,11 +1,13 @@
 'use client';
 
+import React from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import RosterTable from './RosterTable';
 import StatsTable from './StatsTable';
 import BoxScoreTable from './BoxScoreTable';
 import LiveBoxScore from './LiveBoxScore';
 import MatchupGrid from './MatchupGrid';
+import PropMatrix, { type MatrixRow } from './PropMatrix';
 
 interface Props {
   gameId: string;
@@ -17,21 +19,44 @@ interface Props {
   gameStatus: number | null;
 }
 
-type Tab = 'roster' | 'stats' | 'boxscore' | 'live' | 'matchups';
+type Tab = 'roster' | 'stats' | 'boxscore' | 'live' | 'matchups' | 'props';
 
 function getTabs(isLive: boolean): Tab[] {
   return isLive
-    ? ['live', 'roster', 'matchups', 'stats', 'boxscore']
-    : ['roster', 'matchups', 'stats', 'boxscore'];
+    ? ['live', 'roster', 'matchups', 'props', 'stats', 'boxscore']
+    : ['roster', 'matchups', 'props', 'stats', 'boxscore'];
 }
 
 const TAB_LABELS: Record<Tab, string> = {
   live:     'Live',
   roster:   'Roster',
   matchups: 'Matchups',
+  props:    'Props',
   stats:    'Stats',
   boxscore: 'Box Score',
 };
+
+function PropsTab({ gameId, selectedDate }: { gameId: string; selectedDate: string }) {
+  const [rows, setRows]       = React.useState<MatrixRow[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError]     = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setLoading(true);
+    setError(null);
+    fetch(`/api/grades?date=${selectedDate}&gameId=${gameId}`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((data) => setRows(data.grades ?? []))
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [gameId, selectedDate]);
+
+  if (loading) return <div className="px-4 py-6 text-sm text-gray-500">Loading...</div>;
+  if (error)   return <div className="px-4 py-6 text-sm text-red-400">Error: {error}</div>;
+  if (rows.length === 0) return <div className="px-4 py-6 text-sm text-gray-500">No props graded for this game.</div>;
+
+  return <PropMatrix rows={rows} gradeDate={selectedDate} outcomeFilter="Over" />;
+}
 
 export default function GameTabs({
   gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr, selectedDate, gameStatus,
@@ -100,6 +125,9 @@ export default function GameTabs({
           awayTeamAbbr={awayTeamAbbr}
           selectedDate={selectedDate}
         />
+      )}
+      {activeTab === 'props' && (
+        <PropsTab gameId={gameId} selectedDate={selectedDate} />
       )}
       {activeTab === 'boxscore' && (
         <BoxScoreTable
