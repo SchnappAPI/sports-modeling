@@ -677,6 +677,37 @@ def load_pitcher_season_stats(engine, season):
     df = df.dropna(subset=["player_id"])
     truncate_and_load(engine, df, "mlb", "pitcher_season_stats")
 
+
+# ---------------------------------------------------------------------------
+# Today's schedule: upsert scheduled/in-progress games for the current date
+# ---------------------------------------------------------------------------
+
+def load_todays_schedule(engine, team_abbr):
+    """
+    Fetch all regular season games scheduled for today regardless of status
+    and upsert into mlb.games. This ensures the game strip shows today's
+    matchups with start times before any games go Final.
+    """
+    today = date.today().isoformat()
+    log.info("Loading today's schedule for %s", today)
+
+    try:
+        games = statsapi.schedule(start_date=today, end_date=today, sportId=1)
+    except Exception as exc:
+        log.warning("Failed to fetch today's schedule: %s", exc)
+        return
+
+    regular = [g for g in games if g.get("game_type") == "R"]
+    if not regular:
+        log.info("No regular season games found for %s", today)
+        return
+
+    rows = [build_game_row(g, team_abbr, None, None) for g in regular]
+    df = pd.DataFrame(rows).where(pd.notna(pd.DataFrame(rows)), other=None)
+    upsert(engine, df, "mlb", "games", ["game_pk"])
+    log.info("Upserted %d game(s) for today into mlb.games", len(rows))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -696,6 +727,7 @@ def main():
         player_seasons    = [current_season]
 
     team_abbr = load_teams(engine, season=current_season)
+    load_todays_schedule(engine, team_abbr)
     load_players(engine, seasons=player_seasons)
     load_games_and_box_scores(engine, box_score_seasons, team_abbr)
     load_player_season_batting(engine, season=current_season)
