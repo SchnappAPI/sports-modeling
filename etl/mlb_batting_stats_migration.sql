@@ -93,3 +93,7 @@ ALTER TABLE mlb.games ALTER COLUMN game_status VARCHAR(20) NULL;
 
 -- Widen game_status to accommodate full status strings like 'Scheduled', 'In Progress'
 ALTER TABLE mlb.games ALTER COLUMN game_status VARCHAR(20) NULL;
+
+-- Clear bad MLB probe results written against expired historical events
+-- Upcoming mode will use full market list until a valid probe is run
+DELETE FROM odds.market_probe WHERE sport_key = 'baseball_mlb';
