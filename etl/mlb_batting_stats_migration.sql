@@ -90,3 +90,6 @@ IF NOT EXISTS (
 -- Widen game_status to accommodate full status strings like 'Scheduled', 'In Progress'
 -- Original column was too narrow (likely VARCHAR(1) storing only 'F')
 ALTER TABLE mlb.games ALTER COLUMN game_status VARCHAR(20) NULL;
+
+-- Widen game_status to accommodate full status strings like 'Scheduled', 'In Progress'
+ALTER TABLE mlb.games ALTER COLUMN game_status VARCHAR(20) NULL;
