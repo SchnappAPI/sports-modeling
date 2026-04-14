@@ -86,3 +86,7 @@ IF NOT EXISTS (
     WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'batting_stats' AND COLUMN_NAME = 'plate_appearances'
 )
     ALTER TABLE mlb.batting_stats ADD plate_appearances INT NULL;
+
+-- Widen game_status to accommodate full status strings like 'Scheduled', 'In Progress'
+-- Original column was too narrow (likely VARCHAR(1) storing only 'F')
+ALTER TABLE mlb.games ALTER COLUMN game_status VARCHAR(20) NULL;
