@@ -1420,6 +1420,8 @@ MLB_TEAM_NAME_TO_ABBR = {
     "Washington Nationals":    "WSH",
     # Athletics moved to Sacramento in 2025
     "Sacramento Athletics":    "ATH",
+    # Odds API may use bare "Athletics" without city
+    "Athletics":               "ATH",
 }
 
 _MLB_PLAYER_ALIASES: dict[str, str] = {
