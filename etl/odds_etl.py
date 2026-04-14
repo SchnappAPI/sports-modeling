@@ -1800,6 +1800,25 @@ def run_upcoming(sport, api_key, days_ahead, engine):
                 text("SELECT odds_player_name, player_id FROM odds.player_map WHERE sport_key = :sk AND player_id IS NOT NULL"),
                 {"sk": sport_key},
             ).fetchall()}
+    elif sport == "mlb":
+        with engine.connect() as conn:
+            name_to_tc = {r[0]: r[1] for r in conn.execute(
+                text("SELECT odds_team_name, team_tricode FROM odds.team_map WHERE sport_key = :sk"),
+                {"sk": sport_key},
+            ).fetchall()}
+            future_lookup = {(str(r[1]), r[2]): str(r[0]) for r in conn.execute(
+                text("""
+                    SELECT g.game_pk, g.game_date, t.team_abbreviation
+                    FROM mlb.games g
+                    JOIN mlb.teams t ON t.team_id = g.home_team_id
+                    WHERE g.game_date >= :today
+                """),
+                {"today": today_eastern},
+            ).fetchall()}
+            pid_map = {r[0]: r[1] for r in conn.execute(
+                text("SELECT odds_player_name, player_id FROM odds.player_map WHERE sport_key = :sk AND player_id IS NOT NULL"),
+                {"sk": sport_key},
+            ).fetchall()}
     else:
         name_to_tc = future_lookup = pid_map = {}
 
