@@ -1387,15 +1387,197 @@ def _normalize_name(name):
     return re.sub(r"\s+", " ", name).strip()
 
 
+MLB_TEAM_NAME_TO_ABBR = {
+    "Arizona Diamondbacks":    "ARI",
+    "Atlanta Braves":          "ATL",
+    "Baltimore Orioles":       "BAL",
+    "Boston Red Sox":          "BOS",
+    "Chicago Cubs":            "CHC",
+    "Chicago White Sox":       "CWS",
+    "Cincinnati Reds":         "CIN",
+    "Cleveland Guardians":     "CLE",
+    "Colorado Rockies":        "COL",
+    "Detroit Tigers":          "DET",
+    "Houston Astros":          "HOU",
+    "Kansas City Royals":      "KC",
+    "Los Angeles Angels":      "LAA",
+    "Los Angeles Dodgers":     "LAD",
+    "Miami Marlins":           "MIA",
+    "Milwaukee Brewers":       "MIL",
+    "Minnesota Twins":         "MIN",
+    "New York Mets":           "NYM",
+    "New York Yankees":        "NYY",
+    "Oakland Athletics":       "OAK",
+    "Philadelphia Phillies":   "PHI",
+    "Pittsburgh Pirates":      "PIT",
+    "San Diego Padres":        "SD",
+    "San Francisco Giants":    "SF",
+    "Seattle Mariners":        "SEA",
+    "St. Louis Cardinals":     "STL",
+    "Tampa Bay Rays":          "TB",
+    "Texas Rangers":           "TEX",
+    "Toronto Blue Jays":       "TOR",
+    "Washington Nationals":    "WSH",
+    # Athletics moved to Sacramento in 2025
+    "Sacramento Athletics":    "ATH",
+}
+
+_MLB_PLAYER_ALIASES: dict[str, str] = {
+    # Add odds API name -> mlb.players name mismatches here as discovered
+}
+
+
 def run_mappings(sport, engine):
     sport_key = SPORT_KEYS[sport]
     print(f"\n=== Mappings: {sport.upper()} ===")
     if sport == "nba":
         _run_mappings_nba(sport_key, engine)
     elif sport == "mlb":
-        print("  MLB mappings not yet implemented. Skipping.")
+        _run_mappings_mlb(sport_key, engine)
     elif sport == "nfl":
         print("  NFL mappings not yet implemented. Skipping.")
+
+
+def _run_mappings_mlb(sport_key, engine):
+    # --- team_map ---
+    team_rows = [
+        {"odds_team_name": name, "sport_key": sport_key,
+         "team_tricode": abbr, "team_id": None}
+        for name, abbr in MLB_TEAM_NAME_TO_ABBR.items()
+    ]
+    # Populate team_id from mlb.teams using abbreviation match
+    with engine.connect() as conn:
+        db_teams = conn.execute(
+            text("SELECT team_id, team_abbreviation FROM mlb.teams")
+        ).fetchall()
+    abbr_to_id = {abbr: tid for tid, abbr in db_teams}
+    for row in team_rows:
+        row["team_id"] = abbr_to_id.get(row["team_tricode"])
+    upsert(engine, clean_dataframe(pd.DataFrame(team_rows)),
+           schema="odds", table="team_map", keys=["odds_team_name", "sport_key"])
+    print(f"  team_map: {len(team_rows)} rows.")
+
+    # --- player_map ---
+    with engine.connect() as conn:
+        db_players = conn.execute(
+            text("SELECT player_id, player_name FROM mlb.players")
+        ).fetchall()
+    norm_to_pid  = {_normalize_name(n): pid for pid, n in db_players}
+    norm_to_name = {_normalize_name(n): n   for _, n  in db_players}
+
+    with engine.connect() as conn:
+        hist_names = [r[0] for r in conn.execute(
+            text("SELECT DISTINCT player_name FROM odds.player_props WHERE sport_key = :sk"),
+            {"sk": sport_key},
+        ).fetchall() if r[0]]
+        upco_names = [r[0] for r in conn.execute(
+            text("SELECT DISTINCT player_name FROM odds.upcoming_player_props WHERE sport_key = :sk"),
+            {"sk": sport_key},
+        ).fetchall() if r[0]]
+    all_names = list(set(hist_names + upco_names))
+
+    pm_rows = []
+    matched = unmatched = 0
+    for oname in all_names:
+        lookup_name = _MLB_PLAYER_ALIASES.get(oname, oname)
+        norm  = _normalize_name(lookup_name)
+        pid   = norm_to_pid.get(norm)
+        mname = norm_to_name.get(norm)
+        if pid:
+            matched += 1
+        else:
+            unmatched += 1
+            print(f"  [no_match] {oname!r}")
+        pm_rows.append({
+            "odds_player_name": oname,
+            "sport_key":        sport_key,
+            "player_id":        pid,
+            "matched_name":     mname,
+            "match_method":     "exact" if pid else "no_match",
+        })
+    if pm_rows:
+        upsert(engine, clean_dataframe(pd.DataFrame(pm_rows)),
+               schema="odds", table="player_map", keys=["odds_player_name", "sport_key"])
+        print(f"  player_map: {len(pm_rows)} rows ({matched} matched, {unmatched} unmatched).")
+    else:
+        print("  player_map: no odds player names found yet (run upcoming first to populate).")
+
+    # --- event_game_map ---
+    with engine.connect() as conn:
+        all_events = conn.execute(
+            text("""
+                SELECT e.event_id, e.commence_time, e.home_team, e.away_team
+                FROM odds.events e
+                WHERE e.sport_key = :sk
+            """),
+            {"sk": sport_key},
+        ).fetchall()
+
+    if not all_events:
+        print("  event_game_map: no events to map.")
+        return
+
+    with engine.connect() as conn:
+        mlb_games = conn.execute(
+            text("""
+                SELECT g.game_pk, g.game_date, t_home.team_abbreviation, t_away.team_abbreviation
+                FROM mlb.games g
+                JOIN mlb.teams t_home ON t_home.team_id = g.home_team_id
+                JOIN mlb.teams t_away ON t_away.team_id = g.away_team_id
+            """)
+        ).fetchall()
+    # key: (game_date_str, home_abbr) -> game_pk
+    game_lookup = {(str(gdate), habc): gpk for gpk, gdate, habc, _aabc in mlb_games}
+
+    name_to_abbr = {name: abbr for name, abbr in MLB_TEAM_NAME_TO_ABBR.items()}
+
+    egm_rows = []
+    matched = unmatched = 0
+    for eid, ctime, home_name, away_name in all_events:
+        try:
+            ctime_dt = (
+                datetime.fromisoformat(str(ctime).replace("Z", "+00:00"))
+                if isinstance(ctime, str) else ctime
+            )
+            if hasattr(ctime_dt, "tzinfo") and ctime_dt.tzinfo is None:
+                ctime_dt = ctime_dt.replace(tzinfo=timezone.utc)
+            utc_date      = ctime_dt.date() if hasattr(ctime_dt, "date") else None
+            utc_prev_date = (utc_date - timedelta(days=1)) if utc_date else None
+        except Exception:
+            utc_date = utc_prev_date = None
+
+        home_abbr = name_to_abbr.get(home_name)
+        away_abbr = name_to_abbr.get(away_name)
+
+        game_id = None
+        used_date = None
+        if home_abbr:
+            for candidate in [utc_date, utc_prev_date]:
+                if candidate is None:
+                    continue
+                game_id = game_lookup.get((str(candidate), home_abbr))
+                if game_id:
+                    used_date = candidate
+                    break
+
+        if game_id:
+            matched += 1
+        else:
+            unmatched += 1
+
+        egm_rows.append({
+            "event_id":     eid,
+            "sport_key":    sport_key,
+            "game_id":      game_id,
+            "game_date":    str(used_date) if used_date else (str(utc_date) if utc_date else None),
+            "home_tricode": home_abbr,
+            "away_tricode": away_abbr,
+            "match_method": "date_home_tricode" if game_id else "unmatched",
+        })
+
+    upsert(engine, clean_dataframe(pd.DataFrame(egm_rows)),
+           schema="odds", table="event_game_map", keys=["event_id"])
+    print(f"  event_game_map: {len(egm_rows)} rows ({matched} matched, {unmatched} unmatched).")
 
 
 def _run_mappings_nba(sport_key, engine):
