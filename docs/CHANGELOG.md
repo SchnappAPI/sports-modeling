@@ -14,6 +14,8 @@ Historical entries from before the documentation restructure are archived in the
 
 ---
 
+2026-04-20 [shared][docs] Completed /docs/ Step 3: added 16 component README skeletons covering ETL, database, web, and infrastructure across all sports. NBA READMEs reference legacy PROJECT_REFERENCE.md as authoritative until Step 4 content migration.
+
 2026-04-20 [shared][docs] Completed /docs/ Step 2: added PRODUCT_BLUEPRINT, CONNECTIONS, GLOSSARY, ROADMAP. Central /docs/ folder is now complete; component README scaffolding starts in Step 3.
 
 2026-04-20 [shared][docs] Created /docs/ foundation: README router, SESSION_PROTOCOL, CHANGELOG (this file), DECISIONS with ADRs 0001-0004. Legacy PROJECT_REFERENCE.md and root CHANGELOG.md remain in place during migration. See /docs/DECISIONS.md ADR-0001.
