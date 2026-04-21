@@ -230,3 +230,38 @@ Consequences:
 - If a `game_pk` is partially loaded (process killed mid-game), a retry will see that `game_pk` in the destination and skip it — but the partial rows remain. Manual cleanup with `DELETE FROM mlb.play_by_play WHERE game_pk = X` is required before retry. No automatic partial-load detection.
 - The pattern only applies when pre-diffing guarantees no key collisions. Using direct INSERT for a table that might have duplicate keys will raise a PK violation.
 - `fast_executemany=True` for this loader is deliberate. Reverting to `get_engine_slow` would reintroduce the ~10x slowdown without meaningful benefit; `INSERT_DTYPES` already solves the VARCHAR truncation problem that motivates the slow engine elsewhere.
+
+---
+
+## ADR-0014 [nfl][etl][database] NFL uses schema-from-data (pandas inference + self-healing ALTER) instead of hand-written DDL
+Date: 2026-04-20
+
+Context: NBA and MLB tables have column lists defined explicitly — NBA in separate SQL migration files, MLB in row-dict keys inside each loader function. Both require a hand-written column list to be kept in sync with the API response. For NFL, the `nflreadpy` package wraps the nflverse data sources, which evolve season-over-season as new stats appear (new Next Gen Stats fields, new FTN charting columns, etc.). Hand-writing 50+ columns per table for seven tables, then keeping them current with upstream changes, would consume meaningful effort with no clear product benefit.
+
+Decision: `etl/nfl_etl.py` defers schema to pandas + `nflreadpy`. On first run per table, `df.to_sql(if_exists='replace')` creates the table with column types inferred from the dataframe. On subsequent runs, `add_missing_columns()` diffs the dataframe columns against the live table and ALTERs in any new columns using a conservative type map (object → NVARCHAR(500), int64 → BIGINT, float64 → FLOAT, bool → TINYINT, datetime → DATETIME2). Every table gets an implicit `created_at DATETIME2 NOT NULL DEFAULT GETUTCDATE()` audit column on first creation. Upsert keys are hand-specified per loader function and never change; only columns evolve.
+
+Consequences:
+
+- No hand-maintained DDL files for NFL. `/database/nfl/` will never contain .sql schema scripts
+- Adding a column requires zero code changes — the next ETL run picks it up
+- Dropping or renaming a column is not supported by the inference mechanism. Manual intervention is required, which is acceptable because these are rare
+- Column types can be loose (NVARCHAR(500) for anything object-typed). If a stricter type is needed for a specific query, do it at the query layer with CAST
+- First-run behavior differs from NBA/MLB: the first run creates the tables. A completely clean database has no `nfl.*` tables until the ETL has run once successfully
+- This pattern is scoped to NFL. Do not extend it to NBA or MLB without a specific reason — those schemas are stable enough that hand-written DDL is not the friction it is for NFL
+
+---
+
+## ADR-0015 [nfl][etl] Single source: `nflreadpy` package handles schedules, stats, charting, and rosters
+Date: 2026-04-20
+
+Context: NBA and MLB each call their canonical public APIs directly — `stats.nba.com` / `cdn.nba.com` for NBA, `statsapi.mlb.com` for MLB. NFL has no equivalent single official API with prop-research-grade granularity. The nflverse ecosystem (a community-maintained stack of R and Python packages) is the de facto canonical source for NFL data and aggregates from multiple upstream sources (NFL.com, Pro Football Reference, FTN Fantasy, nflverse itself) into a unified schema.
+
+Decision: All NFL ETL data comes from `nflreadpy` (the Python binding to nflverse). Seven tables cover the full ingest: `load_schedules`, `load_players`, `load_player_stats(summary_level='week')`, `load_snap_counts`, `load_ftn_charting`, `load_rosters_weekly`, `load_team_stats(summary_level='week')`. No direct HTTP calls to NFL.com, PFR, FTN, or ESPN. `update_config(cache_mode='off')` is called at the top of every run because GitHub Actions runners have no persistent filesystem.
+
+Consequences:
+
+- NFL ETL depends on a single third-party Python package. If `nflreadpy` breaks or changes its API surface, the ETL breaks
+- The data model is whatever `nflreadpy` exposes. Fields and column names come from the package's contract with nflverse, not from a custom data model
+- Upstream outages (nflverse data lag, FTN unavailability) surface as per-table load failures caught by the fail-soft `run(name, fn)` wrapper. Other tables still load even if one upstream is down
+- Play-by-play data (`nflreadpy.load_pbp`) is available but not currently loaded. Adding it would be a one-function call once a use case justifies it
+- Odds data is NOT in `nflreadpy`. NFL odds would still come from the Odds API via a future `nfl_odds_etl.py` or an extension of the existing `odds_etl.py`
