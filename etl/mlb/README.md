@@ -1,23 +1,23 @@
 # MLB ETL
 
-**STATUS:** partially live. 7 tables loaded nightly from MLB Stats API. 1 pitch-level table populated on demand. 2 derived entities from ADR-0004 remain to be built on top of what exists.
+**STATUS:** partially live. 7 tables loaded nightly from MLB Stats API. 1 pitch-level table populated on demand, plus 1 derived at-bat table materialized in-lockstep. 4 derived entities from ADR-0004 remain.
 
 ## Purpose
 
-Ingest MLB data from the MLB Stats API into Azure SQL. Current scope covers the raw and snapshot tables that downstream derived entities will be built on top of. The 9-entity vision in ADR-0004 describes the end state, not the current state.
+Ingest MLB data from the MLB Stats API into Azure SQL. Current scope covers the raw and snapshot tables plus the first materialized at-bat table that downstream derived entities will be built on top of. The 9-entity vision in ADR-0004 describes the end state; as of 2026-04-21 five of those nine are in place (the eight originally shipped plus `mlb.player_at_bats`).
 
 ## Files
 
 Code:
 
 - `etl/mlb_etl.py` — main nightly ETL. Loads 7 tables in dependency order. Entry point for `mlb-etl.yml`
-- `etl/mlb_play_by_play.py` — on-demand pitch-level loader for `mlb.play_by_play`. Entry point for `mlb-pbp-etl.yml`
+- `etl/mlb_play_by_play.py` — on-demand pitch-level loader for `mlb.play_by_play` + in-lockstep materializer for `mlb.player_at_bats`. Entry point for `mlb-pbp-etl.yml`
 - `etl/mlb_batting_stats_migration.sql` — one-time DDL migration script for the batting stats table shape
 
 Workflows:
 
 - `.github/workflows/mlb-etl.yml` — nightly at 09:00 UTC (03:00 CST / 04:00 CDT). Manual dispatch accepts `backfill=true` to also load 2023-2025 seasons
-- `.github/workflows/mlb-pbp-etl.yml` — workflow_dispatch only. Inputs: `batch` (default 50 games per run), `seasons` (default `2026`)
+- `.github/workflows/mlb-pbp-etl.yml` — workflow_dispatch only. Inputs: `batch` (default 50 games per run), `seasons` (default `2026`), `rebuild_at_bats` (default false; when true, skips PBP fetch and runs only the at-bats materializer against existing PBP data)
 
 Local Power Query archive will be copied to `etl/mlb/_legacy_powerquery/` when available — the source file lives on the corporate machine (`mlbStatQueries.docx`) and has not been committed yet.
 
@@ -75,6 +75,7 @@ Processing:
 3. Diff. Process the oldest N new games (default 50)
 4. For each new game, parse `playEvents` from `/withMetrics`. One row per pitch/pickoff/baserunning event
 5. Flush every 5 games (~3000 rows per write)
+6. After each flush, run the at-bats materializer against the games just written
 
 Write strategy is **direct INSERT via `to_sql(if_exists='append')`**, not the MERGE staging pattern. Because every game in the batch is pre-diffed and guaranteed new, there is nothing to update — direct INSERT is ~10x faster. Uses `get_engine()` with `fast_executemany=True` and explicit `INSERT_DTYPES` for VARCHAR widths (pandas would otherwise infer widths from the first row and right-truncate on longer later rows).
 
@@ -90,6 +91,24 @@ Unique across the full table.
 
 On each run, `ensure_table()` runs a DDL that widens `result_description` and `play_event_description` to `VARCHAR(1000)` if the existing column is narrower. Keeps the schema in sync without a separate migration step.
 
+### At-bats materializer
+
+`load_player_at_bats_for_games(engine, game_pks)` materializes `mlb.player_at_bats` from rows that were just written to `mlb.play_by_play`. Runs inline after each PBP flush, sourced straight from PBP via a SQL SELECT with the filter `is_last_pitch = 1 AND result_event_type IS NOT NULL`.
+
+Diffs against `mlb.player_at_bats.game_pk` (not `mlb.play_by_play.game_pk`), so a partial run that landed PBP rows but failed to land at-bat rows gets the missing games on the next invocation. Same self-healing applies to manual retries after partial failures.
+
+The materializer stores IDs only — no denormalized batter or pitcher names. `mlb.players` is current-season-scoped, so denormalizing names at write time would leave ~30% of historical rows with NULL. Web routes join `mlb.players` at read time instead.
+
+### Rebuild at-bats mode
+
+`python etl/mlb_play_by_play.py --rebuild-at-bats` (or `rebuild_at_bats=true` in the workflow dispatch) skips the PBP fetch loop entirely and runs the materializer against every `game_pk` currently in `mlb.play_by_play`. Used for the initial backfill after the table was introduced, and any future schema change that needs a full rebuild.
+
+Does not delete existing rows. For a full rebuild (rather than gap-fill), `DELETE FROM mlb.player_at_bats` first; the self-heal logic will then re-insert everything.
+
+### Play-by-play table self-heals name columns
+
+`DDL_DROP_NAME_COLUMNS` in `ensure_table()` idempotently drops `batter_name` and `pitcher_name` from `mlb.player_at_bats` if present. These columns were part of an initial denormalized design and got removed the same day (2026-04-21) after the rebuild showed 20-32% NULL rates against historical data.
+
 ### Timezone
 
 `mlb_etl.py` uses `date.today()` for "today's schedule" which is naive local time on the runner (UTC on the VM). `mlb-etl.yml` cron fires at 09:00 UTC = 03:00 CST / 04:00 CDT, early enough that yesterday's games are always Final.
@@ -102,7 +121,9 @@ On each run, `ensure_table()` runs a DDL that widens `result_description` and `p
 - `mlb_play_by_play.py` uses direct INSERT, not MERGE. Relies on pre-diffing against `mlb.play_by_play.game_pk`. If that invariant changes, the write strategy must change too
 - `fetch_schedule_months` stays month-by-month. Single full-season fetches return 503s
 - Today's schedule upsert runs **before** the player load so the strip is populated even on cold-start days
-- Pitch-level play-by-play stays internal to the ETL for now. Web only reads aggregated views of it (`mlb-linescore`, `mlb-atbats`)
+- Pitch-level play-by-play stays internal to the ETL for now. Web only reads aggregated views of it (`mlb-linescore`) or the materialized `mlb.player_at_bats`
+- `mlb.player_at_bats` materialization runs inline in the same script as PBP writes. The at-bats diff runs against `mlb.player_at_bats` (not PBP), so partial runs self-heal. Do not fold the materializer into a separate workflow without preserving the self-heal property
+- `mlb.player_at_bats` stores IDs only. Names get joined at read time. Do not re-add `batter_name` / `pitcher_name` columns — they were removed 2026-04-21 for 20-32% NULL rates on historical data
 
 ## Recent Changes
 
@@ -110,7 +131,7 @@ See `/docs/CHANGELOG.md` filtered by `[mlb][etl]`. Historical entries before the
 
 ## Open Questions
 
-- Whether the 2 remaining derived entities from ADR-0004 (batter-context-per-game, batter-projections, player trend/pattern stats, platoon splits, career batter-vs-pitcher) should be materialized as separate tables or computed in SQL views. Currently none exist
+- Whether the 4 remaining derived entities from ADR-0004 (batter context per game, batter projections, player trend/pattern stats, platoon splits, career batter-vs-pitcher) should be materialized as separate tables or computed in SQL views
 - Whether to fold `mlb_play_by_play.py` into the nightly schedule under a separate cron vs. leave it as on-demand. Cost trade-off depends on runner-minutes load
 - Whether the local Excel Statcast exports (`mlbSavantStatcast-*.xlsx`) should be migrated to the same shape as `mlb.play_by_play` or kept as a parallel Blob-stored dataset. See `/docs/ROADMAP.md`
 - Whether to add a third workflow for intraday score refresh (today's games going Final during the day are not reflected in `mlb.games` until the next nightly run)
