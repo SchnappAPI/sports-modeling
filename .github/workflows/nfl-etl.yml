@@ -1,0 +1,37 @@
+name: NFL ETL
+
+on:
+  schedule:
+    - cron: '0 9 * * 2'   # Tuesday 09:00 UTC, after MNF + nflverse update
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'NFL season year (e.g. 2025). Blank = current season.'
+        required: false
+        default: ''
+        type: string
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  etl:
+    runs-on: [self-hosted, schnapp-runner]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Activate venv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Run NFL ETL
+        run: |
+          if [ -n "${{ github.event.inputs.season }}" ]; then
+            python etl/nfl_etl.py --season ${{ github.event.inputs.season }}
+          else
+            python etl/nfl_etl.py
+          fi
