@@ -326,3 +326,40 @@ Consequences:
 - Partial-run self-healing means a failure between PBP flush and at-bats materialization is automatically recovered on the next PBP workflow run, regardless of whether the next run is rebuild-mode or normal-mode
 - The four remaining ADR-0004 entities (batter context, batter projections, trend/pattern, platoon splits, career BvP) follow this same pattern: direct INSERT, pre-diff against the destination, materialization lives in the ETL script that produces the source data
 - ID-only storage is the right default for any future derived table that needs player references. Denormalizing names only works if the reference table covers the full historical time range, which `mlb.players` does not
+
+---
+
+## ADR-0019 [mlb][etl][database] Second ADR-0004 derived entity: `mlb.career_batter_vs_pitcher` via staged MERGE off `player_at_bats`
+Date: 2026-04-21
+
+Context: ADR-0018 shipped the first of the ADR-0004 derived entities (`mlb.player_at_bats`) and established the in-lockstep-with-PBP-writes materialization pattern. Career batter-vs-pitcher matchup was next in line because it is the data source for the planned VS page (ADR-0003) and its grain, source, and refresh cadence all needed to be decided before any more derived tables were added. Three questions had to be answered jointly: what grain, which source table, and which write strategy.
+
+Three subsidiary decisions within this ADR:
+
+1. **Source is `mlb.player_at_bats`, not `mlb.play_by_play`.** At-bats is already at the right grain with the right filter applied and indexed on `batter_id`. Using PBP directly would re-execute the `is_last_pitch = 1 AND result_event_type IS NOT NULL` filter on every materializer call, duplicating work already done. The cost is a derived-to-derived dependency, but the ordering is mechanical: player_at_bats writes first, career_bvp reads from it, within the same PBP flush cycle. Never the other direction.
+
+2. **Write strategy is staged MERGE, not pre-diffed INSERT** (diverging from ADR-0013 and ADR-0018). Every flush can touch `(batter, pitcher)` pairs that already have rows from prior flushes and need updating. Pre-diffing doesn't apply because the idempotency unit isn't a new key, it's a recomputed aggregate. Incremental path: stage affected pairs, recompute their lifetime counts, MERGE. Rebuild path uses the same MERGE, chunked by batter_id. Note: SQL Server does not support `WHERE (col1, col2) IN (SELECT col1, col2 FROM ...)` tuple-IN syntax; the materializer uses an `#affected_pairs` temp table with INNER JOIN instead.
+
+3. **PK is compound `(batter_id, pitcher_id)`, no synthetic key and no season dimension.** A synthetic `'{batter_id}-{pitcher_id}'` string adds ~40 bytes per row and zero functional value — queries naturally filter on one or both IDs. Lifetime is the entire point of this table; windowed views (last 3 matchups, last 5) get their own materialization when a consumer needs them, rather than inflating this row shape speculatively.
+
+Decision: Create `mlb.career_batter_vs_pitcher` with compound PK `(batter_id, pitcher_id)` clustered, plus `IX_bvp_pitcher` on `(pitcher_id, batter_id)` for the reverse read path. Columns: PA, AB, H, 1B, 2B, 3B, HR, RBI, BB, SO, HBP, SF, TB counts plus AVG/OBP/SLG/OPS rates (pre-computed in the MERGE, stored so the web needs no arithmetic) plus `last_faced_date`. Populate via `load_career_bvp_for_games(engine, game_pks)` called inline in the PBP flush loop after `load_player_at_bats_for_games`. Add `--rebuild-bvp` CLI flag and matching `rebuild_bvp` workflow_dispatch input for full rebuilds, independent of `--rebuild-at-bats`. All counts derive from `result_event_type` via CASE WHEN aggregation; no schema change needed to `mlb.player_at_bats`.
+
+Initial backfill from 384,040 at-bat rows produced 165,550 `(batter, pitcher)` pairs across 806 batters in approximately 6 seconds.
+
+Event-type taxonomy baked into `BVP_AGGREGATE_SELECT`:
+
+- Hits: `single`, `double`, `triple`, `home_run`
+- Walks: `walk`, `intent_walk`
+- Strikeouts: `strikeout`, `strikeout_double_play`
+- HBP: `hit_by_pitch`
+- Sac flies: `sac_fly`, `sac_fly_double_play`
+- AB excludes: walks, intent walks, HBP, sac flies (both variants), sac bunts (both variants), `catcher_interf`
+
+Consequences:
+
+- `mlb.career_batter_vs_pitcher` is the first materialized table in the repo to use staged MERGE because its grain requires updates, not just appends. Future derived tables with the same property (player trend/pattern stats, career pitcher-vs-batter if separated) should use this same pattern rather than reinventing
+- The three-sport shape of ADR-0013's "pre-diffed direct INSERT is always right" is now two-sport: direct INSERT for append-only derivations (play_by_play, player_at_bats), staged MERGE for aggregate derivations (career_batter_vs_pitcher). The decision rule is whether a key can need an update after initial write
+- The `(batter_id, pitcher_id) IN (SELECT ...)` tuple-IN anti-pattern caught in the first commit of this change should be remembered. SQL Server needs the staged temp-table + JOIN pattern instead. Worth listing in `/docs/skills/session-protocol.md` mechanical guardrails if it recurs
+- The `rebuild_bvp` and `rebuild_at_bats` workflow flags are independent and compose: setting both runs at-bats first (populating the source), then bvp (aggregating from the source). This ordering is encoded in `main()` and should not be reversed
+- The four remaining ADR-0004 entities (batter context per game, batter projections per game, player trend/pattern stats, player platoon splits) reduce to three after this ADR lands. Player trend/pattern stats likely also want staged MERGE (rolling windows change as new games land); batter context and projections likely fit the append-only player_at_bats model (one row per batter per game). Platoon splits are a structural variant of career_batter_vs_pitcher and should share its write strategy
+- Ratios are stored pre-computed in the permanent table. If a bug in the ratio math is ever found, the fix requires a full rebuild via `--rebuild-bvp` after a DELETE. No view layer abstracts this away. That is an intentional trade: the web reads are dumb and fast
