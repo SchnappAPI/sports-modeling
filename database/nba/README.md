@@ -8,7 +8,7 @@ The `nba` schema holds player, team, game, box score, lineup, and grade-input da
 
 ## Files
 
-DDL is defined inline in the NBA ETL scripts (`etl/nba_etl.py`, `etl/odds_etl.py`, etc.). A current table inventory is produced via `etl/db_inventory.py`, triggered by `db_inventory.yml`. The workflow writes output to `/tmp/db_inventory_output.txt` on the VM; read it back with `shell_exec cat` through Schnapp Ops MCP.
+DDL is defined inline in the NBA ETL scripts (`etl/nba_etl.py`, `etl/odds_etl.py`, etc.) and in `grading/grade_props.py` (`ensure_tables`). A current table inventory is produced via `etl/db_inventory.py`, triggered by `db_inventory.yml`. The workflow writes output to `/tmp/db_inventory_output.txt` on the VM; read it back with `shell_exec cat` through Schnapp Ops MCP.
 
 ## Key Concepts
 
@@ -48,11 +48,21 @@ NBA odds backfill range complete Mar 24 - Apr 3, 2026 as of the 2026-04-02 refer
 
 ### `common.daily_grades` (schema v3, migrated 2026-04-02)
 
-Columns: `grade_id`, `grade_date`, `event_id`, `game_id`, `player_id`, `player_name`, `market_key`, `bookmaker_key`, `line_value`, `outcome_name VARCHAR(5)` (`'Over'` / `'Under'`), `over_price INT` (direction-appropriate price), `hit_rate_60`, `hit_rate_20`, `sample_size_60`, `sample_size_20`, `weighted_hit_rate`, `grade`, `trend_grade`, `momentum_grade`, `pattern_grade`, `matchup_grade`, `regression_grade`, `composite_grade`, `hit_rate_opp`, `sample_size_opp`, `created_at`.
+Defined in `grading/grade_props.py:ensure_tables`. Full column list:
 
-UNIQUE key: `(grade_date, event_id, player_id, market_key, bookmaker_key, line_value, outcome_name)`.
+- Identity: `grade_id INT IDENTITY`, `grade_date DATE`, `event_id VARCHAR(50)`, `game_id VARCHAR(15) NULL`, `player_id BIGINT NULL`, `player_name NVARCHAR(100)`
+- Market: `market_key VARCHAR(100)`, `bookmaker_key VARCHAR(50)`, `line_value DECIMAL(6,1)`, `outcome_name VARCHAR(5) DEFAULT 'Over'` (`'Over'` / `'Under'`), `over_price INT NULL` (direction-appropriate price, name kept for migration simplicity)
+- Hit rates: `hit_rate_60 FLOAT`, `hit_rate_20 FLOAT`, `sample_size_60 INT`, `sample_size_20 INT`, `weighted_hit_rate FLOAT`, `grade FLOAT`
+- Component grades: `trend_grade FLOAT`, `momentum_grade FLOAT`, `pattern_grade FLOAT`, `matchup_grade FLOAT`, `regression_grade FLOAT`, `composite_grade FLOAT`
+- Opponent: `hit_rate_opp FLOAT`, `sample_size_opp INT`
+- Resolution: `outcome VARCHAR(5) NULL` (`'Won'` / `'Lost'` / `NULL`). Populated by `grade_props.py --mode outcomes` as a pure SQL `UPDATE` after games go Final (`nba.schedule.game_status = 3`)
+- Audit: `created_at DATETIME2 DEFAULT GETUTCDATE()`
 
-`grade_props.py` writes both Over and Under rows for standard markets. Alternate lines remain Over-only.
+UNIQUE key: `uq_daily_grades_v3` on `(grade_date, event_id, player_id, market_key, bookmaker_key, line_value, outcome_name)`.
+
+Writes follow a staging + `MERGE` pattern (temp table `#stage_grades`, then `MERGE common.daily_grades AS t USING #stage_grades AS s`). Source rows are deduplicated in Python before staging to avoid error 8672.
+
+`grade_props.py` writes both Over and Under rows for standard markets. Alternate lines remain Over-only. Standard markets also bracket-expand (5 lines each side of the posted line at 1.0 increments); `drop_bracket_lines_covered_by_alts` removes overlaps before grading.
 
 `getGrades` reads `dg.outcome_name` and `dg.over_price` directly from this table. There is no join to `odds` for prices. The removed `best_price` CTE attached Over prices to Under rows; do not reintroduce.
 
@@ -78,7 +88,7 @@ Rules:
 
 Server: `sports-modeling-server.database.windows.net`, DB `sports-modeling`, user `sqladmin`. Tier `GP_S_Gen5_2` Serverless. Auto-pauses; first connection after pause 20-60s cold start. Free offer applied so the auto-pause delay cannot be changed. Firewall allows `0.0.0.0 - 255.255.255.255` plus Allow Azure Services (required for GitHub Actions runners).
 
-Connections use SQLAlchemy + pyodbc with ODBC Driver 18. ETL uses `fast_executemany=True`. Grading engine has its own engine instance with `fast_executemany=False` to prevent NVARCHAR(MAX) truncation. Retry logic: 3 attempts with 45s waits.
+Connections use SQLAlchemy + pyodbc with ODBC Driver 18. ETL uses `fast_executemany=True`. Grading engine has its own engine instance with `fast_executemany=False` to prevent NVARCHAR(MAX) truncation. Retry logic in `grading/grade_props.py:get_engine`: 3 attempts with 60s waits.
 
 Uptime Robot pings `https://schnapp.bet/api/ping` every 30 min to keep the DB from cold-starting during active hours. `keepalive.yml` is dispatch-only.
 
@@ -90,7 +100,7 @@ Do not revert without an ADR.
 - `nba.schedule` is the canonical game list. `nba.games` holds only finals
 - `nba.games` filter uses `game_date <= today`, not `< today`. Today's finals must enter `nba.games` so FK allows same-day box-score writes
 - `nba.daily_lineups` is keyed by `player_name` + `team_tricode`. Positions for starters are full strings (PG, SG, SF, PF, C). Historical rows preserved
-- `common.daily_grades` UNIQUE key includes `outcome_name`
+- `common.daily_grades` UNIQUE key includes `outcome_name`. `outcome` column is populated by `grade_props.py --mode outcomes`, not by the upcoming/intraday grading paths
 - `getGrades` reads `outcome_name` and `over_price` directly from `common.daily_grades`. Never join odds for prices
 - `common.player_line_patterns` updated nightly by `compute-patterns.yml` at 07:30 UTC
 - `BIT` columns require `CAST(col AS INT)` before `SUM()`
