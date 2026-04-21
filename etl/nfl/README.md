@@ -1,6 +1,6 @@
 # NFL ETL
 
-**STATUS:** code complete, not yet automated. `etl/nfl_etl.py` is a full 7-table ETL script ready to run. No workflow has been created and the script has never been executed against production, so no `nfl.*` tables exist in the database yet.
+**STATUS:** live. `etl/nfl_etl.py` is a full 7-table ETL automated via `.github/workflows/nfl-etl.yml`, which runs Tuesday 09:00 UTC (after Monday Night Football, after nflverse updates) and supports `workflow_dispatch` with an optional `season` input. First production run completed 2026-04-21 for season 2025 with all 7 tables green.
 
 ## Purpose
 
@@ -9,10 +9,17 @@ Ingest NFL data from `nflreadpy` (the nflverse Python wrapper) into Azure SQL. S
 ## Files
 
 - `etl/nfl_etl.py` — complete 14 KB ETL script. Seven loader functions, one upsert helper, one clean_df helper
-
-No workflow exists. To run this in production, `nfl-etl.yml` still needs to be written and committed to `.github/workflows/`.
+- `.github/workflows/nfl-etl.yml` — scheduled + manually dispatchable workflow. Runs on `[self-hosted, schnapp-runner]` with `$HOME/venv/bin` prepended to `GITHUB_PATH`. Passes `--season` only when the workflow_dispatch input is non-empty; otherwise the script picks the current season itself
 
 No sub-scripts exist for play-by-play, live scores, or intraday updates. All data comes from the one `nflreadpy` package.
+
+## Runtime Dependencies
+
+Installed on the runner venv at `/home/schnapp-admin/venv`:
+- `nflreadpy` (0.1.5 at first run) — the nflverse wrapper
+- `pyarrow` (23.0.1 at first run) — required by `polars.to_pandas()` for zero-copy conversion. Not pulled transitively by `nflreadpy`; must be installed explicitly
+
+Both were added after the first two workflow runs failed on missing imports. Other ETL scripts already use `pandas`, `sqlalchemy`, and `pyodbc` from the same venv.
 
 ## Key Concepts
 
@@ -33,6 +40,8 @@ No sub-scripts exist for play-by-play, live scores, or intraday updates. All dat
 `nfl_etl.py:upsert()` checks `table_exists` first. If the table is missing, it runs `df.to_sql(if_exists='replace')` which lets pandas infer SQL column types from the dataframe, then ALTERs the table to add a `created_at DATETIME2 NOT NULL DEFAULT GETUTCDATE()` audit column. This is the only time `created_at` is touched; re-runs never overwrite it.
 
 If the table exists, the script runs `add_missing_columns()` which diffs the dataframe columns against the live table and ALTERs in any new columns via a conservative type map (object → NVARCHAR(500), int64 → BIGINT, float64 → FLOAT, bool → TINYINT, datetime → DATETIME2). Unknown dtypes fall back to NVARCHAR(500). Then MERGE runs normally.
+
+**Known edge case:** if a table was created from an earlier incomplete dataset (for example, columns that were all-null back then inferred as FLOAT, but now carry string values), the MERGE will fail with `Error converting data type varchar to float` (SQL 8114). Fix: drop the affected table so the next run recreates it from current data. This hit `nfl.player_game_stats` and `nfl.team_game_stats` on first automated run; both were dropped and rebuilt cleanly. The 5 other tables were not affected.
 
 ### `clean_df()` global cleanup
 
@@ -56,7 +65,7 @@ Each loader function does minimal table-specific work before calling `clean_df()
 
 ### Season selection
 
-`current_nfl_season()` returns the current year if month >= June, else last year. This accounts for the NFL league year running Feb-Feb but fantasy/stat seasons aligning with the calendar year from September. `--season YYYY` overrides.
+`current_nfl_season()` returns the current year if month >= June, else last year. Uses `datetime.now(timezone.utc)` (not the deprecated `datetime.utcnow()`). This accounts for the NFL league year running Feb-Feb but fantasy/stat seasons aligning with the calendar year from September. `--season YYYY` overrides.
 
 ### Local engine factory, not shared
 
@@ -79,6 +88,7 @@ Each table load runs inside a `run(name, fn)` wrapper that catches all exception
 - `clean_df()` runs on every dataframe. Do not bypass it per-table
 - All loads are idempotent via MERGE with per-table upsert keys. Re-running is always safe
 - `nfl_etl.py` is the only script in the NFL ETL today. Do not fold it into `nba_etl.py` or `mlb_etl.py`; the data model is different enough that a separate process makes sense
+- `nflreadpy` and `pyarrow` must both be installed in the runner venv. `pyarrow` is not a transitive dependency; install it explicitly if the venv is ever rebuilt
 
 ## Recent Changes
 
@@ -86,9 +96,9 @@ See `/docs/CHANGELOG.md` filtered by `[nfl][etl]`. Historical entries before the
 
 ## Open Questions
 
-- **No workflow exists.** To move NFL to production, create `.github/workflows/nfl-etl.yml` with schedule + workflow_dispatch. Tuesday morning after the last Monday Night Football game would line up with the `nflreadpy` update cycle
 - Whether NFL needs pattern-grading infrastructure analogous to `common.player_line_patterns` for NBA. NFL props are weekly (not per-game daily), so sample sizes per line are much smaller
 - Whether `nfl.player_game_stats` is granular enough for the product vision or whether play-by-play (`nflreadpy.load_pbp`) is also needed. The 7 tables here cover the standard fantasy/prop research surface; pitch-level-equivalent data is a separate add-on
 - Whether the local `get_engine()` should be replaced with an import from `etl/db.py` to align with NBA and MLB. Low priority until the second NFL script exists
 - Whether to add `nfl-odds-etl.py` (analogous to `odds_etl.py` for NBA) or to extend the existing Odds API loader with NFL sport keys. `odds_etl.py` does mention NFL — that path has not been verified
+- The `nfl` schema also contains `seasons`, `teams`, and `pff_*` tables from prior unrelated work. These are not touched by `nfl_etl.py`. Worth deciding whether they stay, get migrated into the nflreadpy pipeline, or get removed
 - Web surface is not started. See `/web/nfl/README.md`
