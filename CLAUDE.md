@@ -74,13 +74,25 @@ Before asking the user where something is, search the repo. `grep -r "term" .` i
 
 `git log -n 5 -- <file>` before editing any file you did not create in the current session. Recent commits may reveal intentional decisions that should not be reverted.
 
+## Where to run which workload
+
+Two Claude surfaces touch this repo: claude.ai chat and Claude Code. They have different speed profiles because they have different write primitives.
+
+**Claude Code (Mac or Windows laptop, local filesystem):** fast. Edits use `str_replace` or `edit_block` on the local file, which patches only the changed region. `git commit` and `git push` are single local operations. Multi-file commits are free. `npm run build` and `tsc --noEmit` run inline before pushing. This is the right surface for any session that edits multiple files or ends with a CHANGELOG append.
+
+**claude.ai chat (GitHub MCP):** slower for file edits. The only write primitive is the GitHub Contents API, which requires a full-file upload per change. A one-line CHANGELOG append re-uploads the entire file (~19 KB today, growing). Acceptable for single-file one-off work, design discussion, research, and planning. Not acceptable as the default editing path.
+
+**Dispatch pattern:** when a claude.ai chat session produces work that should execute on Claude Code, end the turn with a clearly-labeled "Claude Code prompt" block the user can paste into a Claude Code session on the Mac. The prompt should be self-contained: files to touch, exact `str_replace` patches or new content, the CHANGELOG entry text, and the commit message. Do not commit from claude.ai in this flow. The prompt is the handoff.
+
+Rule of thumb: if the change is one file and under a few hundred bytes, claude.ai commit is fine. If it involves multiple files, a CHANGELOG entry plus code, or any iteration-prone edit, produce a Claude Code prompt instead.
+
 ## Host-specific context
 
 This repo works from multiple machines. Some capabilities differ by host.
 
 **Windows laptop (primary):** full stack available. Power BI MCP works here (connects to Power BI Desktop's local Analysis Services). ThreatLocker blocks local Python but allows Node, git, npm.
 
-**MacBook Pro (always-on home machine):** full Node/git/npm stack. No Power BI MCP (Power BI Desktop is Windows-only). Primary purpose is serving Claude Code via Remote Control and Cowork via Dispatch when the user is away from the Windows laptop.
+**MacBook Pro (always-on home machine):** full Node/git/npm stack. No Power BI MCP (Power BI Desktop is Windows-only). Primary purpose is serving Claude Code via Remote Control and Cowork via Dispatch when the user is away from the Windows laptop. Default Claude Code host for repo edits because it is always on.
 
 **Azure VM (schnapp-runner-2):** Ubuntu 24.04, Python venv at `/home/schnapp-admin/venv/`, not used as a Claude Code host. Used for self-hosted GitHub Actions runs and the Flask live service.
 
@@ -89,7 +101,7 @@ If a task mentions Power BI, verify the session is on the Windows laptop before 
 ## MCPs expected in this environment
 
 - `schnapp-ops`: remote HTTP, bearer token auth. Tools include `flask_status`, `flask_restart`, `live_scoreboard`, `live_boxscore`, `workflow_status`, `workflow_trigger`, `shell_exec`, `read_file`. The `shell_exec` tool executes on the Azure VM, not the local machine.
-- `github`: remote HTTP, GitHub PAT auth. Used for workflow triggering, log reading, and PR operations that local `git` does not cover.
+- `github`: remote HTTP, GitHub PAT auth. Used for workflow triggering, log reading, and PR operations that local `git` does not cover. Not the preferred path for file edits when Claude Code is available.
 - `powerbi-modeling`: Windows-only, local stdio. Only expected on the Windows laptop. For any Power BI task, call `connection_operations` with `ListLocalInstances`, then `Connect` using the connection string for the instance whose `parentWindowTitle` matches the active model.
 
 If an MCP is missing when a task needs it, state which host is required and let the user decide whether to switch machines.
@@ -118,6 +130,7 @@ Odds API key and other credentials in `/docs/CONNECTIONS.md`. Do not hardcode cr
 - Suggest running Python locally on the corporate Windows machines.
 - Run destructive commands (`rm -rf`, `git reset --hard`, `DROP TABLE`) without explicit user confirmation in the same turn.
 - Override an invariant listed in a component README without adding a superseding ADR to `/docs/DECISIONS.md`.
+- Default to claude.ai GitHub MCP for multi-file or CHANGELOG-bearing edits. Produce a Claude Code prompt instead.
 
 ## What to do when uncertain
 
