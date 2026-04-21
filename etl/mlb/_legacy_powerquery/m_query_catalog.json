@@ -1,0 +1,554 @@
+[
+  {
+    "name": "statSplits",
+    "start": 1,
+    "end": 110,
+    "size_lines": 109,
+    "urls": [
+      "https://statsapi.mlb.com/api/v1/people/682829/stats?stats=statSplits&group=hitting&gameType=R&sitCodes=h,a,d,n,dmo,dtu,dwe,dth,dfr,dsa,dsu,vl,vr,b1,b2,b3,b4,b5,b6,b7,b8,b9&hydrate=stats"
+    ],
+    "num_columns_declared": 36,
+    "sample_columns": ["splitID", "splitName", "playerID", "gamesPlayed", "groundOuts", "airOuts", "runs", "doubles", "triples", "homeRuns", "strikeOuts", "baseOnBalls", "intentionalWalks", "hits", "hitByPitch", "avg", "atBats", "obp", "slg", "ops", "caughtStealing", "stolenBases", "stolenBasePercentage", "groundIntoDoublePlay", "groundIntoTriplePlay", "numberOfPitches", "plateAppearances", "totalBases", "rbi", "leftOnBase"]
+  },
+  {
+    "name": "sprayChart",
+    "start": 110,
+    "end": 116,
+    "size_lines": 6,
+    "urls": ["https://statsapi.mlb.com/api/v1/people/682829/stats?stats=sprayChart&group=hitting&language=en"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "vsTeam",
+    "start": 116,
+    "end": 123,
+    "size_lines": 7,
+    "urls": ["https://statsapi.mlb.com/api/v1/people/682829/stats?stats=vsTeam&group=hitting&opposingTeamId=114&language=en"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "opponentsFaced",
+    "start": 123,
+    "end": 136,
+    "size_lines": 13,
+    "urls": ["https://statsapi.mlb.com/api/v1/people/682829/stats?stats=opponentsFaced&group=hitting&hydrate=team&season=2025&language=en"],
+    "num_columns_declared": 5,
+    "sample_columns": ["playerID", "playerName", "pitcherID", "pitcherName", "vsTeamID"]
+  },
+  {
+    "name": "roster_vsTeam",
+    "start": 136,
+    "end": 150,
+    "size_lines": 14,
+    "urls": ["http://statsapi.mlb.com/api/v1/teams/111/roster?rosterType=active&hydrate=person(stats(group=hitting,type=vsTeam,opposingTeamId=114,season=2025))"],
+    "num_columns_declared": 2,
+    "sample_columns": ["playerID", "playerName"]
+  },
+  {
+    "name": "statSplits_v2",
+    "start": 150,
+    "end": 268,
+    "size_lines": 118,
+    "urls": ["https://statsapi.mlb.com/api/v1/people/682829/stats?stats=vsTeam&group=hitting&gameType=R&opposingTeamId=114&hydrate=stats"],
+    "num_columns_declared": 38,
+    "sample_columns": ["season", "playerID", "teamID", "vsPitcherID", "vsTeamID", "gamesPlayed", "groundOuts", "airOuts", "runs", "doubles", "triples", "homeRuns", "strikeOuts", "baseOnBalls", "intentionalWalks", "hits", "hitByPitch", "avg", "atBats", "obp", "slg", "ops", "caughtStealing", "stolenBases", "stolenBasePercentage", "groundIntoDoublePlay", "groundIntoTriplePlay", "numberOfPitches", "plateAppearances", "totalBases"]
+  },
+  {
+    "name": "hotColdZones",
+    "start": 268,
+    "end": 281,
+    "size_lines": 13,
+    "urls": ["https://statsapi.mlb.com/api/v1/people/682829/stats?stats=hotColdZones&group=hitting&language=en"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "positions",
+    "start": 281,
+    "end": 290,
+    "size_lines": 9,
+    "urls": ["https://statsapi.mlb.com/api/v1/positions"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "gameStatus",
+    "start": 290,
+    "end": 366,
+    "size_lines": 76,
+    "urls": ["https://statsapi.mlb.com/api/v1/gameStatus"],
+    "num_columns_declared": 6,
+    "sample_columns": ["StatusID", "Detailed", "Abstract", "reason", "codedGameState", "abstractGameCode"]
+  },
+  {
+    "name": "statGroups",
+    "start": 366,
+    "end": 374,
+    "size_lines": 8,
+    "urls": ["https://statsapi.mlb.com/api/v1/statGroups"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "statTypes",
+    "start": 374,
+    "end": 383,
+    "size_lines": 9,
+    "urls": ["https://statsapi.mlb.com/api/v1/statTypes"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "situationCodes",
+    "start": 383,
+    "end": 407,
+    "size_lines": 24,
+    "urls": ["https://statsapi.mlb.com/api/v1/situationCodes"],
+    "num_columns_declared": 9,
+    "sample_columns": ["code", "sortOrder", "navigationMenu", "category", "description", "team", "batting", "fielding", "pitching"]
+  },
+  {
+    "name": "baseballStats",
+    "start": 407,
+    "end": 428,
+    "size_lines": 21,
+    "urls": ["https://statsapi.mlb.com/api/v1/baseballStats", "https://statsapi.mlb.com/api/v1/lookup/values/all"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "config",
+    "start": 428,
+    "end": 434,
+    "size_lines": 6,
+    "urls": ["https://statsapi.mlb.com/api/v1/stats/search/config"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "eventTypes",
+    "start": 434,
+    "end": 454,
+    "size_lines": 20,
+    "urls": ["https://statsapi.mlb.com/api/v1/eventTypes"],
+    "num_columns_declared": 5,
+    "sample_columns": ["eventType", "event", "isPlateAppearance", "isBaseHit", "baseRunningEvent"]
+  },
+  {
+    "name": "pitchCodes",
+    "start": 454,
+    "end": 482,
+    "size_lines": 28,
+    "urls": ["https://statsapi.mlb.com/api/v1/pitchCodes"],
+    "num_columns_declared": 12,
+    "sample_columns": ["sortOrder", "pitchResultCode", "pitchResultText", "pitchResultDescription", "strikeStatus", "ballStatus", "pitchStatus", "contactStatus", "buntAttemptStatus", "swingStatus", "swingMissStatus", "swingContactStatus"]
+  },
+  {
+    "name": "stats",
+    "start": 482,
+    "end": 488,
+    "size_lines": 6,
+    "urls": ["https://statsapi.mlb.com/api/v1/stats/search/stats"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "pitchTypes",
+    "start": 488,
+    "end": 499,
+    "size_lines": 11,
+    "urls": ["https://statsapi.mlb.com/api/v1/lookup/values/all"],
+    "num_columns_declared": 2,
+    "sample_columns": ["pitchTypeID", "pitchTypeName"]
+  },
+  {
+    "name": "statsTable",
+    "start": 499,
+    "end": 529,
+    "size_lines": 30,
+    "urls": ["https://statsapi.mlb.com/api/v1/stats/search/stats"],
+    "num_columns_declared": 20,
+    "sample_columns": ["statID", "description", "sortStat", "decimals", "units", "aggregation", "statGroup", "isCounting", "isInstanceStat", "pitchLevel", "atBatLevel", "inningLevel", "gameLevel", "seasonLevel", "careerLevel", "standardField", "advancedField", "trackingField", "expectedField", "sortOrder"]
+  },
+  {
+    "name": "situationCodesConfig",
+    "start": 529,
+    "end": 549,
+    "size_lines": 20,
+    "urls": ["https://statsapi.mlb.com/api/v1/stats/search/config"],
+    "num_columns_declared": 9,
+    "sample_columns": ["code", "navigationMenu", "category", "description", "hitting", "pitching", "fielding", "catching", "running"]
+  },
+  {
+    "name": "parametersConfig",
+    "start": 549,
+    "end": 569,
+    "size_lines": 20,
+    "urls": ["https://statsapi.mlb.com/api/v1/stats/search/config"],
+    "num_columns_declared": 7,
+    "sample_columns": ["code", "filterLevel", "hitting", "pitching", "fielding", "catching", "running"]
+  },
+  {
+    "name": "stats_v2",
+    "start": 569,
+    "end": 576,
+    "size_lines": 7,
+    "urls": ["https://statsapi.mlb.com/api/v1/lookup/values/all"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "gameID_param",
+    "start": 576,
+    "end": 579,
+    "size_lines": 3,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "MLB_withMetrics_BoxScoreHitting_Game",
+    "start": 579,
+    "end": 741,
+    "size_lines": 162,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 54,
+    "sample_columns": ["playerID", "positionID", "battingOrder", "gamesPlayed", "plateAppearances", "atBats", "hits", "doubles", "triples", "homeRuns", "totalBases", "strikeouts", "walks", "runs", "rbi", "intentionalWalks", "hitByPitch", "stolenBases", "leftOnBase", "sacBunts", "sacFlies", "flyOuts", "groundOuts", "airOuts", "popOuts", "lineOuts", "atBatsPerHomeRun"]
+  },
+  {
+    "name": "MLB_withMetrics_BoxScoreHitting_Season",
+    "start": 741,
+    "end": 927,
+    "size_lines": 186,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 64,
+    "sample_columns": ["playerID", "positionID", "gamesPlayed", "plateAppearances", "atBats", "hits", "doubles", "triples", "homeRuns", "totalBases", "strikeouts", "walks", "runs", "rbi", "intentionalWalks", "hitByPitch", "stolenBases", "leftOnBase", "sacBunts", "sacFlies", "flyOuts", "groundOuts", "airOuts", "popOuts", "lineOuts", "atBatsPerHomeRun", "avg", "obp", "slg", "ops"]
+  },
+  {
+    "name": "MLB_withMetrics_BoxScorePitching_Game",
+    "start": 927,
+    "end": 1158,
+    "size_lines": 231,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 96,
+    "sample_columns": ["playerID", "positionID", "gamesPlayed", "plateAppearances", "atBats", "hits", "doubles", "triples", "homeRuns", "strikeOuts", "walks", "runs", "rbi", "intentionalWalks", "hitByPitch", "stolenBases", "sacBunts", "sacFlies", "flyOuts", "groundOuts", "airOuts", "popOuts", "lineOuts", "gamesStarted", "gamesFinished", "completeGames", "shutouts", "numberOfPitches", "inningsPitched", "wins"]
+  },
+  {
+    "name": "MLB_withMetrics_BoxScorePitching_Season",
+    "start": 1158,
+    "end": 1434,
+    "size_lines": 276,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 116,
+    "sample_columns": ["playerID", "positionID", "gamesPlayed", "plateAppearances", "atBats", "hits", "doubles", "triples", "homeRuns", "strikeoutWalkRatio", "strikeOuts", "walks", "runs", "rbi", "intentionalWalks", "hitByPitch", "stolenBases", "sacBunts", "sacFlies", "flyOuts", "groundOuts", "airOuts", "groundOutsToAirouts", "popOuts", "lineOuts", "gamesStarted", "gamesFinished", "completeGames", "shutouts", "pitchesPerInning"]
+  },
+  {
+    "name": "GAME",
+    "start": 1434,
+    "end": 1579,
+    "size_lines": 145,
+    "urls": ["https://statsapi.mlb.com/api/v1/schedule?sportId=1&season=2025&useLatestGames=true&gameType=R&hydrate=team,probablePitcher"],
+    "num_columns_declared": 12,
+    "sample_columns": ["gameID", "gameDescription", "statusID", "dayNight", "doubleHeader", "gameNumber", "awayTeamID", "homeTeamID", "venueID", "gameType", "gamesInSeries", "seriesGameNumber"]
+  },
+  {
+    "name": "gameList",
+    "start": 1579,
+    "end": 1595,
+    "size_lines": 16,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "MLB_withMetrics_Runner",
+    "start": 1595,
+    "end": 1737,
+    "size_lines": 142,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 45,
+    "sample_columns": ["playEvent_index", "playID", "actionPlayID", "playEvent_description", "playEvent_eventType", "playEvent_type", "playEvent_isBaseRunningPlay", "playerID", "atBatNumber", "isTopInning", "inning", "result_eventType", "result_description", "result_rbi", "result_isOut", "atBat_endTime", "atBat_isComplete", "atBat_isScoringPlay", "atBat_hasOut", "batterID", "batterLink", "batterHandCode", "batterSplit", "pitcherID", "pitcherLink", "pitcherHandCode", "pitcherSplit", "playEndTime", "runner_playIndex", "runner_fullName"]
+  },
+  {
+    "name": "Query2",
+    "start": 1737,
+    "end": 1916,
+    "size_lines": 179,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 47,
+    "sample_columns": ["playerID", "atBatNumber", "isTopInning", "inning", "result_eventType", "result_description", "result_rbi", "result_isOut", "atBat_endTime", "atBat_isComplete", "atBat_isScoringPlay", "atBat_hasOut", "batterID", "pitcherID", "playEvent_index", "playID", "actionPlayID", "playEvent_type", "playEvent_isPitch", "playEvent_isBaseRunningPlay", "pitchNumber", "playEvent_code", "playEvent_description", "playEvent_outs", "playEvent_isOut", "playEvent_runnerGoing", "playEvent_isHitIntoPlay", "playEvent_isScoringPlay", "playEvent_endTime", "isLastPitch"]
+  },
+  {
+    "name": "Query2_v2",
+    "start": 1916,
+    "end": 2014,
+    "size_lines": 98,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 33,
+    "sample_columns": ["playEvent_index", "playID", "actionPlayID", "playEvent_type", "playEvent_isPitch", "playEvent_isBaseRunningPlay", "pitchNumber", "playEvent_code", "playEvent_description", "playEvent_outs", "playEvent_isOut", "playEvent_runnerGoing", "playEvent_isHitIntoPlay", "playEvent_isScoringPlay", "playEvent_endTime", "isLastPitch", "runner_playIndex", "runner_event", "runner_eventType", "runner_movementReason", "runner_isScoringEvent", "runner_rbi", "runner_earned", "runner_teamUnearned", "runnerID", "runner_fullName", "runner_pitcherID", "runner_originBase", "runner_start", "runner_end"]
+  },
+  {
+    "name": "VENUE",
+    "start": 2014,
+    "end": 2025,
+    "size_lines": 11,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "TEAMGAME",
+    "start": 2025,
+    "end": 2159,
+    "size_lines": 134,
+    "urls": ["https://statsapi.mlb.com/api/v1/schedule?sportId=1&season=2025&useLatestGames=true&gameType=R&hydrate=team,probablePitcher"],
+    "num_columns_declared": 20,
+    "sample_columns": ["gameID", "teamGameID", "teamID", "teamScore", "teamIsWinner", "pitcherID", "vsTeamID", "vsTeamScore", "vsTeamIsWinner", "vsPitcherID"]
+  },
+  {
+    "name": "TEAM",
+    "start": 2159,
+    "end": 2233,
+    "size_lines": 74,
+    "urls": ["https://statsapi.mlb.com/api/v1/teams?sportId=1&hydrate=team,nextSchedule"],
+    "num_columns_declared": 2,
+    "sample_columns": ["teamName", "nextGameID"]
+  },
+  {
+    "name": "PLAYER",
+    "start": 2233,
+    "end": 2274,
+    "size_lines": 41,
+    "urls": ["https://statsapi.mlb.com/api/v1/sports/1/players?season=2025"],
+    "num_columns_declared": 10,
+    "sample_columns": ["playerID", "playerName", "teamID", "positionID", "battingHand", "pitchingHand", "strikeZoneTop", "strikeZoneBottom", "shortName", "playerNumber"]
+  },
+  {
+    "name": "MLB_Function",
+    "start": 2274,
+    "end": 2360,
+    "size_lines": 86,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 13,
+    "sample_columns": ["eventsDescription", "rbi", "captivatingIndex", "play_index", "playID", "isPitch", "playDescription", "hardness", "hitProbability", "batSpeed", "playEndTime", "isLastPitch", "homeRunBallparks"]
+  },
+  {
+    "name": "Statcast_Date",
+    "start": 2360,
+    "end": 2543,
+    "size_lines": 183,
+    "urls": ["https://baseballsavant.mlb.com/statcast_search?hfGT=R%7CPO%7CF%7CD%7CL%7CW%7C&hfSea=2025%7C&player_type=batter&game_date_gt="],
+    "num_columns_declared": 63,
+    "sample_columns": ["gameDate", "inning", "outsWhenUp", "atBatNumber", "pitchNumber", "teamName", "playerName", "batHand", "vsTeamName", "vsPitcherName", "vsPitcherHand", "eventType", "pitchName", "pitchType", "pitchVelocity", "balls", "strikes", "zone", "event", "battedBallType", "exitVelocity", "launchAngle", "hitDistance", "batSpeed", "fullDescription", "expectedBa", "expectedSlg", "isPlateAppearance", "isAtBat", "isWalk"]
+  },
+  {
+    "name": "Matchups",
+    "start": 2543,
+    "end": 2694,
+    "size_lines": 151,
+    "urls": ["https://baseballsavant.mlb.com/statcast_search"],
+    "num_columns_declared": 0,
+    "sample_columns": [],
+    "note": "Batter-vs-pitcher career stats. getVsStats inner function; incremental cache in Excel Matchups table. Fetches PA, AB, HIP, H, 1B, 2B, 3B, HR, XBH, SO, K%, Whiff%, BB, BB%, BA, SLG, wOBA, xBA, xSLG, xwOBA, EV, LA, Dist, HH%, Barrels, BABIP. Seasons 2008-2025."
+  },
+  {
+    "name": "BoxScore",
+    "start": 2694,
+    "end": 2786,
+    "size_lines": 92,
+    "urls": ["https://baseballsavant.mlb.com/gf?game_pk="],
+    "num_columns_declared": 38,
+    "sample_columns": ["playerID", "positionID", "plateAppearances", "atBats", "hits", "doubles", "triples", "homeRuns", "totalBases", "strikeouts", "walks", "runs", "rbi", "intentionalWalks", "hitByPitch", "stolenBases", "leftOnBase", "sacBunts", "sacFlies"]
+  },
+  {
+    "name": "fetchBoxScore",
+    "start": 2786,
+    "end": 2881,
+    "size_lines": 95,
+    "urls": ["https://baseballsavant.mlb.com/gf?game_pk="],
+    "num_columns_declared": 38,
+    "sample_columns": ["playerID", "positionID", "plateAppearances", "atBats", "hits", "doubles", "triples", "homeRuns", "totalBases", "strikeouts", "walks", "runs", "rbi", "intentionalWalks", "hitByPitch", "stolenBases", "leftOnBase", "sacBunts", "sacFlies"]
+  },
+  {
+    "name": "BoxScores",
+    "start": 2881,
+    "end": 2910,
+    "size_lines": 29,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "MLB_Function_v2",
+    "start": 2910,
+    "end": 2917,
+    "size_lines": 7,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "getTeamIDs",
+    "start": 2917,
+    "end": 2924,
+    "size_lines": 7,
+    "urls": ["https://statsapi.mlb.com/api/v1/teams?sportId=1&fields=teams,id"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "TEAM_v2",
+    "start": 2924,
+    "end": 2945,
+    "size_lines": 21,
+    "urls": ["https://statsapi.mlb.com/api/v1/teams/121/roster?rosterType=active&hydrate=person(stats(group=hitting,type=[statsSingleSeason,sprayChart"],
+    "num_columns_declared": 3,
+    "sample_columns": ["playerID", "playerName", "teamID"]
+  },
+  {
+    "name": "TeamNextGame",
+    "start": 2945,
+    "end": 2963,
+    "size_lines": 18,
+    "urls": ["https://statsapi.mlb.com/api/v1/teams?sportId=1&hydrate=team,nextSchedule"],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "MLB_withMetrics",
+    "start": 2963,
+    "end": 3058,
+    "size_lines": 95,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/777701/withMetrics"],
+    "num_columns_declared": 50,
+    "sample_columns": ["playerID", "positionID", "battingOrder", "plateAppearances", "atBats", "hits", "doubles", "triples", "homeRuns", "totalBases", "strikeouts", "walks", "runs", "rbi", "intentionalWalks", "hitByPitch", "stolenBases", "leftOnBase", "sacBunts", "sacFlies", "flyOuts", "groundOuts", "airOuts", "popOuts", "lineOuts"]
+  },
+  {
+    "name": "MLB_withMetrics_playByPlay",
+    "start": 3058,
+    "end": 3350,
+    "size_lines": 292,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 54,
+    "sample_columns": ["playerID", "atBatNumber", "isTopInning", "inning", "result_eventType", "result_description", "result_rbi", "result_isOut", "atBat_endTime", "atBat_isComplete", "atBat_isScoringPlay", "atBat_hasOut", "batterID", "batterLink", "batterHandCode", "batterSplit", "pitcherID", "pitcherLink", "pitcherHandCode", "pitcherSplit", "playEndTime", "playEvent_index", "playID", "actionPlayID", "playEvent_type", "playEvent_isPitch", "playEvent_isBaseRunningPlay", "pitchNumber", "playEvent_code", "playEvent_description"]
+  },
+  {
+    "name": "MLBplayByPlay",
+    "start": 3350,
+    "end": 3645,
+    "size_lines": 295,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 54,
+    "sample_columns": ["playerID", "atBatNumber", "isTopInning", "inning", "result_eventType", "result_description", "result_rbi", "result_isOut", "atBat_endTime", "atBat_isComplete", "atBat_isScoringPlay", "atBat_hasOut", "batterID", "batterLink", "batterHandCode", "batterSplit", "pitcherID", "pitcherLink", "pitcherHandCode", "pitcherSplit", "playEndTime", "playEvent_index", "playID", "actionPlayID", "playEvent_type", "playEvent_isPitch", "playEvent_isBaseRunningPlay", "pitchNumber", "playEvent_code", "playEvent_description"]
+  },
+  {
+    "name": "MLB_withMetrics_BoxScoreHitting_Game_v2",
+    "start": 3645,
+    "end": 3840,
+    "size_lines": 195,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/777701/withMetrics"],
+    "num_columns_declared": 96,
+    "sample_columns": ["playerID", "positionID", "gamesPlayed", "plateAppearances", "atBats", "hits", "doubles", "triples", "homeRuns", "strikeOuts", "walks", "runs", "rbi", "intentionalWalks", "hitByPitch", "stolenBases", "sacBunts", "sacFlies", "flyOuts", "groundOuts", "airOuts", "popOuts", "lineOuts", "gamesStarted", "gamesFinished", "completeGames", "shutouts", "numberOfPitches", "inningsPitched", "wins"]
+  },
+  {
+    "name": "teamID_param",
+    "start": 3840,
+    "end": 3843,
+    "size_lines": 3,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "playerID_param",
+    "start": 3843,
+    "end": 3846,
+    "size_lines": 3,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "pitcherID_param",
+    "start": 3846,
+    "end": 3849,
+    "size_lines": 3,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "date_today_param",
+    "start": 3849,
+    "end": 3855,
+    "size_lines": 6,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "date_param",
+    "start": 3855,
+    "end": 3858,
+    "size_lines": 3,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "Query1",
+    "start": 3858,
+    "end": 4037,
+    "size_lines": 179,
+    "urls": ["https://statsapi.mlb.com/api/v1/schedule?sportId=1&season=2025&gameType=R&hydrate=team,probablePitcher,stats,person", "https://statsapi.mlb.com/api/v1.1/game/", "https://statsapi.mlb.com/api/v1/schedule?sportId=1&season=2025&gameType=R&hydrate=team,probablePitcher,stats,person&startDate="],
+    "num_columns_declared": 11,
+    "sample_columns": ["Status", "GameID", "RescheduleDate", "GameDate", "dayNight", "doubleHeader", "gameNumber", "venueID", "gameType", "gamesInSeries", "seriesGameNumber"]
+  },
+  {
+    "name": "MLB_Function_v3",
+    "start": 4037,
+    "end": 4124,
+    "size_lines": 87,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 13,
+    "sample_columns": ["eventsDescription", "rbi", "captivatingIndex", "play_index", "playID", "isPitch", "playDescription", "hardness", "hitProbability", "batSpeed", "playEndTime", "isLastPitch", "homeRunBallparks"]
+  },
+  {
+    "name": "Statcast_Date_v2",
+    "start": 4124,
+    "end": 4306,
+    "size_lines": 182,
+    "urls": ["https://baseballsavant.mlb.com/statcast_search?hfGT=R%7CPO%7CF%7CD%7CL%7CW%7C&hfSea=2025%7C&player_type=batter&game_date_gt="],
+    "num_columns_declared": 63,
+    "sample_columns": ["gameDate", "inning", "outsWhenUp", "atBatNumber", "pitchNumber", "teamName", "playerName", "batHand", "vsTeamName", "vsPitcherName", "vsPitcherHand", "eventType", "pitchName", "pitchType", "pitchVelocity", "balls", "strikes", "zone", "event", "battedBallType", "exitVelocity", "launchAngle", "hitDistance", "batSpeed", "fullDescription", "expectedBa", "expectedSlg", "isPlateAppearance", "isAtBat", "isWalk"]
+  },
+  {
+    "name": "Invoked_Function",
+    "start": 4306,
+    "end": 4312,
+    "size_lines": 6,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "gameID_v2",
+    "start": 4312,
+    "end": 4315,
+    "size_lines": 3,
+    "urls": [],
+    "num_columns_declared": 0,
+    "sample_columns": []
+  },
+  {
+    "name": "withMetrics_function",
+    "start": 4315,
+    "end": 4509,
+    "size_lines": 194,
+    "urls": ["https://statsapi.mlb.com/api/v1/game/"],
+    "num_columns_declared": 49,
+    "sample_columns": ["playerID", "atBatNumber", "isTopInning", "inning", "result_eventType", "result_description", "result_rbi", "result_isOut", "atBat_endTime", "atBat_isComplete", "atBat_isScoringPlay", "atBat_hasOut", "batterID", "batterLink", "batterHandCode", "batterSplit", "pitcherID", "pitcherLink", "pitcherHandCode", "pitcherSplit", "playEndTime", "playEvent_index", "playID", "playEvent_isPitch", "pitchNumber", "playEvent_code", "playEvent_description", "playEvent_isHitIntoPlay", "playEvent_isStrike", "playEvent_isBall"]
+  }
+]
