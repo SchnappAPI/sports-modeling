@@ -132,13 +132,17 @@ Line and Odds cells in the At-a-Glance table become tappable FanDuel betslip dee
 - `RefreshDataButton` is on the NBA page header and on At a Glance. Hits `/api/refresh-data`. Requires `ADMIN_REFRESH_CODE`. Runs all four steps (live box, odds, grading, lineup poll).
 - A separate unauthenticated refresh hits `/api/refresh-lines` and runs odds + grading only. Used from older on-page controls.
 
+### Flask live-data integration
+
+All three routes that call Flask on the VM (`/api/games`, `/api/scoreboard`, `/api/live-boxscore`) now use the Cloudflare-proxied subdomain `https://live.schnapp.bet` as the base URL. Never hardcode VM IPs in web routes. DNS resolves via Cloudflare to the VM's current public IP (`172.173.126.81`). The `X-Runner-Key` header is still required on `/scoreboard` and `/boxscore`; `/ping` is open.
+
 ### API routes
 
 Timezone note: `/api/games` uses `todayCT()` (Central Time) when `?date` is omitted, to match the ETL which normalizes game dates to Central. Other routes that look up "today" may differ (e.g. `grade_props.py` uses `today_et()`).
 
 - `/api/ping` - anonymous. `SELECT 1` via `ping()`. Used by Uptime Robot for DB keep-alive
-- `/api/games?date=&sport=nba` - reads the game list from `nba.schedule` via `getGames()` for any date. For today only, overlays CDN scoreboard data (status + scores) onto games already present in the DB. CDN never drives the game list. Falls back to DB-only if Flask is unreachable
-- `/api/scoreboard` - thin passthrough to the Flask `/scoreboard` route
+- `/api/games?date=&sport=nba` - reads the game list from `nba.schedule` via `getGames()` for any date. For today only, overlays CDN scoreboard data (status + scores) onto games already present in the DB via `https://live.schnapp.bet/scoreboard`. CDN never drives the game list. Falls back to DB-only if Flask is unreachable
+- `/api/scoreboard` - thin passthrough to Flask `/scoreboard` via `https://live.schnapp.bet`
 - `/api/grades?date=&gameId=` - reads `dg.outcome_name`, `dg.over_price`, and `dg.outcome` directly from `common.daily_grades`. Also joins `odds.upcoming_player_props` for `link` when that column exists (FanDuel betslip deep link; NULL for historical rows)
 - `/api/game-grades?gameId=` - grades filtered to a single game
 - `/api/player-grades` - grades filtered to a player
@@ -147,7 +151,7 @@ Timezone note: `/api/games` uses `todayCT()` (Central Time) when `?date` is omit
 - `/api/player-averages?gameId=&lastN=` - lineup-anchored averages for a single game
 - `/api/contextual?oppTeamId=&position=` - defense ranks. Rank 1 = most allowed
 - `/api/matchup-grid?gameId=` - both teams' defense plus today's lineup players
-- `/api/live-boxscore?gameId=` - calls Flask at the VM's public IP, port 5000. The exact IP used is defined in the route file
+- `/api/live-boxscore?gameId=` - calls Flask `/boxscore` via `https://live.schnapp.bet`
 - `/api/boxscore?gameId=` - persisted per-quarter box score from `nba.player_box_score_stats`
 - `/api/roster?gameId=` - daily lineup rows for a game
 - `/api/player?id=` - player header + last-N game log
@@ -186,6 +190,7 @@ Do not revert without an ADR.
 - `RefreshDataButton` requires `ADMIN_REFRESH_CODE`; `/api/refresh-lines` is unauthenticated
 - Signal logic lives in `web/lib/signals.ts`. Player-level `DUE` (regression-based) and line-level `SLUMP` displayed as `DUE` (momentum-based) are distinct signals with different inputs
 - `/api/games` treats the DB as the game-list source of truth. CDN only overlays live score/status onto games already in the DB; CDN-only games are ignored
+- All web routes that call Flask on the VM use `https://live.schnapp.bet` (Cloudflare subdomain), never a hardcoded IP
 
 ## Recent Changes
 
@@ -195,4 +200,3 @@ See `/docs/CHANGELOG.md` filtered by `[nba][web]`. Historical entries before the
 
 - Whether to extend `/api/contextual` with combo-stat (PRA/PR/PA/RA) defense averages for the VS Defense panel. Non-trivial query change; deferred.
 - Whether PWA start URL should remain `/nba` (clean) vs. date-specific.
-- The `/api/games` route points to Flask at `20.109.181.21:5000` while the VM's Azure-recorded public IP is `172.173.126.81`. Reconcile which is live
