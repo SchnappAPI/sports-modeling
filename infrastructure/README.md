@@ -23,10 +23,16 @@ Operational runbooks will live in `/infrastructure/runbooks/` as they are author
 
 `schnapp-runner-2` Azure VM.
 
+- Resource group: `SPORTS-MODELING`
+- Subscription: `sports-modeling-subscription`
 - Region: Central US
-- Size: B2s_v2
-- OS: Ubuntu 24.04
+- Size: Standard B1s (1 vCPU, 1 GiB RAM, x64, V2 generation)
+- OS: Ubuntu 24.04 LTS
 - Admin user: `schnapp-admin`
+- Public IP: `172.173.126.81` (NIC `schnapp-runner-2254`)
+- Private IP: `10.0.0.4`
+- VNet/subnet: `schnapp-runner-2-vnet/default`
+- Created: 2026-04-10
 - Python venv: `~/venv` with pinned deps pre-installed
 - ODBC Driver 18 pre-installed
 - 1 GB swap at `/swapfile`, persistent, `swappiness = 80`
@@ -34,11 +40,13 @@ Operational runbooks will live in `/infrastructure/runbooks/` as they are author
 
 All active workflows use `runs-on: [self-hosted, schnapp-runner]`. No ODBC or pip install steps inside any workflow; everything is pre-installed on the image. ETL runs dropped from 2-4 minutes to around 25 seconds after the move off GitHub-hosted runners.
 
+B1s is sufficient because ETL is I/O-bound against Azure SQL and The Odds API. Memory pressure is managed by the persistent 1 GB swap with `swappiness = 80`.
+
 Workflows execute in the runner's work directory. The MCP server deliberately clones the repo separately to `~/sports-modeling` and uses that as `WorkingDirectory` so it can start before the runner has executed any job.
 
 ### Flask live-data runner
 
-`etl/runner.py` on the VM. Systemd service `schnapp-flask.service`. Bound to `127.0.0.1:5000`. Reached from SWA API routes via the VM's internal IP.
+`etl/runner.py` on the VM. Systemd service `schnapp-flask.service`. Bound to `127.0.0.1:5000`. Reached from SWA API routes via the VM's public IP (`172.173.126.81:5000`).
 
 - `GET /ping` - health
 - `GET /scoreboard` - today's game statuses from `cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json`. Returns `{ games: [...] }` with `gameStatus` 1 (upcoming), 2 (live), 3 (final)
