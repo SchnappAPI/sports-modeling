@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 
 interface MlbGame {
   gameId: number;
@@ -185,9 +185,8 @@ function TeamTable({
               const slot = s.battingOrder != null ? Math.floor(s.battingOrder / 100) : '';
               const dim = bbe === 0;
               return (
-                <>
+                <Fragment key={s.playerId}>
                   <tr
-                    key={`row-${s.playerId}`}
                     onClick={() => bbe > 0 && onToggle(s.playerId)}
                     className={[
                       'border-b border-gray-900',
@@ -234,7 +233,7 @@ function TeamTable({
                     </td>
                   </tr>
                   {isExpanded && detail.length > 0 && (
-                    <tr key={`exp-${s.playerId}`} className="bg-gray-950 border-b border-gray-900">
+                    <tr className="bg-gray-950 border-b border-gray-900">
                       <td colSpan={10} className="py-2 px-3">
                         <div className="overflow-x-auto">
                           <table className="w-full text-xs text-gray-300">
@@ -283,7 +282,7 @@ function TeamTable({
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               );
             })}
           </tbody>
