@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import MlbGameTabs from './MlbGameTabs';
+import MlbVsView from './MlbVsView';
 
 interface MlbGame {
   gameId: number;
@@ -20,6 +21,23 @@ interface MlbGame {
   gameDateTime: string | null;
   awayPitcher: string | null;
   homePitcher: string | null;
+}
+
+type ViewKey = 'game' | 'vs' | 'ev' | 'proj' | 'player' | 'pitcher';
+
+const VIEWS: { key: ViewKey; label: string; enabled: boolean }[] = [
+  { key: 'game',    label: 'Game',    enabled: true  },
+  { key: 'vs',      label: 'VS',      enabled: true  },
+  { key: 'ev',      label: 'EV',      enabled: false },
+  { key: 'proj',    label: 'Proj',    enabled: false },
+  { key: 'player',  label: 'Player',  enabled: false },
+  { key: 'pitcher', label: 'Pitcher', enabled: false },
+];
+
+function parseView(raw: string | null): ViewKey {
+  if (!raw) return 'game';
+  const match = VIEWS.find((v) => v.key === raw);
+  return match && match.enabled ? (raw as ViewKey) : 'game';
 }
 
 function todayLocal(): string {
@@ -54,6 +72,19 @@ function statusLabel(game: MlbGame): string {
   return formatGameTime(game.gameDateTime);
 }
 
+// Build a URL that preserves existing params and overrides only the ones
+// passed in. The page has three URL params (date, gameId, view) and any
+// navigation needs to keep the other two intact.
+function buildUrl(current: URLSearchParams, patch: Record<string, string | null>): string {
+  const next = new URLSearchParams(current.toString());
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) next.delete(k);
+    else next.set(k, v);
+  }
+  const qs = next.toString();
+  return qs.length > 0 ? `/mlb?${qs}` : '/mlb';
+}
+
 export default function MlbPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -67,6 +98,7 @@ export default function MlbPageInner() {
 
   const activeGameId = searchParams.get('gameId');
   const activeGame = games.find((g) => String(g.gameId) === activeGameId) ?? null;
+  const activeView = parseView(searchParams.get('view'));
 
   async function loadGames() {
     setLoading(true);
@@ -87,7 +119,10 @@ export default function MlbPageInner() {
       const currentValid = sorted.find((g) => String(g.gameId) === currentId);
       if (!currentValid && sorted.length > 0 && !isExplicitSelection.current) {
         const pick = sorted.find((g) => g.gameStatus !== 'F') ?? sorted[0];
-        router.replace(`/mlb?gameId=${pick.gameId}&date=${selectedDate}`);
+        router.replace(buildUrl(searchParams, {
+          gameId: String(pick.gameId),
+          date: selectedDate,
+        }));
       }
     } catch (err: any) {
       setError(err.message);
@@ -100,13 +135,25 @@ export default function MlbPageInner() {
 
   function handleSelectGame(gameId: number) {
     isExplicitSelection.current = true;
-    router.replace(`/mlb?gameId=${gameId}&date=${selectedDate}`);
+    router.replace(buildUrl(searchParams, {
+      gameId: String(gameId),
+      date: selectedDate,
+    }));
   }
 
   function applyDate(newDate: string) {
     isExplicitSelection.current = false;
     setSelectedDate(newDate);
-    router.replace(`/mlb?date=${newDate}`);
+    // Drop gameId when changing dates; the loader will pick the first
+    // non-Final game from the new slate. View stays.
+    router.replace(buildUrl(searchParams, {
+      date: newDate,
+      gameId: null,
+    }));
+  }
+
+  function handleSelectView(v: ViewKey) {
+    router.replace(buildUrl(searchParams, { view: v }));
   }
 
   return (
@@ -137,6 +184,38 @@ export default function MlbPageInner() {
           </button>
         </div>
         <div className="w-20" />
+      </div>
+
+      {/* View switcher */}
+      <div className="flex overflow-x-auto border-b border-gray-800 bg-gray-950">
+        {VIEWS.map((v) => {
+          const isActive = v.key === activeView;
+          const baseCls = 'flex-shrink-0 px-4 py-2 text-sm font-medium transition-colors';
+          if (!v.enabled) {
+            return (
+              <span
+                key={v.key}
+                className={`${baseCls} text-gray-700 cursor-not-allowed`}
+                title="Coming soon"
+              >
+                {v.label}
+              </span>
+            );
+          }
+          return (
+            <button
+              key={v.key}
+              onClick={() => handleSelectView(v.key)}
+              className={`${baseCls} ${
+                isActive
+                  ? 'text-gray-100 border-b-2 border-blue-500 -mb-px'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              {v.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Game strip */}
@@ -181,10 +260,16 @@ export default function MlbPageInner() {
         <div className="px-4 py-6 text-sm text-gray-500">No games scheduled for this date.</div>
       )}
 
-      {/* Game detail */}
+      {/* View body */}
       <div className="flex-1 px-4">
         {activeGame ? (
-          <MlbGameTabs game={activeGame} />
+          activeView === 'game' ? (
+            <MlbGameTabs game={activeGame} />
+          ) : activeView === 'vs' ? (
+            <MlbVsView game={activeGame} />
+          ) : (
+            <div className="py-6 text-sm text-gray-500">Coming soon.</div>
+          )
         ) : (
           !loading && games.length > 0 && (
             <div className="py-6 text-sm text-gray-500">Select a game above.</div>
