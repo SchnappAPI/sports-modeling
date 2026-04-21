@@ -37,7 +37,7 @@ Newest entry goes at the top.
 
 ## Transition note
 
-The legacy `/PROJECT_REFERENCE.md` and root `/CHANGELOG.md` remain in place during migration. New work follows this protocol. The old protocol described in PROJECT_REFERENCE.md is being phased out. Final cutover removes the legacy files; until then, new content goes in `/docs/` and component READMEs.
+The archived `/docs/_archive/PROJECT_REFERENCE.md` and `/docs/_archive/CHANGELOG.md` contain the historical record. New work follows this protocol. The old protocol described in PROJECT_REFERENCE.md is being phased out. Final cutover removes the legacy files; until then, new content goes in `/docs/` and component READMEs.
 
 If a piece of needed context exists only in the legacy files and has not yet been migrated, that is a signal to migrate it as part of the current session and create a CHANGELOG entry recording the move.
 

@@ -194,7 +194,7 @@ Do not revert without an ADR.
 
 ## Recent Changes
 
-See `/docs/CHANGELOG.md` filtered by `[nba][web]`. Historical entries before the restructure are in the legacy root `/CHANGELOG.md`.
+See `/docs/CHANGELOG.md` filtered by `[nba][web]`. Historical entries before the restructure are in the archived `/docs/_archive/CHANGELOG.md`.
 
 ## Open Questions
 

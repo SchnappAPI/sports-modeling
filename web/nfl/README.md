@@ -35,7 +35,7 @@ None yet. Once work starts, inherit the cross-sport patterns:
 
 ## Recent Changes
 
-See `/docs/CHANGELOG.md` filtered by `[nfl][web]`. Historical entries before the restructure are in the legacy root `/CHANGELOG.md`.
+See `/docs/CHANGELOG.md` filtered by `[nfl][web]`. Historical entries before the restructure are in the archived `/docs/_archive/CHANGELOG.md`.
 
 ## Open Questions
 

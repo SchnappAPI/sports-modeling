@@ -82,7 +82,7 @@ Each table load runs inside a `run(name, fn)` wrapper that catches all exception
 
 ## Recent Changes
 
-See `/docs/CHANGELOG.md` filtered by `[nfl][etl]`. Historical entries before the restructure are in the legacy root `/CHANGELOG.md`.
+See `/docs/CHANGELOG.md` filtered by `[nfl][etl]`. Historical entries before the restructure are in the archived `/docs/_archive/CHANGELOG.md`.
 
 ## Open Questions
 

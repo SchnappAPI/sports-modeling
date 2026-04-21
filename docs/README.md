@@ -23,7 +23,7 @@ Infrastructure: `/infrastructure/README.md` plus runbooks in `/infrastructure/ru
 NBA is live. MLB is in design phase with data and visuals cataloged but no code yet. NFL is in planning. Each component README starts with a STATUS line that states current maturity in one sentence. Empty placeholder docs are not used; if something is not designed yet, the README says so.
 
 ## Migration in progress
-This documentation structure is being built out from a legacy `PROJECT_REFERENCE.md` at the repo root. During the transition both old and new docs coexist. See `DECISIONS.md` ADR-0001 for the structure decision and the migration plan.
+This documentation structure replaces a legacy `PROJECT_REFERENCE.md` at the repo root (now archived at `/docs/_archive/`). See `DECISIONS.md` ADR-0001 for the structure decision and ADR-0016 for the archive decision.
 
 ## Tag taxonomy for CHANGELOG and DECISIONS
 Every entry uses bracketed scope tags. The first tag is sport scope, the second is component scope.

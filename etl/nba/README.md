@@ -174,7 +174,7 @@ Retired (dispatch-only, do not reschedule): `pregame-refresh.yml`, `nba-live.yml
 
 ## Recent Changes
 
-See `/docs/CHANGELOG.md` filtered by `[nba][etl]`. Historical entries before the documentation restructure are in the legacy root `/CHANGELOG.md`.
+See `/docs/CHANGELOG.md` filtered by `[nba][etl]`. Historical entries before the documentation restructure are in the archived `/docs/_archive/CHANGELOG.md`.
 
 ## Open Questions
 

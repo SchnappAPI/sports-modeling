@@ -111,7 +111,7 @@ Player at-bat stats (the sixth missing entity) is partially served today by quer
 
 ## Recent Changes
 
-See `/docs/CHANGELOG.md` filtered by `[mlb][database]`. Historical entries before the restructure are in the legacy root `/CHANGELOG.md`.
+See `/docs/CHANGELOG.md` filtered by `[mlb][database]`. Historical entries before the restructure are in the archived `/docs/_archive/CHANGELOG.md`.
 
 ## Open Questions
 

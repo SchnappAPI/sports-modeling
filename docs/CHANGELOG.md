@@ -10,9 +10,11 @@ YYYY-MM-DD [scope][component] One-line summary. See /path/README.md.
 
 Tag taxonomy is defined in `/docs/README.md`. Filter entries by relevant tags rather than reading top-to-bottom.
 
-Historical entries from before the documentation restructure are archived in the legacy `/CHANGELOG.md` at the repo root. That file is no longer appended to as of the migration date below; new work lands here.
+Historical entries from before the documentation restructure are preserved at `/docs/_archive/CHANGELOG.md`. That file is no longer appended to; new work lands here.
 
 ---
+
+2026-04-20 [shared][docs] Completed /docs/ Step 7: retired legacy /PROJECT_REFERENCE.md and root /CHANGELOG.md. Both files moved to /docs/_archive/ via git mv so commit history is preserved as rename, not delete + add. Archived files got an ARCHIVED banner pointing readers at the active docs. Deleted /docs/MIGRATION_HANDOFF.md (its job was done). Swept 15 files to replace stale "legacy root /CHANGELOG.md" references with /docs/_archive/CHANGELOG.md. Updated /docs/README.md, /docs/SESSION_PROTOCOL.md, /docs/ROADMAP.md to reflect completion rather than in-progress status. Added ADR-0016 documenting the archive (not delete) decision and the rationale (756 lines of genuine engineering history in the old CHANGELOG that was not migrated into /docs/CHANGELOG.md). The documentation restructure described in ADR-0001 is now complete.
 
 2026-04-20 [nfl][docs][etl][database][web] Completed /docs/ Step 6: updated NFL READMEs from the "planning / everything is TBD" skeletons to reflect actual state. etl/nfl_etl.py turned out to be fully written (14 KB, 7 tables via nflreadpy: games, players, player_game_stats, snap_counts, ftn_charting, rosters_weekly, team_game_stats) but never wired to a workflow, so no nfl.* tables exist yet. etl/nfl/README.md now documents schema-from-data inference, clean_df global cleanup, per-table upsert keys, fail-soft error handling, and the local get_engine inconsistency with etl/db.py. database/nfl/README.md documents target schema of all 7 tables with pandas-to-SQL type map and the multi-identifier-system reality of NFL data (gsis_id canonical, pfr_player_id, ftn_player_id, espn_id separate). web/nfl/README.md kept intentionally short because no web surface exists, with specific pointers for where to start when work begins. Added ADR-0014 (schema-from-data is NFL-only) and ADR-0015 (nflreadpy as single source). Primary open question captured in docs: no nfl-etl.yml workflow exists, so the first-ever NFL ETL run is blocked on creating that file.
 

@@ -4,7 +4,7 @@ Deliberately brief. Detailed task tracking lives in component READMEs under "Ope
 
 ## Active
 
-- **Documentation restructure** (in progress as of 2026-04-20). Migrating from monolithic `PROJECT_REFERENCE.md` to co-located component READMEs with central `/docs/`. See `/docs/DECISIONS.md` ADR-0001 for the migration order. Currently at Step 2 of 6.
+- **Documentation restructure** (complete, 2026-04-20). Migrated from monolithic `PROJECT_REFERENCE.md` to co-located component READMEs with central `/docs/`. See ADR-0001 and ADR-0016. Archived originals at `/docs/_archive/`.
 
 ## Next up after migration completes
 
@@ -21,5 +21,5 @@ Deliberately brief. Detailed task tracking lives in component READMEs under "Ope
 
 These came up during planning conversations and were explicitly not decided:
 
-- **Multi-bookmaker support**. FanDuel only for now. Rationale lives in legacy `PROJECT_REFERENCE.md` decision log and will move to `/docs/DECISIONS.md` during the NBA migration step.
+- **Multi-bookmaker support**. FanDuel only for now. Rationale captured in ADR-0007.
 - **Public Statcast Excel exports vs. live API for MLB historical data**. Currently both exist (`mlb-data/mlbSavantStatcast-2024-25.xlsx` etc. on local Windows machine). Need to decide whether the ETL relies on local Excel exports or pulls fresh from Savant for historical seasons.

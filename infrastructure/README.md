@@ -132,7 +132,7 @@ Use `GH_PAT`, not `GITHUB_PAT`, for new workflow-referenced tokens. GitHub reser
 
 ## Recent Changes
 
-See `/docs/CHANGELOG.md` filtered by `[infra]`. Historical entries before the restructure are in the legacy root `/CHANGELOG.md`.
+See `/docs/CHANGELOG.md` filtered by `[infra]`. Historical entries before the restructure are in the archived `/docs/_archive/CHANGELOG.md`.
 
 ## Open Questions
 

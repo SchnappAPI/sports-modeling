@@ -265,3 +265,21 @@ Consequences:
 - Upstream outages (nflverse data lag, FTN unavailability) surface as per-table load failures caught by the fail-soft `run(name, fn)` wrapper. Other tables still load even if one upstream is down
 - Play-by-play data (`nflreadpy.load_pbp`) is available but not currently loaded. Adding it would be a one-function call once a use case justifies it
 - Odds data is NOT in `nflreadpy`. NFL odds would still come from the Odds API via a future `nfl_odds_etl.py` or an extension of the existing `odds_etl.py`
+
+---
+
+## ADR-0016 [shared][docs] Retire legacy docs to `/docs/_archive/` via git mv, preserving history
+Date: 2026-04-20
+
+Context: Step 7 of ADR-0001 called for retirement of `/PROJECT_REFERENCE.md` and `/CHANGELOG.md` at the repo root once their content had been migrated. Original plan in `/docs/MIGRATION_HANDOFF.md` was to delete both files. On final review, the root CHANGELOG turned out to be 756 lines of genuine engineering history (commit-by-commit decision log going back months) that was never fully migrated into `/docs/CHANGELOG.md` — the new log only covers the documentation restructure itself. Deletion would have lost that history from any non-git view of the repo.
+
+Decision: Archive, do not delete. Both files moved to `/docs/_archive/` via `git mv` so git history is preserved as a rename rather than a delete + add. Each archived file gets an ARCHIVED banner at the top pointing readers to `/docs/README.md` and the component READMEs. Pre-flight checks before the move confirmed no workflows, scripts, or code in `etl/`, `mcp/`, `web/`, `grading/`, or `infrastructure/` reference either file by path.
+
+Consequences:
+
+- Historical engineering record is preserved and remains git-blame-able
+- References in new READMEs that say "legacy root `/CHANGELOG.md`" are now technically incorrect path-wise and need a follow-up str_replace sweep to point at `/docs/_archive/CHANGELOG.md`. Not a correctness-critical issue because the intent (historical reference) is unchanged
+- The legacy session protocol at the top of the old PROJECT_REFERENCE.md is superseded by `/docs/SESSION_PROTOCOL.md`. Readers who open the archive file see the banner first and know to follow the current protocol
+- `/docs/MIGRATION_HANDOFF.md` becomes obsolete once Step 7 is complete and should be deleted in the same session as this ADR lands
+- `.github/workflows/` and `.gitignore` were spot-checked and do not reference the archived paths
+- Future reorganizations that might want to shorten the path can move the archive again; git mv keeps every past move discoverable via `git log --follow`

@@ -106,7 +106,7 @@ On each run, `ensure_table()` runs a DDL that widens `result_description` and `p
 
 ## Recent Changes
 
-See `/docs/CHANGELOG.md` filtered by `[mlb][etl]`. Historical entries before the restructure are in the legacy root `/CHANGELOG.md`.
+See `/docs/CHANGELOG.md` filtered by `[mlb][etl]`. Historical entries before the restructure are in the archived `/docs/_archive/CHANGELOG.md`.
 
 ## Open Questions
 
