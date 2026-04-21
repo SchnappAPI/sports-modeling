@@ -1,10 +1,10 @@
 # MLB Database
 
-**STATUS:** 7 tables live (nightly-loaded reference, games, per-game box scores, season snapshots). 1 pitch-level table live (on-demand). 5 derived entities from ADR-0004 not yet implemented.
+**STATUS:** 7 tables live (nightly-loaded reference, games, per-game box scores, season snapshots). 1 pitch-level table live (on-demand). 1 derived at-bat table live (materialized in-lockstep with pitch-level). 4 derived entities from ADR-0004 not yet implemented.
 
 ## Purpose
 
-The `mlb` schema holds the current MLB dataset. Seven tables populate from the nightly ETL, one populates from the on-demand play-by-play loader. All DDL for these 8 tables is owned by the two Python ETL scripts — there is no separate `.sql` migration file.
+The `mlb` schema holds the current MLB dataset. Seven tables populate from the nightly ETL, two tables populate from the on-demand play-by-play loader (the pitch-level table and the derived at-bat table). All DDL for these 9 tables is owned by the two Python ETL scripts — there is no separate `.sql` migration file.
 
 ## Files
 
@@ -13,7 +13,7 @@ The `mlb` schema holds the current MLB dataset. Seven tables populate from the n
 Live DDL sources:
 
 - `etl/mlb_etl.py` — implicit DDL via pandas `to_sql` for truncate-and-reload tables. Permanent tables' columns are defined by the row dict keys in each loader function
-- `etl/mlb_play_by_play.py` — explicit `CREATE TABLE IF NOT EXISTS` and `ALTER COLUMN` statements in `DDL_CREATE` and `DDL_ALTER_DESCRIPTIONS`
+- `etl/mlb_play_by_play.py` — explicit `CREATE TABLE IF NOT EXISTS` and `ALTER COLUMN` statements in `DDL_CREATE`, `DDL_ALTER_DESCRIPTIONS`, `DDL_CREATE_AT_BATS`, `DDL_DROP_NAME_COLUMNS`, and `DDL_CREATE_AT_BATS_INDEXES`
 
 ## Key Concepts
 
@@ -29,6 +29,7 @@ Live DDL sources:
 | `mlb.player_season_batting` | Season cumulative batting snapshot | (no enforced PK; unique on `player_id`) | Truncate + reload |
 | `mlb.pitcher_season_stats` | Season cumulative pitching snapshot | (no enforced PK; unique on `player_id`) | Truncate + reload |
 | `mlb.play_by_play` | One row per pitch/baserunning event with Statcast metrics | `play_event_id` | Direct INSERT (pre-diffed) |
+| `mlb.player_at_bats` | One row per completed at-bat, materialized from PBP | `at_bat_id` | Direct INSERT (pre-diffed, in-lockstep with PBP) |
 
 ### `mlb.teams`
 
@@ -88,9 +89,21 @@ Column families:
 - Statcast hit data: `hit_launch_speed`, `hit_launch_angle`, `hit_total_distance`, `hit_trajectory`, `hit_hardness`, `hit_location`, `hit_probability`, `hit_bat_speed`, `home_run_ballparks`
 - Audit: `created_at` (defaults to `GETUTCDATE()`)
 
+### `mlb.player_at_bats`
+
+One row per completed at-bat (the first of ADR-0004's derived entities to ship). Materialized from `mlb.play_by_play` using the filter `is_last_pitch = 1 AND result_event_type IS NOT NULL`. PK: `at_bat_id = '{game_pk}-{at_bat_number}'`.
+
+Populated in-lockstep with `mlb.play_by_play` — after each PBP flush, the loader materializes at-bats for the games just written. The diff against existing rows runs against `mlb.player_at_bats.game_pk` (not PBP), so partial runs that landed PBP rows but not at-bat rows self-heal on the next invocation. Rebuild mode (`--rebuild-at-bats` in `mlb_play_by_play.py`) processes every game currently in PBP.
+
+Columns: `at_bat_id`, `game_pk`, `game_date`, `at_bat_number`, `inning`, `is_top_inning`, `batter_id`, `pitcher_id`, `result_event_type`, `result_description`, `result_rbi`, `hit_launch_speed`, `hit_launch_angle`, `hit_total_distance`, `hit_trajectory`, `hit_hardness`, `hit_probability`, `hit_bat_speed`, `home_run_ballparks`, `away_team_id`, `home_team_id`, `created_at`.
+
+IDs only — no denormalized batter or pitcher names. `mlb.players` is truncate-and-reload scoped to the current season, so roughly 30% of historical `pitcher_id`s and 20% of historical `batter_id`s would resolve to NULL if names were joined at write time. Web routes join `mlb.players` at read time instead; the table is under a thousand rows with a PK on `player_id`, so the join cost is negligible.
+
+Indexes: `IX_player_at_bats_game_pk` (per-game web lookup), `IX_player_at_bats_batter` on `(batter_id, game_date)` (future Player Analysis access path).
+
 ### Tables from ADR-0004 that do not exist yet
 
-Five of the nine visual-feeding entities from ADR-0004 have no current materialization:
+Four of the nine visual-feeding entities from ADR-0004 still have no materialization:
 
 - Batter context per game
 - Batter projections per game
@@ -98,7 +111,7 @@ Five of the nine visual-feeding entities from ADR-0004 have no current materiali
 - Player platoon splits
 - Career batter vs pitcher matchup
 
-Player at-bat stats (the sixth missing entity) is partially served today by querying `mlb.play_by_play` directly in `/api/mlb-atbats`. Whether that view should be materialized is an open question.
+Player at-bat stats (the sixth missing entity at the time of ADR-0004) shipped 2026-04-21 as `mlb.player_at_bats`.
 
 ## Invariants
 
@@ -107,7 +120,10 @@ Player at-bat stats (the sixth missing entity) is partially served today by quer
 - `mlb.games` stores both Final games and today's scheduled (non-Final) games. The web strip depends on this
 - Game PK is MLB's `game_pk` integer, not a synthetic key
 - `mlb.play_by_play` result-related columns are NULL on all pitches except the last one of an at-bat (`is_last_pitch = 1`). Queries that need at-bat results must filter on that predicate
-- Pitch-level Statcast stays internal to the ETL layer. Web reads only aggregate views of `mlb.play_by_play` (linescore, at-bats summary), never raw pitch rows
+- Pitch-level Statcast stays internal to the ETL layer. Web reads only aggregate views of `mlb.play_by_play` (linescore) or the materialized `mlb.player_at_bats`, never raw pitch rows
+- `mlb.player_at_bats` stores `batter_id` and `pitcher_id` only, never denormalized names. Names get joined from `mlb.players` at read time because `mlb.players` is current-season-scoped and denormalizing would leave ~30% of historical rows with NULL names
+- `mlb.player_at_bats` has `at_bat_id = '{game_pk}-{at_bat_number}'` as PK. Do not change this format
+- Materialization of `mlb.player_at_bats` runs in-lockstep with `mlb.play_by_play` writes. The at-bats diff runs separately against `mlb.player_at_bats` so partial runs self-heal
 
 ## Recent Changes
 
@@ -115,7 +131,6 @@ See `/docs/CHANGELOG.md` filtered by `[mlb][database]`. Historical entries befor
 
 ## Open Questions
 
-- Whether the 5 missing ADR-0004 entities should be materialized as tables (pre-aggregated, keeps the runtime-no-aggregation invariant) or computed as SQL views (simpler, but violates ADR-0004)
-- Whether `/api/mlb-atbats` should migrate off `mlb.play_by_play` onto a materialized `mlb.player_at_bats` table
+- Whether the 4 remaining ADR-0004 entities should be materialized as tables (pre-aggregated, keeps the runtime-no-aggregation invariant) or computed as SQL views (simpler, but violates ADR-0004)
 - Whether the Azure Blob Statcast data (`schnappmlbdata`, ~4.17 GB Parquet, 2015-2026) should be ingested into `mlb.play_by_play` as a backfill, kept parallel for historical-only queries, or dropped once the nightly PBP ETL catches up
 - Whether to add FK constraints across the 7 tables or leave them off. They were deliberately dropped when `teams` and `players` became truncate-reload, and re-adding them would require a different load strategy
