@@ -134,16 +134,29 @@ Line and Odds cells in the At-a-Glance table become tappable FanDuel betslip dee
 
 ### API routes
 
-- `/api/ping` - anonymous. `SELECT 1`. Used by Uptime Robot for DB keep-alive.
-- `/api/games?date=` - today goes through Flask `/scoreboard` (live CDN, no DB). Other dates query `nba.schedule` via `getGames()` and include `homeScore` / `awayScore`.
-- `/api/grades?date=&gameId=` - reads `dg.outcome_name` and `dg.over_price` directly.
-- `/api/team-averages` - returns `avgFgm`, `avgFga`, `avg3pm`, `avg3pa`, `avgFtm`, `avgFta` plus standard stats.
-- `/api/contextual?oppTeamId=&position=` - defense ranks. Rank 1 = most allowed.
-- `/api/matchup-grid?gameId=` - both teams' defense plus today's lineup players.
-- `/api/live-boxscore?gameId=` - calls Flask at the VM's internal IP, port 5000.
-- `/api/refresh-lines` POST - triggers `refresh-lines.yml` via `GITHUB_PAT`. No passcode.
-- `/api/refresh-data` POST - validates `ADMIN_REFRESH_CODE`, triggers `refresh-data.yml`.
-- `/api/refresh-status?runId=` - polls workflow run status.
+Timezone note: `/api/games` uses `todayCT()` (Central Time) when `?date` is omitted, to match the ETL which normalizes game dates to Central. Other routes that look up "today" may differ (e.g. `grade_props.py` uses `today_et()`).
+
+- `/api/ping` - anonymous. `SELECT 1` via `ping()`. Used by Uptime Robot for DB keep-alive
+- `/api/games?date=&sport=nba` - reads the game list from `nba.schedule` via `getGames()` for any date. For today only, overlays CDN scoreboard data (status + scores) onto games already present in the DB. CDN never drives the game list. Falls back to DB-only if Flask is unreachable
+- `/api/scoreboard` - thin passthrough to the Flask `/scoreboard` route
+- `/api/grades?date=&gameId=` - reads `dg.outcome_name`, `dg.over_price`, and `dg.outcome` directly from `common.daily_grades`. Also joins `odds.upcoming_player_props` for `link` when that column exists (FanDuel betslip deep link; NULL for historical rows)
+- `/api/game-grades?gameId=` - grades filtered to a single game
+- `/api/player-grades` - grades filtered to a player
+- `/api/player-props` - historical prop rows for a single player. Over-only, FanDuel-only (see `getPlayerProps` in `web/lib/queries.ts`)
+- `/api/team-averages?homeTeamId=&awayTeamId=&context=&periods=&opp=&gameId=` - both teams' lineup-aware player averages. Returns `avgPts/Reb/Ast/Stl/Blk/Tov/Min` plus `avg3pm/3pa`, `avgFgm/Fga`, `avgFtm/Fta`. `context` accepts a number (last N games), `all`, or `opp`
+- `/api/player-averages?gameId=&lastN=` - lineup-anchored averages for a single game
+- `/api/contextual?oppTeamId=&position=` - defense ranks. Rank 1 = most allowed
+- `/api/matchup-grid?gameId=` - both teams' defense plus today's lineup players
+- `/api/live-boxscore?gameId=` - calls Flask at the VM's public IP, port 5000. The exact IP used is defined in the route file
+- `/api/boxscore?gameId=` - persisted per-quarter box score from `nba.player_box_score_stats`
+- `/api/roster?gameId=` - daily lineup rows for a game
+- `/api/player?id=` - player header + last-N game log
+- `/api/refresh-lines` POST - dispatches `refresh-lines.yml` via GitHub Actions REST API using `GITHUB_PAT`. No passcode. Returns `{ runId }` for polling
+- `/api/refresh-data` POST - validates `ADMIN_REFRESH_CODE` (uppercased compare), then dispatches `refresh-data.yml` via `GITHUB_PAT`. Returns `{ runId }` for polling
+- `/api/refresh-status?runId=` - polls workflow run status
+- `/api/admin/*` - admin-only routes (user code management, etc.)
+- `/api/auth/*` - passcode gate endpoints
+- `/api/live`, `/api/live-props`, `/api/mlb-*` - live-odds and MLB routes
 
 Route cache headers (in `next.config.mjs`):
 
@@ -161,7 +174,7 @@ Do not revert without an ADR.
 - `StatsTable.colSpanTotal`: 11 compact / 17 all-stats
 - `minOdds` default -600; `ODDS_MIN = -1000`; reset returns to -1000
 - `oddsFilterActive = minOdds > ODDS_MIN`
-- `getGrades` reads `dg.outcome_name` and `dg.over_price` directly; no join to odds tables
+- `getGrades` reads `dg.outcome_name` and `dg.over_price` directly; no join to odds tables for prices. The only odds-table join is to `odds.upcoming_player_props` for the FanDuel betslip `link` column
 - Props strip uses `flex w-full divide-x` with `flex-1 min-w-[52px]` cells; no `min-w-max`
 - `RosterTable` "Confirmed" badge appears only when `lineupStatus = 'Confirmed'`
 - Live and Final games on `GameStrip` show scores, not spread/total
@@ -172,6 +185,7 @@ Do not revert without an ADR.
 - FanDuel betslip link appears when `row.link` is present and the game is open
 - `RefreshDataButton` requires `ADMIN_REFRESH_CODE`; `/api/refresh-lines` is unauthenticated
 - Signal logic lives in `web/lib/signals.ts`. Player-level `DUE` (regression-based) and line-level `SLUMP` displayed as `DUE` (momentum-based) are distinct signals with different inputs
+- `/api/games` treats the DB as the game-list source of truth. CDN only overlays live score/status onto games already in the DB; CDN-only games are ignored
 
 ## Recent Changes
 
@@ -181,3 +195,4 @@ See `/docs/CHANGELOG.md` filtered by `[nba][web]`. Historical entries before the
 
 - Whether to extend `/api/contextual` with combo-stat (PRA/PR/PA/RA) defense averages for the VS Defense panel. Non-trivial query change; deferred.
 - Whether PWA start URL should remain `/nba` (clean) vs. date-specific.
+- The `/api/games` route points to Flask at `20.109.181.21:5000` while the VM's Azure-recorded public IP is `172.173.126.81`. Reconcile which is live
