@@ -46,13 +46,15 @@ Workflows execute in the runner's work directory. The MCP server deliberately cl
 
 ### Flask live-data runner
 
-`etl/runner.py` on the VM. Systemd service `schnapp-flask.service`. Listens on `0.0.0.0:5000` (all interfaces), so it is reachable both locally via `127.0.0.1:5000` and externally via the VM's public IP.
+`etl/runner.py` on the VM. Systemd service `schnapp-flask.service`. Listens on `0.0.0.0:5000` (all interfaces), so it is reachable locally via `127.0.0.1:5000`, internally via the VM's private IP, and externally via a Cloudflare-proxied DNS name.
 
 - `GET /ping` - health. **No auth.** Used by `flask_status` MCP tool and for debugging. Returns `{"ok": true}`
 - `GET /scoreboard` - today's game statuses from `cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json`. Requires `X-Runner-Key` header. Returns `{ games: [...] }` with `gameStatus` 1 (upcoming), 2 (live), 3 (final)
 - `GET /boxscore?gameId=` - live player stats + score, directly from `cdn.nba.com/static/json/liveData/boxscore/boxscore_{gameId}.json`. Requires `X-Runner-Key` header
 
 Auth: `X-Runner-Key: runner-Lake4971` matches `RUNNER_API_KEY` env var. Enforced on `/scoreboard` and `/boxscore` only; `/ping` is open so external health-check callers can hit it without a secret.
+
+**Public hostname for Flask: `https://live.schnapp.bet`.** Cloudflare-proxied. Always use this DNS name from web code, never a hardcoded IP. If the VM's public IP changes, Cloudflare DNS gets updated and web routes keep working without a code change.
 
 Both CDN sources are public. `NBA_PROXY_URL` is present in the systemd environment file but the runner does not use it.
 
@@ -70,6 +72,16 @@ Tools:
 MCP venv: `~/mcp-venv`. `WorkingDirectory` for the service is `/home/schnapp-admin/sports-modeling` (direct clone, not the actions-runner work dir). Any change to `mcp/server.py` requires triggering `install-mcp.yml`; the redeploy completes in ~18-30 seconds.
 
 Auth is via the Cloudflare tunnel credential plus the shared MCP token for `shell_exec` / `read_file`. No bearer token on top of the tunnel because the claude.ai connector UI supports OAuth fields only.
+
+### Cloudflare subdomains in front of the VM
+
+| Subdomain | Backend | Purpose |
+|-----------|---------|---------|
+| `mcp.schnapp.bet` | MCP server on `127.0.0.1:8000` via named tunnel | Claude.ai MCP connector |
+| `live.schnapp.bet` | Flask on `0.0.0.0:5000` | Web app live-data routes (`/api/games`, `/api/scoreboard`, `/api/live-boxscore`) |
+| `schnapp.bet`, `www.schnapp.bet` | Azure Static Web Apps | The web app itself (DNS-only, not proxied) |
+
+Different proxy modes: the web app domains are **DNS-only** (Azure SWA issues SSL and needs the client to hit Azure directly). The Flask and MCP subdomains are **Cloudflare-proxied** (Cloudflare terminates SSL and tunnels to the VM). Do not flip these without understanding why.
 
 ### Failure modes and recovery
 
@@ -107,13 +119,14 @@ Use `GH_PAT`, not `GITHUB_PAT`, for new workflow-referenced tokens. GitHub reser
 ## Invariants
 
 - ETL secrets live in GitHub repository secrets or the VM's systemd environment files. Never hardcoded
+- Web routes that call Flask use `https://live.schnapp.bet` (Cloudflare-proxied). Never hardcode VM IPs in web code
 - Changes to `mcp/server.py` require triggering `install-mcp.yml` to redeploy
 - `cloudflared` and `schnapp-mcp` run as systemd services; the recovery pattern is restart both
 - Runner systemd service has `Restart=always`
-- Flask listens on `0.0.0.0:5000` (all interfaces) so SWA API routes can reach it via the public IP. MCP binds to `127.0.0.1:8000` only and is exposed via the Cloudflare tunnel
+- Flask listens on `0.0.0.0:5000` (all interfaces). MCP binds to `127.0.0.1:8000` only and is exposed via the Cloudflare tunnel
 - Flask `/ping` is unauthenticated by design. `/scoreboard` and `/boxscore` require `X-Runner-Key`
 - `schnapp-mcp.service` `WorkingDirectory` is `/home/schnapp-admin/sports-modeling` (direct clone), not the actions-runner work dir
-- Cloudflare DNS for `schnapp.bet` is DNS-only, not proxied. Azure SWA needs direct DNS resolution for SSL issuance
+- Cloudflare DNS for `schnapp.bet` and `www.schnapp.bet` is DNS-only (not proxied). Azure SWA needs direct DNS resolution for SSL issuance. `mcp.schnapp.bet` and `live.schnapp.bet` are Cloudflare-proxied
 - Uptime Robot replaces `keepalive.yml`. Do not reintroduce a scheduled keep-alive workflow
 - Azure SWA "Deployment Canceled" on older runs when superseded by a newer commit is expected. Not a real failure
 
@@ -125,4 +138,3 @@ See `/docs/CHANGELOG.md` filtered by `[infra]`. Historical entries before the re
 
 - Whether to formalize runbooks for common operations (Flask restart, tunnel restart, VM reboot, Odds API key rotation)
 - Whether to add health-check automation beyond the current Uptime Robot ping
-- The `/api/games` route hits the Flask runner at `20.109.181.21:5000`, not the VM's recorded public IP `172.173.126.81`. One of these may be stale. Reconcile when convenient
