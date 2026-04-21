@@ -46,13 +46,13 @@ Workflows execute in the runner's work directory. The MCP server deliberately cl
 
 ### Flask live-data runner
 
-`etl/runner.py` on the VM. Systemd service `schnapp-flask.service`. Bound to `127.0.0.1:5000`. Reached from SWA API routes via the VM's public IP (`172.173.126.81:5000`).
+`etl/runner.py` on the VM. Systemd service `schnapp-flask.service`. Listens on `0.0.0.0:5000` (all interfaces), so it is reachable both locally via `127.0.0.1:5000` and externally via the VM's public IP.
 
-- `GET /ping` - health
-- `GET /scoreboard` - today's game statuses from `cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json`. Returns `{ games: [...] }` with `gameStatus` 1 (upcoming), 2 (live), 3 (final)
-- `GET /boxscore?gameId=` - live player stats + score, directly from `cdn.nba.com/static/json/liveData/boxscore/boxscore_{gameId}.json`
+- `GET /ping` - health. **No auth.** Used by `flask_status` MCP tool and for debugging. Returns `{"ok": true}`
+- `GET /scoreboard` - today's game statuses from `cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json`. Requires `X-Runner-Key` header. Returns `{ games: [...] }` with `gameStatus` 1 (upcoming), 2 (live), 3 (final)
+- `GET /boxscore?gameId=` - live player stats + score, directly from `cdn.nba.com/static/json/liveData/boxscore/boxscore_{gameId}.json`. Requires `X-Runner-Key` header
 
-Auth: header `X-Runner-Key: runner-Lake4971` required on all endpoints.
+Auth: `X-Runner-Key: runner-Lake4971` matches `RUNNER_API_KEY` env var. Enforced on `/scoreboard` and `/boxscore` only; `/ping` is open so external health-check callers can hit it without a secret.
 
 Both CDN sources are public. `NBA_PROXY_URL` is present in the systemd environment file but the runner does not use it.
 
@@ -96,7 +96,7 @@ Auth is via the Cloudflare tunnel credential plus the shared MCP token for `shel
 
 ### Keep-alive
 
-Uptime Robot pings `https://schnapp.bet/api/ping` every 30 minutes. The ping route runs `SELECT 1` and keeps Azure SQL from pausing during active hours. It replaces a previous `keepalive.yml` workflow that consumed runner minutes; the workflow is now dispatch-only.
+Uptime Robot pings `https://schnapp.bet/api/ping` (the SWA API route, not the Flask `/ping`) every 30 minutes. The web `/api/ping` runs `SELECT 1` against Azure SQL and keeps the DB from pausing during active hours. It replaces a previous `keepalive.yml` workflow that consumed runner minutes; the workflow is now dispatch-only.
 
 ### Secrets catalog
 
@@ -110,7 +110,8 @@ Use `GH_PAT`, not `GITHUB_PAT`, for new workflow-referenced tokens. GitHub reser
 - Changes to `mcp/server.py` require triggering `install-mcp.yml` to redeploy
 - `cloudflared` and `schnapp-mcp` run as systemd services; the recovery pattern is restart both
 - Runner systemd service has `Restart=always`
-- Flask and MCP bind to `127.0.0.1` only; external access to MCP goes via the Cloudflare tunnel
+- Flask listens on `0.0.0.0:5000` (all interfaces) so SWA API routes can reach it via the public IP. MCP binds to `127.0.0.1:8000` only and is exposed via the Cloudflare tunnel
+- Flask `/ping` is unauthenticated by design. `/scoreboard` and `/boxscore` require `X-Runner-Key`
 - `schnapp-mcp.service` `WorkingDirectory` is `/home/schnapp-admin/sports-modeling` (direct clone), not the actions-runner work dir
 - Cloudflare DNS for `schnapp.bet` is DNS-only, not proxied. Azure SWA needs direct DNS resolution for SSL issuance
 - Uptime Robot replaces `keepalive.yml`. Do not reintroduce a scheduled keep-alive workflow
@@ -124,3 +125,4 @@ See `/docs/CHANGELOG.md` filtered by `[infra]`. Historical entries before the re
 
 - Whether to formalize runbooks for common operations (Flask restart, tunnel restart, VM reboot, Odds API key rotation)
 - Whether to add health-check automation beyond the current Uptime Robot ping
+- The `/api/games` route hits the Flask runner at `20.109.181.21:5000`, not the VM's recorded public IP `172.173.126.81`. One of these may be stale. Reconcile when convenient
