@@ -6,10 +6,11 @@ Deliberately brief. Detailed task tracking lives in component READMEs under "Ope
 
 - **Documentation restructure** (complete, 2026-04-20). Migrated from monolithic `PROJECT_REFERENCE.md` to co-located component READMEs with central `/docs/`. See ADR-0001 and ADR-0016. Archived originals at `/docs/_archive/`.
 - **NFL ETL** (live, 2026-04-21). 7 tables populated via `nflreadpy` on a Tuesday 09:00 UTC schedule. See `etl/nfl/README.md`.
+- **MLB derived entities** (1 of 5 missing shipped, 2026-04-21). `mlb.player_at_bats` materialized in-lockstep with `mlb.play_by_play`; `/api/mlb-atbats` swapped to read from it. Four remain: batter context per game, batter projections per game, player trend/pattern stats, player platoon splits, career batter-vs-pitcher matchup. ADR-0018 establishes the pattern the others should follow (inline materialization, diff-against-destination self-heal, ID-only storage).
 
 ## Next up
 
-- **MLB build**. Design phase complete; ETL, database tables, and web components all need to be built. See `/database/mlb/README.md` and `/web/mlb/README.md` for the 9-entity catalog and visual inventory. ADR-0004 captures the architectural commitment to pre-aggregated stats.
+- **MLB build**. 5 of the 9 ADR-0004 entities are live (the 8 originally shipped plus `mlb.player_at_bats`). 4 derived entities remain, each blocking specific ADR-0003 pages. Of the 6 ADR-0003 pages: Game is live, Player Analysis is partially unblocked (at-bat access path exists via `IX_player_at_bats_batter` on `(batter_id, game_date)`, but still blocked on `player_trend_stats`), EV/VS/Proj/Pitcher Analysis are fully blocked on remaining entities. See `/database/mlb/README.md` and `/web/mlb/README.md`.
 - **NFL web surface**. ETL is live but no web layer exists yet. Parallel design session like the MLB visual catalog: identify what visuals matter, what stats feed them, what the pre-aggregation layer needs to produce. See `web/nfl/README.md`.
 - **NFL odds ingestion**. `odds_etl.py` reportedly mentions NFL sport keys but has not been verified. Decide whether to extend it or add a dedicated `nfl-odds-etl.py`. See `etl/nfl/README.md` open questions.
 
