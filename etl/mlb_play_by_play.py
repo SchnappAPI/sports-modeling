@@ -646,34 +646,35 @@ def rebuild_player_at_bats(engine):
 # SQL expression that classifies a row from mlb.player_at_bats into at-bat
 # count buckets. Reused by both the per-flush loader and the full rebuild.
 # Event types follow the MLB Stats API contract observed in production data.
+# Note: references unqualified "ab" alias; callers supply FROM mlb.player_at_bats AS ab.
 BVP_AGGREGATE_SELECT = """
-    batter_id,
-    pitcher_id,
+    ab.batter_id,
+    ab.pitcher_id,
     COUNT(*) AS plate_appearances,
     SUM(CASE
-        WHEN result_event_type IN (
+        WHEN ab.result_event_type IN (
             'walk','intent_walk','hit_by_pitch','sac_fly','sac_fly_double_play',
             'sac_bunt','sac_bunt_double_play','catcher_interf'
         ) THEN 0 ELSE 1
     END) AS at_bats,
-    SUM(CASE WHEN result_event_type IN ('single','double','triple','home_run') THEN 1 ELSE 0 END) AS hits,
-    SUM(CASE WHEN result_event_type = 'single'   THEN 1 ELSE 0 END) AS singles,
-    SUM(CASE WHEN result_event_type = 'double'   THEN 1 ELSE 0 END) AS doubles,
-    SUM(CASE WHEN result_event_type = 'triple'   THEN 1 ELSE 0 END) AS triples,
-    SUM(CASE WHEN result_event_type = 'home_run' THEN 1 ELSE 0 END) AS home_runs,
-    SUM(ISNULL(result_rbi, 0)) AS rbi,
-    SUM(CASE WHEN result_event_type IN ('walk','intent_walk') THEN 1 ELSE 0 END) AS walks,
-    SUM(CASE WHEN result_event_type IN ('strikeout','strikeout_double_play') THEN 1 ELSE 0 END) AS strikeouts,
-    SUM(CASE WHEN result_event_type = 'hit_by_pitch' THEN 1 ELSE 0 END) AS hit_by_pitch,
-    SUM(CASE WHEN result_event_type IN ('sac_fly','sac_fly_double_play') THEN 1 ELSE 0 END) AS sac_flies,
+    SUM(CASE WHEN ab.result_event_type IN ('single','double','triple','home_run') THEN 1 ELSE 0 END) AS hits,
+    SUM(CASE WHEN ab.result_event_type = 'single'   THEN 1 ELSE 0 END) AS singles,
+    SUM(CASE WHEN ab.result_event_type = 'double'   THEN 1 ELSE 0 END) AS doubles,
+    SUM(CASE WHEN ab.result_event_type = 'triple'   THEN 1 ELSE 0 END) AS triples,
+    SUM(CASE WHEN ab.result_event_type = 'home_run' THEN 1 ELSE 0 END) AS home_runs,
+    SUM(ISNULL(ab.result_rbi, 0)) AS rbi,
+    SUM(CASE WHEN ab.result_event_type IN ('walk','intent_walk') THEN 1 ELSE 0 END) AS walks,
+    SUM(CASE WHEN ab.result_event_type IN ('strikeout','strikeout_double_play') THEN 1 ELSE 0 END) AS strikeouts,
+    SUM(CASE WHEN ab.result_event_type = 'hit_by_pitch' THEN 1 ELSE 0 END) AS hit_by_pitch,
+    SUM(CASE WHEN ab.result_event_type IN ('sac_fly','sac_fly_double_play') THEN 1 ELSE 0 END) AS sac_flies,
     SUM(
-        CASE WHEN result_event_type = 'single'   THEN 1
-             WHEN result_event_type = 'double'   THEN 2
-             WHEN result_event_type = 'triple'   THEN 3
-             WHEN result_event_type = 'home_run' THEN 4
+        CASE WHEN ab.result_event_type = 'single'   THEN 1
+             WHEN ab.result_event_type = 'double'   THEN 2
+             WHEN ab.result_event_type = 'triple'   THEN 3
+             WHEN ab.result_event_type = 'home_run' THEN 4
              ELSE 0 END
     ) AS total_bases,
-    MAX(game_date) AS last_faced_date
+    MAX(ab.game_date) AS last_faced_date
 """
 
 
@@ -762,12 +763,15 @@ def load_career_bvp_for_games(engine, game_pks):
     needs an UPDATE rather than an INSERT. Staged MERGE handles both.
 
     Steps:
-      1. Find affected (batter, pitcher) pairs from player_at_bats where
-         game_pk IN game_pks.
-      2. Recompute lifetime counts for those pairs across the full
-         player_at_bats table.
-      3. Stage into #stage_bvp.
-      4. MERGE into mlb.career_batter_vs_pitcher.
+      1. Stage the affected (batter, pitcher) pairs from player_at_bats
+         where game_pk IN game_pks into #affected_pairs.
+      2. Aggregate lifetime counts for those pairs across the full
+         player_at_bats table via INNER JOIN to #affected_pairs into #stage_bvp.
+      3. MERGE #stage_bvp into mlb.career_batter_vs_pitcher.
+
+    SQL Server does not support tuple-IN syntax, so both staging tables
+    carry their own compound PK and the second stage uses a JOIN rather
+    than a (batter_id, pitcher_id) IN (...) predicate.
     """
     if not game_pks:
         return
@@ -777,7 +781,15 @@ def load_career_bvp_for_games(engine, game_pks):
 
     with engine.begin() as conn:
         conn.execute(text("""
+            IF OBJECT_ID('tempdb..#affected_pairs') IS NOT NULL DROP TABLE #affected_pairs;
             IF OBJECT_ID('tempdb..#stage_bvp') IS NOT NULL DROP TABLE #stage_bvp;
+
+            CREATE TABLE #affected_pairs (
+                batter_id  INT NOT NULL,
+                pitcher_id INT NOT NULL,
+                PRIMARY KEY (batter_id, pitcher_id)
+            );
+
             CREATE TABLE #stage_bvp (
                 batter_id         INT NOT NULL,
                 pitcher_id        INT NOT NULL,
@@ -800,13 +812,15 @@ def load_career_bvp_for_games(engine, game_pks):
         """))
 
         conn.execute(text(f"""
-            WITH affected_pairs AS (
-                SELECT DISTINCT batter_id, pitcher_id
-                FROM mlb.player_at_bats
-                WHERE game_pk IN ({placeholders})
-                  AND batter_id IS NOT NULL
-                  AND pitcher_id IS NOT NULL
-            )
+            INSERT INTO #affected_pairs (batter_id, pitcher_id)
+            SELECT DISTINCT batter_id, pitcher_id
+            FROM mlb.player_at_bats
+            WHERE game_pk IN ({placeholders})
+              AND batter_id IS NOT NULL
+              AND pitcher_id IS NOT NULL;
+        """))
+
+        conn.execute(text(f"""
             INSERT INTO #stage_bvp (
                 batter_id, pitcher_id, plate_appearances, at_bats, hits,
                 singles, doubles, triples, home_runs,
@@ -814,11 +828,10 @@ def load_career_bvp_for_games(engine, game_pks):
                 last_faced_date
             )
             SELECT {BVP_AGGREGATE_SELECT}
-            FROM mlb.player_at_bats
-            WHERE (batter_id, pitcher_id) IN (SELECT batter_id, pitcher_id FROM affected_pairs)
-              AND batter_id IS NOT NULL
-              AND pitcher_id IS NOT NULL
-            GROUP BY batter_id, pitcher_id;
+            FROM mlb.player_at_bats AS ab
+            INNER JOIN #affected_pairs AS ap
+                ON ab.batter_id = ap.batter_id AND ab.pitcher_id = ap.pitcher_id
+            GROUP BY ab.batter_id, ab.pitcher_id;
         """))
 
         result = conn.execute(text("SELECT COUNT(*) FROM #stage_bvp")).fetchone()
@@ -839,8 +852,7 @@ def rebuild_career_bvp(engine):
 
     Chunked by batter_id to keep the staging temp table bounded. Each chunk
     aggregates a slice of batters against all pitchers they've faced, then
-    merges. Deterministic chunk boundaries via NTILE over the sorted batter
-    list so chunks don't overlap.
+    merges.
 
     Does NOT delete existing rows. Because every chunk MERGEs on
     (batter_id, pitcher_id), stale rows for pairs that no longer appear
@@ -898,10 +910,10 @@ def rebuild_career_bvp(engine):
                     last_faced_date
                 )
                 SELECT {BVP_AGGREGATE_SELECT}
-                FROM mlb.player_at_bats
-                WHERE batter_id IN ({placeholders})
-                  AND pitcher_id IS NOT NULL
-                GROUP BY batter_id, pitcher_id;
+                FROM mlb.player_at_bats AS ab
+                WHERE ab.batter_id IN ({placeholders})
+                  AND ab.pitcher_id IS NOT NULL
+                GROUP BY ab.batter_id, ab.pitcher_id;
             """))
 
             result = conn.execute(text("SELECT COUNT(*) FROM #stage_bvp")).fetchone()
