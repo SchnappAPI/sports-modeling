@@ -283,3 +283,21 @@ Consequences:
 - `/docs/MIGRATION_HANDOFF.md` becomes obsolete once Step 7 is complete and should be deleted in the same session as this ADR lands
 - `.github/workflows/` and `.gitignore` were spot-checked and do not reference the archived paths
 - Future reorganizations that might want to shorten the path can move the archive again; git mv keeps every past move discoverable via `git log --follow`
+
+---
+
+## ADR-0017 [shared][docs] Session protocol skill at `/docs/skills/session-protocol.md` separates prescriptive checklist from protocol rationale
+Date: 2026-04-21
+
+Context: `/docs/SESSION_PROTOCOL.md` defined the protocol (start, end, invariants, why) in one file. In practice, new sessions were tripping over things the protocol did not cover: mechanical hazards like `github:push_files` corrupting `.py` files, stale memory contradicting the repo, NFL context leaking into MLB work, mid-session changes (new infrastructure, new schema) not getting captured until end-of-session when they were forgotten. Adding all of that to `SESSION_PROTOCOL.md` would have turned a 60-line reference into a 300-line operations manual and diluted its role as the canonical definition. Separately, a fresh session's context window is most constrained at the start, so execution guidance needs to be short enough to absorb in one read.
+
+Decision: Introduce a second file at `/docs/skills/session-protocol.md` that holds prescriptive execution guidance: a start-of-session checklist, a mid-session signals table (infrastructure change, schema change, roadmap shift, etc. each mapped to an owed update), an end-of-session checklist, mechanical guardrails, known session-boundary failure modes, and a bounded "when to deviate" list. The canonical protocol definition stays in `SESSION_PROTOCOL.md`; rationale stays there too under "Why this protocol exists." The two files reference each other: the protocol points at the skill for execution; the skill complements the protocol without duplicating it.
+
+Consequences:
+
+- Sessions read two small files at start (`/docs/README.md`, `/docs/SESSION_PROTOCOL.md`) and the skill (`/docs/skills/session-protocol.md`) instead of one medium file. Total read length is comparable, but the split makes the prescriptive content scannable.
+- The mid-session signals table is a new structural piece. Any new signal category (e.g. "new third-party dependency added") should be appended to that table in the skill with its corresponding owed update.
+- Mechanical guardrails (fresh SHA before create_or_update_file, no push_files for .py) live in the skill, not scattered across user memory. If new guardrails emerge from burned sessions, they go in the skill.
+- The "when to deviate" section in the skill is capped at four bullets by design. Adding a fifth is a signal that deviation has become the norm and the protocol itself needs revision.
+- `/docs/skills/` is now a directory. Future Claude-facing skill files (testing playbooks, debugging runbooks, etc.) go there. User-facing runbooks for infrastructure operations continue to live at `/infrastructure/runbooks/`.
+- `/docs/README.md` now lists the skill under "Read first every session." The router is the one place where the reading order is authoritative; anyone editing the reading order edits the router.
