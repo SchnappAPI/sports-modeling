@@ -3,8 +3,9 @@
 This is the entry point for all project documentation. It links to everything; it does not duplicate content.
 
 ## Read first every session
-- `SESSION_PROTOCOL.md` for how every session starts and ends.
-- `CHANGELOG.md` for the last 20 entries, filtered by tag relevant to the task.
+- `skills/session-protocol.md` for start-of-session checklist, mid-session signals, end-of-session checklist, and mechanical guardrails. Read this before taking any action.
+- `SESSION_PROTOCOL.md` for the canonical protocol definition.
+- `CHANGELOG.md` for the last ~10 entries, filtered by tag relevant to the task.
 
 ## Cross-cutting reference
 - `PRODUCT_BLUEPRINT.md` for the sport-agnostic product concept.
@@ -20,10 +21,10 @@ Web: `/web/<sport>/README.md` and `/web/_shared/README.md`.
 Infrastructure: `/infrastructure/README.md` plus runbooks in `/infrastructure/runbooks/`.
 
 ## How sport status varies
-NBA is live. MLB is in design phase with data and visuals cataloged but no code yet. NFL is in planning. Each component README starts with a STATUS line that states current maturity in one sentence. Empty placeholder docs are not used; if something is not designed yet, the README says so.
+NBA is live. MLB is mid-build: ETL and a basic web page exist, but the full 9-entity catalog from ADR-0004 and the 6-page roadmap from ADR-0003 are not complete. NFL ETL is live (2026-04-21) but no web surface exists yet. Each component README starts with a STATUS line that states current maturity in one sentence.
 
-## Migration in progress
-This documentation structure replaces a legacy `PROJECT_REFERENCE.md` at the repo root (now archived at `/docs/_archive/`). See `DECISIONS.md` ADR-0001 for the structure decision and ADR-0016 for the archive decision.
+## Documentation structure
+This hierarchy replaced a legacy `PROJECT_REFERENCE.md` at the repo root on 2026-04-20. Archived at `/docs/_archive/`. See `DECISIONS.md` ADR-0001 for the structure decision and ADR-0016 for the archive decision.
 
 ## Tag taxonomy for CHANGELOG and DECISIONS
 Every entry uses bracketed scope tags. The first tag is sport scope, the second is component scope.
