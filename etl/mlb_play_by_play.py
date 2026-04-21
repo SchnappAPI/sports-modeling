@@ -9,7 +9,14 @@ Source: https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics
 
 Two tables written:
   mlb.play_by_play    — one row per play event (pitch, pickoff, baserunning)
-  mlb.player_at_bats  — one row per completed at-bat, denormalized with names
+  mlb.player_at_bats  — one row per completed at-bat, IDs only (no names)
+
+Why no denormalized names:
+  mlb.players is truncate-and-reload scoped to the current season, so roughly
+  30% of pitcher_ids and 20% of batter_ids across historical PBP would land
+  as NULL if we joined at write time. Web routes join mlb.players at read
+  time instead — the table has under a thousand rows with a PK on player_id,
+  so the read-time join is effectively free.
 
 Write strategy:
   Both tables use direct INSERT via to_sql(if_exists='append') with
@@ -98,8 +105,6 @@ INSERT_DTYPES = {
 AB_INSERT_DTYPES = {
     "at_bat_id":          VARCHAR(30),
     "game_date":          Date(),
-    "batter_name":        VARCHAR(100),
-    "pitcher_name":       VARCHAR(100),
     "result_event_type":  VARCHAR(50),
     "result_description": VARCHAR(1000),
     "hit_trajectory":     VARCHAR(30),
@@ -207,9 +212,7 @@ CREATE TABLE mlb.player_at_bats (
     inning              INT           NULL,
     is_top_inning       BIT           NULL,
     batter_id           INT           NULL,
-    batter_name         VARCHAR(100)  NULL,
     pitcher_id          INT           NULL,
-    pitcher_name        VARCHAR(100)  NULL,
     result_event_type   VARCHAR(50)   NULL,
     result_description  VARCHAR(1000) NULL,
     result_rbi          INT           NULL,
@@ -225,6 +228,24 @@ CREATE TABLE mlb.player_at_bats (
     home_team_id        INT           NULL,
     created_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE()
 );
+"""
+
+# If the table already exists from the initial denormalized design, drop the
+# name columns. Idempotent: only runs when the columns are still present.
+DDL_DROP_NAME_COLUMNS = """
+IF EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'player_at_bats'
+      AND COLUMN_NAME = 'batter_name'
+)
+    ALTER TABLE mlb.player_at_bats DROP COLUMN batter_name;
+
+IF EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'player_at_bats'
+      AND COLUMN_NAME = 'pitcher_name'
+)
+    ALTER TABLE mlb.player_at_bats DROP COLUMN pitcher_name;
 """
 
 DDL_CREATE_AT_BATS_INDEXES = """
@@ -251,6 +272,7 @@ def ensure_table(engine):
         conn.execute(text(DDL_CREATE))
         conn.execute(text(DDL_ALTER_DESCRIPTIONS))
         conn.execute(text(DDL_CREATE_AT_BATS))
+        conn.execute(text(DDL_DROP_NAME_COLUMNS))
         conn.execute(text(DDL_CREATE_AT_BATS_INDEXES))
     log.info("mlb.play_by_play and mlb.player_at_bats tables ensured.")
 
@@ -458,11 +480,11 @@ def load_player_at_bats_for_games(engine, game_pks):
     mlb.player_at_bats for the given game_pks.
 
     Skips any game_pk already present in mlb.player_at_bats so partial
-    runs are self-healing. Same filter as /api/mlb-atbats was doing:
+    runs are self-healing. Same filter as the live Exit Velo query:
     is_last_pitch = 1 AND result_event_type IS NOT NULL.
 
-    Batter and pitcher names are denormalized from mlb.players at write
-    time. Name corrections (rare) require a manual DELETE + rebuild.
+    Batter and pitcher names are NOT stored here. The web layer joins
+    mlb.players at read time.
     """
     if not game_pks:
         return
@@ -481,9 +503,7 @@ def load_player_at_bats_for_games(engine, game_pks):
         log.info("at_bats: all %d games already materialized.", len(game_pks))
         return
 
-    # Pull at-bat rows straight from PBP with player names joined in.
-    # We do this in SQL rather than Python because the source rows are
-    # already in the database and the join to mlb.players is trivial.
+    # Pull at-bat rows straight from PBP. IDs only; names joined at read time.
     placeholders = ", ".join(str(g) for g in target)
     query = f"""
         SELECT
@@ -494,9 +514,7 @@ def load_player_at_bats_for_games(engine, game_pks):
             p.inning,
             p.is_top_inning,
             p.batter_id,
-            pb.player_name    AS batter_name,
             p.pitcher_id,
-            pp.player_name    AS pitcher_name,
             p.result_event_type,
             p.result_description,
             p.result_rbi,
@@ -511,8 +529,6 @@ def load_player_at_bats_for_games(engine, game_pks):
             p.away_team_id,
             p.home_team_id
         FROM mlb.play_by_play p
-        LEFT JOIN mlb.players pb ON pb.player_id = p.batter_id
-        LEFT JOIN mlb.players pp ON pp.player_id = p.pitcher_id
         WHERE p.game_pk IN ({placeholders})
           AND p.is_last_pitch = 1
           AND p.result_event_type IS NOT NULL
@@ -559,7 +575,6 @@ def rebuild_player_at_bats(engine):
     if not pbp_games:
         return
 
-    # Process in chunks to keep the IN-clause and result set sane.
     CHUNK = 100
     for start in range(0, len(pbp_games), CHUNK):
         chunk = pbp_games[start:start + CHUNK]
@@ -629,7 +644,6 @@ def load_play_by_play(engine, seasons, batch_size):
         if i % FLUSH_EVERY == 0 or i == len(work):
             flush(engine, flush_rows)
             log.info("Wrote %d PBP rows after game %d of %d.", len(flush_rows), i, len(work))
-            # In-lockstep materialize at-bats for the games just written.
             load_player_at_bats_for_games(engine, flush_games)
             flush_rows  = []
             flush_games = []
