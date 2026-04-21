@@ -72,7 +72,7 @@ Away vs home filter: `isAway = teamId === awayTeamId`; away at-bats happen when 
 
 ### Which games have PBP data
 
-`mlb.play_by_play` is a separate on-demand loader (`mlb-pbp-etl.yml`). The backfill is partial — not every Final game has pitch data. `hasPbp` from `/api/mlb-linescore` is the authoritative check; the Exit Velo tab will cleanly degrade for games without data. `mlb.player_at_bats` is materialized in-lockstep with `mlb.play_by_play`, so the same set of games is covered.
+`mlb.play_by_play` is a separate on-demand loader (`mlb-pbp-etl.yml`). The backfill is partial — not every Final game has pitch data. `hasPbp` from `/api/mlb-linescore` is the authoritative check; the Exit Velo tab will cleanly degrade for games without data. `mlb.player_at_bats` is materialized in-lockstep with `mlb.play_by_play`, so the same set of games is covered. `mlb.career_batter_vs_pitcher` is also materialized in-lockstep from `mlb.player_at_bats`, so it too is covered for the same game set.
 
 ### Timezone
 
@@ -83,13 +83,13 @@ Away vs home filter: `isAway = teamId === awayTeamId`; away at-bats happen when 
 The ADR-0003 page plan remains the target:
 
 - **Game** — the current `/mlb` page. Live
-- **Player Analysis** — consolidation of legacy PBI pages New, Extra, Criteria, and MAIN. Not started
+- **Player Analysis** — consolidation of legacy PBI pages New, Extra, Criteria, and MAIN. Not started; data dependencies partially satisfied (at-bats access path live; player trend/pattern stats still pending)
 - **EV** — team-wide exit velocity view. Partially addressed by the current Exit Velo tab but scoped to a single game. Full team view not started
-- **VS** — lineup-wide career matchup. Not started
+- **VS** — lineup-wide career matchup. Not started, but data is now available: `mlb.career_batter_vs_pitcher` shipped 2026-04-21 with 165,550 rows and both `(batter_id, pitcher_id)` and `(pitcher_id, batter_id)` access paths. A future `/api/mlb-bvp` route can read this directly; no runtime aggregation needed
 - **Proj** — lineup projections. Not started
 - **Pitcher Analysis** — pitcher counterpart to Player Analysis. Not started
 
-Five of six pages still need data that depends on the remaining ADR-0004 entities. The Game page can ship and iterate today; the others are blocked on database work. `mlb.player_at_bats` (shipped 2026-04-21) covers one of those prerequisites and its index on `(batter_id, game_date)` is the intended access path for Player Analysis.
+Five of six pages still need data that depends on the remaining ADR-0004 entities. The Game page can ship and iterate today; the VS page is the first of the remaining five whose data layer is fully in place. `mlb.player_at_bats` (shipped 2026-04-21) covers the at-bat access path for Player Analysis. `mlb.career_batter_vs_pitcher` (shipped 2026-04-21) covers the career matchup access path for both VS and the matchup cards on Player Analysis.
 
 ## Invariants
 
@@ -103,6 +103,7 @@ Do not revert without an ADR.
 - `/api/mlb-linescore` derives runs from `mlb.play_by_play` scoring plays, not from `mlb.batting_stats`. Hits come from `batting_stats` because PBP does not have a reliable hit-count aggregate
 - `/api/mlb-atbats` reads from `mlb.player_at_bats` (not `mlb.play_by_play`). Do not revert to the PBP aggregate query — the materialization exists precisely to keep ADR-0004's no-runtime-aggregation invariant
 - `/api/mlb-atbats` joins `mlb.players` at read time for batter and pitcher names. Names are not denormalized onto `mlb.player_at_bats` because `mlb.players` is current-season-scoped
+- Future VS-page route must read `mlb.career_batter_vs_pitcher` directly, not aggregate `mlb.player_at_bats` at request time. Same rationale as `/api/mlb-atbats`: ADR-0004's no-runtime-aggregation invariant
 - MLB shares no components with NBA. If something feels reusable, put it under `/web/_shared/` first
 
 ## Recent Changes
@@ -113,6 +114,7 @@ See `/docs/CHANGELOG.md` filtered by `[mlb][web]`. Historical entries before the
 
 - Whether to add a Pitch Log sub-tab under Box Score that shows every pitch with type, velocity, location, and result. Data is already in `mlb.play_by_play`
 - Whether to surface win probability changes per at-bat on the Exit Velo tab
-- When to start the Player Analysis page — now unblocked on at-bat access (via `mlb.player_at_bats` + its `batter_id, game_date` index), but still blocked on `player_trend_stats` materialization
+- When to start the Player Analysis page — now unblocked on at-bat access (via `mlb.player_at_bats` + its `batter_id, game_date` index) and career matchup access (via `mlb.career_batter_vs_pitcher`), but still blocked on `player_trend_stats` materialization
+- When to start the VS page. No remaining data blockers as of 2026-04-21; needs page design and `/api/mlb-bvp` route
 - Mobile layout for the 13-zone hot/cold grid (still a question from the original skeleton; deferred until the page is built)
-- Whether to pull opening-day 2023-2024-2025 historical games into PBP as a one-time backfill before the 2026 season gets deep
+- Whether to pull opening-day 2023-2024-2025 historical games into PBP as a one-time backfill before the 2026 season gets deep. Would also grow `mlb.career_batter_vs_pitcher` row count significantly
