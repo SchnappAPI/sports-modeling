@@ -14,6 +14,8 @@ Historical entries from before the documentation restructure are archived in the
 
 ---
 
+2026-04-20 [nba][docs] Completed /docs/ Step 4: migrated NBA content from legacy /PROJECT_REFERENCE.md into etl/nba, web/nba, database/nba, infrastructure, and etl/_shared READMEs. Added ADRs 0005-0010 capturing grading v3, signal redesign, FanDuel-only, two-stage lineup poll, player_line_patterns, and Webshare proxy. Legacy /PROJECT_REFERENCE.md remains until Step 7 retirement.
+
 2026-04-20 [shared][docs] Added /docs/MIGRATION_HANDOFF.md to preserve MLB visual catalog and full migration plan across session boundary. Read before resuming Step 4 or later. File is temporary; delete after Step 7.
 
 2026-04-20 [shared][docs] Completed /docs/ Step 3: added 16 component README skeletons covering ETL, database, web, and infrastructure across all sports. NBA READMEs reference legacy PROJECT_REFERENCE.md as authoritative until Step 4 content migration.
