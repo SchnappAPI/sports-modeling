@@ -1,3 +1,11 @@
+> **ARCHIVED 2026-04-20.** This file is preserved as the historical engineering record up through the documentation restructure.
+>
+> The active changelog is now `/docs/CHANGELOG.md`, filtered by `[scope][component]` tags.
+>
+> Do not append to this file. New entries go in `/docs/CHANGELOG.md`. See ADR-0016 for the archive decision.
+
+---
+
 # Changelog
 
 > **For Claude — how to use this file:**

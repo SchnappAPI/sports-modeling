@@ -1,3 +1,15 @@
+> **ARCHIVED 2026-04-20.** This file is preserved for historical reference only and is no longer authoritative.
+>
+> The active documentation now lives at:
+> - `/docs/README.md` — router to everything
+> - `/docs/SESSION_PROTOCOL.md` — session protocol that replaces the one at the top of this file
+> - `/docs/DECISIONS.md` — ADR log (ADR-0001 captures the rationale for this restructure)
+> - Component READMEs under `/etl/<sport>/`, `/database/<sport>/`, `/web/<sport>/`, `/infrastructure/`
+>
+> Do not update this file. For ongoing work, update the component README or append to `/docs/CHANGELOG.md`. See ADR-0016 for the archive decision.
+
+---
+
 # Sports Modeling — Project Reference
 
 > **For Claude — session protocol:**
