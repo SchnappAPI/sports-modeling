@@ -29,7 +29,7 @@ import os
 import sys
 import argparse
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import nflreadpy
@@ -353,7 +353,7 @@ def load_team_game_stats(engine, season: int) -> None:
 # Main
 # ---------------------------------------------------------------------------
 def current_nfl_season() -> int:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return now.year if now.month >= 6 else now.year - 1
 
 
