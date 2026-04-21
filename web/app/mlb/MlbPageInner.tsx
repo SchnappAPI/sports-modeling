@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import MlbGameTabs from './MlbGameTabs';
 import MlbVsView from './MlbVsView';
+import MlbEvView from './MlbEvView';
 
 interface MlbGame {
   gameId: number;
@@ -28,7 +29,7 @@ type ViewKey = 'game' | 'vs' | 'ev' | 'proj' | 'player' | 'pitcher';
 const VIEWS: { key: ViewKey; label: string; enabled: boolean }[] = [
   { key: 'game',    label: 'Game',    enabled: true  },
   { key: 'vs',      label: 'VS',      enabled: true  },
-  { key: 'ev',      label: 'EV',      enabled: false },
+  { key: 'ev',      label: 'EV',      enabled: true  },
   { key: 'proj',    label: 'Proj',    enabled: false },
   { key: 'player',  label: 'Player',  enabled: false },
   { key: 'pitcher', label: 'Pitcher', enabled: false },
@@ -267,6 +268,8 @@ export default function MlbPageInner() {
             <MlbGameTabs game={activeGame} />
           ) : activeView === 'vs' ? (
             <MlbVsView game={activeGame} />
+          ) : activeView === 'ev' ? (
+            <MlbEvView game={activeGame} />
           ) : (
             <div className="py-6 text-sm text-gray-500">Coming soon.</div>
           )
