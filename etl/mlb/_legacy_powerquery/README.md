@@ -7,31 +7,28 @@ Source materials extracted from the legacy MLB Power BI workflow. Reference-only
 - `MLB_PBIX_REFERENCE.md` - Authoritative reference document. Covers page inventory, model tables, visual field bindings, M query catalog, dependency map, cleanup recommendations, and Azure SQL schema design hints. Start here.
 - `miscMLBinstructions_full.txt` - Extracted text of `miscMLBinstructions.docx`. Contains the M code authoring rules and the fnGet/all consolidation pattern spec.
 - `m_query_catalog.json` - Structured index of all 61 query sections in `mlbStatQueries.docx`. Each entry records source line range, API URL(s), output column count, and sample column names.
+- `pbix_visual_catalog.json` - Compact JSON inventory of all 135 visuals across all 10 pages. Each visual is recorded as `{id, type, title, refs}` where `refs` is a list of `[kind, table, field]` triples. Alias tables (`b`, `p`, `m`, `t`, `u`, `p1`, `p2`) are preserved as they appear in the DAX projections; see section 3.12 of `MLB_PBIX_REFERENCE.md` for alias resolution.
 
-## Pending artifacts (to be committed from local)
+## Pending artifacts
 
-These files are too large for reliable inline commit via the API. They are preserved on Austin's machine and should be committed using a local `git add` / `git commit` / `git push` from `C:\Users\1stLake\sports-modeling`:
-
-- `mlbStatQueries_full.txt` - Verbatim extracted M code from `mlbStatQueries.docx`. 225 KB, 4508 lines. The raw source for every entry in `m_query_catalog.json`.
-- `pbix_visual_catalog.json` - Full structured inventory of all 135 visuals across 10 pages, with every field reference preserved. 164 KB.
-
-**To commit locally:**
+- `mlbStatQueries_full.txt` - Verbatim extracted M code from `mlbStatQueries.docx`. 225 KB, 4508 lines across 61 named query sections. Not committed here because a single 225 KB paste is at the edge of what the GitHub MCP inline-commit path handles reliably. To commit locally from `C:\Users\1stLake\sports-modeling\etl\mlb\_legacy_powerquery`:
 
 ```powershell
-# From C:\Users\1stLake\sports-modeling
-cd etl\mlb\_legacy_powerquery
-# Copy the extraction artifacts into this directory first
-# (Claude will email or provide them separately if needed, or they can be regenerated from the docx/pbix sources on demand)
-git add mlbStatQueries_full.txt pbix_visual_catalog.json
-git commit -m "docs: archive raw M code and visual catalog extracts"
+# Regenerate from source on demand:
+python -c "from docx import Document; d = Document(r'C:\Users\1stLake\OneDrive - Schnapp\mlbStatQueries.docx'); open('mlbStatQueries_full.txt','w',encoding='utf-8').write('\n'.join(p.text for p in d.paragraphs))"
+git add mlbStatQueries_full.txt
+git commit -m "docs: archive raw M code from mlbStatQueries.docx"
 git push
 ```
 
-If the files are no longer available locally, they can be regenerated from:
-- `C:\Users\1stLake\OneDrive - Schnapp\mlbStatQueries.docx` via python-docx text extraction
-- `C:\Users\1stLake\OneDrive - Schnapp\mlbSavantV3.pbix` via zip extraction + parsing of `Report/definition/pages/*/visuals/*/visual.json`
+The parsed `m_query_catalog.json` already captures the line range, endpoint URL, and column counts for all 61 query sections, so the raw text is useful only when you need to inspect a specific query's exact transformation logic.
 
-The regeneration scripts can be reconstructed from the workflow documented in `MLB_PBIX_REFERENCE.md`.
+## Regeneration
+
+If any of the above artifacts need to be regenerated from source, the source files are at:
+- `C:\Users\1stLake\OneDrive - Schnapp\mlbStatQueries.docx` (M code, via python-docx)
+- `C:\Users\1stLake\OneDrive - Schnapp\miscMLBinstructions.docx` (authoring rules, via python-docx)
+- `C:\Users\1stLake\OneDrive - Schnapp\mlbSavantV3.pbix` (visual catalog, via `unzip` then parse `Report/definition/pages/*/visuals/*/visual.json`)
 
 ## Relationship to production ETL
 
