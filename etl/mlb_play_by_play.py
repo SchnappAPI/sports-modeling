@@ -1,29 +1,41 @@
 """
 mlb_play_by_play.py
 
-Loads pitch-level play-by-play data for MLB games into mlb.play_by_play.
+Loads pitch-level play-by-play data for MLB games into mlb.play_by_play, then
+in-lockstep materializes one-row-per-at-bat data into mlb.player_at_bats for
+the same games.
 
 Source: https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics
 
-One row per play event (pitch, pickoff attempt, stolen base, etc.) per game.
-Key: play_event_id = '{game_pk}-{at_bat_number}-{play_event_index}'
+Two tables written:
+  mlb.play_by_play    — one row per play event (pitch, pickoff, baserunning)
+  mlb.player_at_bats  — one row per completed at-bat, denormalized with names
 
 Write strategy:
-  Since we diff against existing game_pks before the loop, every game processed
-  is guaranteed new — there is nothing to update. We write directly to the
-  permanent table via to_sql(if_exists='append') with fast_executemany=True,
-  bypassing the staging/MERGE pattern entirely. This is ~10x faster than MERGE
-  through a slow engine.
+  Both tables use direct INSERT via to_sql(if_exists='append') with
+  fast_executemany=True. The pre-diff against existing game_pks guarantees
+  every game written is new, so MERGE is unnecessary (ADR-0013).
 
-  VARCHAR column widths are set explicitly via the dtype parameter so pandas
-  does not infer them from the batch data (which would cause right-truncation
-  errors when a later row is longer than the first).
+  The at-bats materializer diffs against mlb.player_at_bats separately, so
+  partial runs that landed PBP rows but not at-bat rows are self-healing on
+  the next invocation.
 
 Incremental logic:
-  1. Load desired game_pk set from mlb.games (Final regular season games).
-  2. Load existing game_pk set from mlb.play_by_play.
-  3. Diff: only process games not already loaded.
-  4. Process oldest --batch games per run.
+  PBP:
+    1. Load desired game_pk set from mlb.games (Final regular season games).
+    2. Load existing game_pk set from mlb.play_by_play.
+    3. Diff: only process games not already loaded.
+    4. Process oldest --batch games per run.
+  At-bats (always runs after each PBP flush, plus standalone mode):
+    1. Candidate game_pks = games present in mlb.play_by_play.
+    2. Existing game_pks = games already in mlb.player_at_bats.
+    3. Diff. For each new game, build at-bat rows from PBP and INSERT.
+
+Rebuild mode:
+  --rebuild-at-bats skips the PBP fetch loop entirely and only runs the
+  at-bats materializer against the full mlb.play_by_play. Use when adding
+  a column or fixing a denormalization. Manual DELETE required first if
+  you actually want to rebuild (not just fill gaps).
 
 Runs exclusively in GitHub Actions. Credentials injected as environment variables.
 """
@@ -63,7 +75,7 @@ FLUSH_EVERY = 5  # games per DB write; each game ~300 rows = ~3000 rows per flus
 # from batch data, which causes right-truncation when a later row is longer.
 INSERT_DTYPES = {
     "play_event_id":          VARCHAR(50),
-    "game_date":              Date(),           # FIX: was VARCHAR(10); table column is DATE
+    "game_date":              Date(),
     "result_event_type":      VARCHAR(50),
     "result_description":     VARCHAR(1000),
     "batter_hand_code":       VARCHAR(1),
@@ -78,9 +90,20 @@ INSERT_DTYPES = {
     "count_balls_strikes":    VARCHAR(5),
     "hit_trajectory":         VARCHAR(30),
     "hit_hardness":           VARCHAR(20),
-    "at_bat_end_time":        DATETIME(),       # FIX: was VARCHAR(30); table column is DATETIME2
-    "play_end_time":          DATETIME(),       # FIX: was VARCHAR(30); table column is DATETIME2
-    "play_event_end_time":    DATETIME(),       # FIX: was VARCHAR(30); table column is DATETIME2
+    "at_bat_end_time":        DATETIME(),
+    "play_end_time":          DATETIME(),
+    "play_event_end_time":    DATETIME(),
+}
+
+AB_INSERT_DTYPES = {
+    "at_bat_id":          VARCHAR(30),
+    "game_date":          Date(),
+    "batter_name":        VARCHAR(100),
+    "pitcher_name":       VARCHAR(100),
+    "result_event_type":  VARCHAR(50),
+    "result_description": VARCHAR(1000),
+    "hit_trajectory":     VARCHAR(30),
+    "hit_hardness":       VARCHAR(20),
 }
 
 DDL_CREATE = """
@@ -171,12 +194,65 @@ IF EXISTS (
     ALTER TABLE mlb.play_by_play ALTER COLUMN play_event_description VARCHAR(1000) NULL;
 """
 
+DDL_CREATE_AT_BATS = """
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'player_at_bats'
+)
+CREATE TABLE mlb.player_at_bats (
+    at_bat_id           VARCHAR(30)   NOT NULL PRIMARY KEY,
+    game_pk             INT           NOT NULL,
+    game_date           DATE          NULL,
+    at_bat_number       INT           NOT NULL,
+    inning              INT           NULL,
+    is_top_inning       BIT           NULL,
+    batter_id           INT           NULL,
+    batter_name         VARCHAR(100)  NULL,
+    pitcher_id          INT           NULL,
+    pitcher_name        VARCHAR(100)  NULL,
+    result_event_type   VARCHAR(50)   NULL,
+    result_description  VARCHAR(1000) NULL,
+    result_rbi          INT           NULL,
+    hit_launch_speed    DECIMAL(5,1)  NULL,
+    hit_launch_angle    INT           NULL,
+    hit_total_distance  INT           NULL,
+    hit_trajectory      VARCHAR(30)   NULL,
+    hit_hardness        VARCHAR(20)   NULL,
+    hit_probability     DECIMAL(5,2)  NULL,
+    hit_bat_speed       DECIMAL(5,1)  NULL,
+    home_run_ballparks  INT           NULL,
+    away_team_id        INT           NULL,
+    home_team_id        INT           NULL,
+    created_at          DATETIME2     NOT NULL DEFAULT GETUTCDATE()
+);
+"""
+
+DDL_CREATE_AT_BATS_INDEXES = """
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'IX_player_at_bats_game_pk'
+      AND object_id = OBJECT_ID('mlb.player_at_bats')
+)
+    CREATE NONCLUSTERED INDEX IX_player_at_bats_game_pk
+        ON mlb.player_at_bats (game_pk);
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'IX_player_at_bats_batter'
+      AND object_id = OBJECT_ID('mlb.player_at_bats')
+)
+    CREATE NONCLUSTERED INDEX IX_player_at_bats_batter
+        ON mlb.player_at_bats (batter_id, game_date);
+"""
+
 
 def ensure_table(engine):
     with engine.begin() as conn:
         conn.execute(text(DDL_CREATE))
         conn.execute(text(DDL_ALTER_DESCRIPTIONS))
-    log.info("mlb.play_by_play table ensured.")
+        conn.execute(text(DDL_CREATE_AT_BATS))
+        conn.execute(text(DDL_CREATE_AT_BATS_INDEXES))
+    log.info("mlb.play_by_play and mlb.player_at_bats tables ensured.")
 
 
 def safe_int(val):
@@ -294,7 +370,6 @@ def parse_play_by_play(game_json, game_pk, game_date):
             rows.append({
                 "play_event_id":          f"{game_pk}-{at_bat_num}-{ev_index}",
                 "game_pk":                game_pk,
-                # FIX: store as date object, not string, to match DATE column type
                 "game_date":              pd.Timestamp(game_date).date() if game_date else None,
                 "at_bat_number":          at_bat_num,
                 "play_event_index":       ev_index,
@@ -312,7 +387,6 @@ def parse_play_by_play(game_json, game_pk, game_date):
                 "at_bat_is_complete":     safe_bool(about.get("isComplete"))     if is_last else None,
                 "at_bat_is_scoring_play": safe_bool(about.get("isScoringPlay"))  if is_last else None,
                 "at_bat_has_out":         safe_bool(about.get("hasOut"))         if is_last else None,
-                # FIX: parse timestamp strings to datetime objects for DATETIME2 columns
                 "at_bat_end_time":        safe_datetime(about.get("endTime"))    if is_last else None,
                 "play_end_time":          safe_datetime(play.get("playEndTime")) if is_last else None,
                 "is_at_bat":              is_ab                                  if is_last else None,
@@ -327,7 +401,6 @@ def parse_play_by_play(game_json, game_pk, game_date):
                 "play_event_type":        trunc(event.get("type"), 30),
                 "is_pitch":               safe_bool(event.get("isPitch")),
                 "is_base_running_play":   safe_bool(event.get("isBaseRunningPlay")),
-                # FIX: use safe_int; API can return pitchNumber as float (e.g. 1.0)
                 "pitch_number":           safe_int(event.get("pitchNumber")),
                 "pitch_call_code":        trunc(details.get("call", {}).get("code") if isinstance(details.get("call"), dict) else None, 5),
                 "pitch_type_code":        trunc(details.get("type", {}).get("code") if isinstance(details.get("type"), dict) else None, 5),
@@ -340,7 +413,6 @@ def parse_play_by_play(game_json, game_pk, game_date):
                 "count_balls_strikes":    f"{count.get('balls', '')}-{count.get('strikes', '')}" if count else None,
                 "count_outs":             safe_int(count.get("outs")),
                 "is_last_pitch":          safe_bool(is_last),
-                # FIX: parse timestamp string to datetime object for DATETIME2 column
                 "play_event_end_time":    safe_datetime(event.get("endTime")),
                 "pitch_start_speed":      safe_float(pitch_data.get("startSpeed")),
                 "pitch_end_speed":        safe_float(pitch_data.get("endSpeed")),
@@ -366,10 +438,6 @@ def flush(engine, rows):
     Write accumulated rows directly to mlb.play_by_play via INSERT.
     All games in the batch are new (diffed before the loop), so MERGE is
     unnecessary. Direct INSERT with fast_executemany=True is ~10x faster.
-
-    FIX: use .astype(object) before the NaN replacement so numpy integer
-    columns with missing values do not leave numpy.nan in the buffer,
-    which pyodbc rejects for typed columns.
     """
     df = pd.DataFrame(rows)
     df = df.astype(object).where(pd.notna(df), other=None)
@@ -382,6 +450,122 @@ def flush(engine, rows):
         chunksize=500,
         dtype=INSERT_DTYPES,
     )
+
+
+def load_player_at_bats_for_games(engine, game_pks):
+    """
+    Materialize one-row-per-at-bat data from mlb.play_by_play into
+    mlb.player_at_bats for the given game_pks.
+
+    Skips any game_pk already present in mlb.player_at_bats so partial
+    runs are self-healing. Same filter as /api/mlb-atbats was doing:
+    is_last_pitch = 1 AND result_event_type IS NOT NULL.
+
+    Batter and pitcher names are denormalized from mlb.players at write
+    time. Name corrections (rare) require a manual DELETE + rebuild.
+    """
+    if not game_pks:
+        return
+
+    game_pks = list(set(int(g) for g in game_pks))
+
+    with engine.connect() as conn:
+        existing = {
+            row[0] for row in conn.execute(
+                text("SELECT DISTINCT game_pk FROM mlb.player_at_bats")
+            ).fetchall()
+        }
+
+    target = [g for g in game_pks if g not in existing]
+    if not target:
+        log.info("at_bats: all %d games already materialized.", len(game_pks))
+        return
+
+    # Pull at-bat rows straight from PBP with player names joined in.
+    # We do this in SQL rather than Python because the source rows are
+    # already in the database and the join to mlb.players is trivial.
+    placeholders = ", ".join(str(g) for g in target)
+    query = f"""
+        SELECT
+            CAST(p.game_pk AS VARCHAR(10)) + '-' + CAST(p.at_bat_number AS VARCHAR(10)) AS at_bat_id,
+            p.game_pk,
+            p.game_date,
+            p.at_bat_number,
+            p.inning,
+            p.is_top_inning,
+            p.batter_id,
+            pb.player_name    AS batter_name,
+            p.pitcher_id,
+            pp.player_name    AS pitcher_name,
+            p.result_event_type,
+            p.result_description,
+            p.result_rbi,
+            p.hit_launch_speed,
+            p.hit_launch_angle,
+            p.hit_total_distance,
+            p.hit_trajectory,
+            p.hit_hardness,
+            p.hit_probability,
+            p.hit_bat_speed,
+            p.home_run_ballparks,
+            p.away_team_id,
+            p.home_team_id
+        FROM mlb.play_by_play p
+        LEFT JOIN mlb.players pb ON pb.player_id = p.batter_id
+        LEFT JOIN mlb.players pp ON pp.player_id = p.pitcher_id
+        WHERE p.game_pk IN ({placeholders})
+          AND p.is_last_pitch = 1
+          AND p.result_event_type IS NOT NULL
+        ORDER BY p.game_pk, p.at_bat_number
+    """
+
+    df = pd.read_sql(query, engine)
+    if df.empty:
+        log.info("at_bats: no completed at-bats found for %d games.", len(target))
+        return
+
+    df = df.astype(object).where(pd.notna(df), other=None)
+    df.to_sql(
+        "player_at_bats",
+        engine,
+        schema="mlb",
+        if_exists="append",
+        index=False,
+        chunksize=500,
+        dtype=AB_INSERT_DTYPES,
+    )
+    log.info(
+        "at_bats: wrote %d rows across %d games (%d skipped as already present).",
+        len(df), len(target), len(game_pks) - len(target)
+    )
+
+
+def rebuild_player_at_bats(engine):
+    """
+    Standalone materializer for --rebuild-at-bats mode. Runs the at-bats
+    loader against every game_pk currently in mlb.play_by_play.
+
+    Does NOT delete existing rows. If you want a full rebuild rather than
+    a gap fill, manually DELETE FROM mlb.player_at_bats first.
+    """
+    with engine.connect() as conn:
+        pbp_games = [
+            row[0] for row in conn.execute(
+                text("SELECT DISTINCT game_pk FROM mlb.play_by_play")
+            ).fetchall()
+        ]
+
+    log.info("rebuild: %d distinct game_pks in mlb.play_by_play.", len(pbp_games))
+    if not pbp_games:
+        return
+
+    # Process in chunks to keep the IN-clause and result set sane.
+    CHUNK = 100
+    for start in range(0, len(pbp_games), CHUNK):
+        chunk = pbp_games[start:start + CHUNK]
+        log.info("rebuild: processing games %d-%d of %d.",
+                 start + 1, start + len(chunk), len(pbp_games))
+        load_player_at_bats_for_games(engine, chunk)
 
 
 def load_play_by_play(engine, seasons, batch_size):
@@ -418,11 +602,12 @@ def load_play_by_play(engine, seasons, batch_size):
     )
 
     if not new_games:
-        log.info("No new games to process. Done.")
+        log.info("No new PBP games to process.")
         return
 
-    work       = new_games[:batch_size]
-    flush_rows = []
+    work        = new_games[:batch_size]
+    flush_rows  = []
+    flush_games = []
 
     for i, (game_pk, game_date) in enumerate(work, 1):
         game_json = fetch_game_json(game_pk)
@@ -438,12 +623,16 @@ def load_play_by_play(engine, seasons, batch_size):
             continue
 
         flush_rows.extend(rows)
+        flush_games.append(game_pk)
         log.info("game_pk %d: %d events parsed (%d/%d).", game_pk, len(rows), i, len(work))
 
         if i % FLUSH_EVERY == 0 or i == len(work):
             flush(engine, flush_rows)
-            log.info("Wrote %d rows after game %d of %d.", len(flush_rows), i, len(work))
-            flush_rows = []
+            log.info("Wrote %d PBP rows after game %d of %d.", len(flush_rows), i, len(work))
+            # In-lockstep materialize at-bats for the games just written.
+            load_player_at_bats_for_games(engine, flush_games)
+            flush_rows  = []
+            flush_games = []
 
         time.sleep(API_PAUSE)
 
@@ -455,15 +644,25 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch",   type=int, default=DEFAULT_BATCH)
     parser.add_argument("--seasons", type=int, nargs="+", default=None)
+    parser.add_argument(
+        "--rebuild-at-bats",
+        action="store_true",
+        help="Skip PBP fetch loop; rebuild mlb.player_at_bats from existing PBP data.",
+    )
     args = parser.parse_args()
 
     seasons = args.seasons or SEASONS
     log.info("=== MLB Play-by-Play ETL started ===")
-    log.info("Seasons: %s  Batch: %d", seasons, args.batch)
+    log.info("Seasons: %s  Batch: %d  Rebuild at-bats: %s",
+             seasons, args.batch, args.rebuild_at_bats)
 
     engine = get_engine()
     ensure_table(engine)
-    load_play_by_play(engine, seasons, args.batch)
+
+    if args.rebuild_at_bats:
+        rebuild_player_at_bats(engine)
+    else:
+        load_play_by_play(engine, seasons, args.batch)
 
     log.info("=== MLB Play-by-Play ETL complete ===")
 
