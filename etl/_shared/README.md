@@ -10,7 +10,13 @@ Document reusable ETL patterns that apply across sports: incremental ingestion, 
 
 No dedicated `_shared` code module exists yet. Patterns are currently duplicated across per-sport scripts (`nba_etl.py`, `mlb_etl.py`). Extraction into a shared module is a future refactor.
 
-`etl/db.py` is the one existing shared helper; it provides the `upsert()` function that every ETL uses.
+`etl/db.py` is the one existing shared helper. It provides:
+
+- `get_engine(max_retries=3, retry_wait=45)` - SQLAlchemy engine with `fast_executemany=True`. Default for normal upserts
+- `get_engine_slow(max_retries=3, retry_wait=45)` - same with `fast_executemany=False`. Used when staging tables contain long VARCHAR columns (for example MLB PBP description fields) where the fast-path pre-sizes the buffer from the first row and truncates later rows
+- `upsert(engine, df, schema, table, keys, dtype=None)` - stages a DataFrame to `#stage_{table}` via `df.to_sql`, then runs `MERGE` from staging to destination
+
+Grading has its own engine in `grading/grade_props.py:get_engine(max_retries=3, retry_wait=60)` with `fast_executemany=False`. It is separate from `etl/db.py` by design; see below.
 
 ## Key Concepts
 
@@ -24,19 +30,25 @@ When a single run loads multiple related tables, check existing keys against the
 
 ### Upsert
 
-`etl/db.py:upsert()` stages rows to `#stage_{table}` and runs SQL `MERGE`. Never raw `INSERT` into a destination table.
+`etl/db.py:upsert()` stages rows to `#stage_{table}` via `df.to_sql` and runs SQL `MERGE`. Never raw `INSERT` into a destination table.
 
 `MERGE` source rows must be deduplicated before the merge or SQL Server returns error 8672 ("The MERGE statement attempted to UPDATE or DELETE the same row more than once").
 
-### Azure SQL cold start and retry
+### Three engine variants
 
-Tier is Serverless and auto-pauses. First connection after a pause can take 20-60 seconds, sometimes longer. ETL connect logic retries 3 times with 45-second waits. Uptime Robot hitting `/api/ping` every 30 minutes keeps the DB warm during active hours.
+The project uses three distinct engine configurations. They are not interchangeable.
 
-### `fast_executemany` caveat
+| Caller | `fast_executemany` | Retry wait | Reason |
+|--------|--------------------|-----------|--------|
+| `etl/db.py:get_engine` | `True` | 45s | Default for bulk upserts of uniform-width rows |
+| `etl/db.py:get_engine_slow` | `False` | 45s | Required for long VARCHAR staging tables. `fast_executemany=True` pre-sizes the buffer from row 1 and right-truncates later rows with longer strings |
+| `grading/grade_props.py:get_engine` | `False` | 60s | NVARCHAR(MAX) safety for grading output and 60s wait tuned for serverless cold start from grading's call pattern |
 
-Set `fast_executemany=True` on the SQLAlchemy engine for bulk ETL inserts of uniform rows. It is the correct setting for box scores, odds, lineups, and the like.
+Do not unify these. Each has been observed to fail in ways that its specific configuration fixes.
 
-It breaks the grading engine. `grade_props.py` writes variable-length JSON-bearing rows, and `fast_executemany=True` truncates NVARCHAR(MAX) fields. The grading engine uses its own engine instance with `fast_executemany=False`. Do not unify them.
+### Azure SQL cold start
+
+Tier is Serverless and auto-pauses. First connection after a pause can take 20-60 seconds, sometimes longer. All three `get_engine` variants above retry 3 times. Uptime Robot hitting `/api/ping` every 30 minutes keeps the DB warm during active hours.
 
 ### SQL Server specifics to remember
 
@@ -68,11 +80,11 @@ Output writes to `/tmp/<something>.txt` and is read back with `shell_exec cat`.
 ## Invariants
 
 - Destination table is the state table. No parallel state store
-- `fast_executemany=True` for bulk ETL, `False` for the grading engine. Never unified
+- `fast_executemany=True` for most bulk ETL, `False` for long-VARCHAR staging and for grading. The three engine variants in `etl/db.py` and `grading/grade_props.py` stay separate
 - `BIT` columns cast to `INT` before `SUM()`
 - `MERGE` source deduplicated before the merge; trailing semicolon required
 - Bookmaker is FanDuel only across all sports
-- Azure SQL connect retries: 3 attempts, 45-second wait
+- Azure SQL connect retries: 3 attempts, 45-60 second wait depending on caller
 
 ## Recent Changes
 
