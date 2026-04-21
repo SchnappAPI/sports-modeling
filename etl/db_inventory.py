@@ -20,78 +20,55 @@ def p(label, query, params=None):
     for r in cur.fetchall():
         print(" | ".join(str(x) for x in r))
 
-# 1) Find Maxey
-p("maxey lookup", """
-SELECT player_id, player_name
-FROM nba.players WHERE player_name LIKE '%Maxey%'
-""")
-
-# 2) How many daily_grades rows exist for Maxey, grouped by grade_date
-p("maxey daily_grades by grade_date", """
-SELECT dg.grade_date,
-       COUNT(*) AS rows,
-       COUNT(DISTINCT dg.event_id) AS events,
-       COUNT(DISTINCT dg.market_key) AS markets
+# Look at a single game in detail with all columns for the standard market
+p("maxey PTS full row for 04-19 game", """
+SELECT dg.grade_date, dg.market_key, dg.line_value, dg.outcome_name,
+       dg.over_price, dg.hit_rate_60, dg.hit_rate_20, dg.grade, dg.composite_grade
 FROM common.daily_grades dg
 JOIN nba.players p ON p.player_id = dg.player_id
 WHERE p.player_name LIKE '%Tyrese Maxey%'
   AND dg.bookmaker_key='fanduel'
-  AND dg.market_key NOT LIKE '%_alternate'
-GROUP BY dg.grade_date
-ORDER BY dg.grade_date DESC
-""")
-
-# 3) Sample rows — what does a given grade_date look like for Maxey?
-p("maxey sample rows (most recent date)", """
-SELECT TOP 30 dg.grade_date, dg.event_id, dg.market_key, dg.line_value, dg.outcome_name
-FROM common.daily_grades dg
-JOIN nba.players p ON p.player_id = dg.player_id
-WHERE p.player_name LIKE '%Tyrese Maxey%'
-  AND dg.bookmaker_key='fanduel'
-  AND dg.market_key NOT LIKE '%_alternate'
-  AND dg.grade_date = (
-    SELECT MAX(grade_date) FROM common.daily_grades dg2
-    JOIN nba.players p2 ON p2.player_id = dg2.player_id
-    WHERE p2.player_name LIKE '%Tyrese Maxey%'
-  )
-ORDER BY dg.event_id, dg.market_key
-""")
-
-# 4) Distinct game_ids that the player-grades API would return for Maxey
-p("player-grades API output simulation", """
-SELECT COUNT(*) AS rows,
-       COUNT(DISTINCT egm.game_id) AS distinct_games,
-       COUNT(DISTINCT dg.market_key) AS distinct_markets
-FROM common.daily_grades dg
-JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
-JOIN nba.players p ON p.player_id = dg.player_id
-WHERE p.player_name LIKE '%Tyrese Maxey%'
-  AND dg.bookmaker_key='fanduel'
-  AND dg.market_key NOT LIKE '%_alternate'
-""")
-
-# 5) Per-game line for Maxey's 3PM market across all games in API output
-p("maxey 3pm lines per game (what gradeMap would see)", """
-SELECT egm.game_id, dg.grade_date, dg.market_key, dg.line_value
-FROM common.daily_grades dg
-JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
-JOIN nba.players p ON p.player_id = dg.player_id
-WHERE p.player_name LIKE '%Tyrese Maxey%'
-  AND dg.bookmaker_key='fanduel'
-  AND dg.market_key = 'player_threes'
-ORDER BY egm.game_id DESC
-""")
-
-# 6) Per-game PTS line
-p("maxey pts lines per game (what gradeMap would see)", """
-SELECT egm.game_id, dg.grade_date, dg.market_key, dg.line_value
-FROM common.daily_grades dg
-JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
-JOIN nba.players p ON p.player_id = dg.player_id
-WHERE p.player_name LIKE '%Tyrese Maxey%'
-  AND dg.bookmaker_key='fanduel'
+  AND dg.grade_date = '2026-04-19'
   AND dg.market_key = 'player_points'
-ORDER BY egm.game_id DESC
+ORDER BY dg.line_value, dg.outcome_name
+""")
+
+# And 3PM
+p("maxey 3PM full row for 04-19 game", """
+SELECT dg.grade_date, dg.market_key, dg.line_value, dg.outcome_name,
+       dg.over_price, dg.hit_rate_60, dg.grade, dg.composite_grade
+FROM common.daily_grades dg
+JOIN nba.players p ON p.player_id = dg.player_id
+WHERE p.player_name LIKE '%Tyrese Maxey%'
+  AND dg.bookmaker_key='fanduel'
+  AND dg.grade_date = '2026-04-19'
+  AND dg.market_key = 'player_threes'
+ORDER BY dg.line_value, dg.outcome_name
+""")
+
+# Contrast: what's in odds.upcoming_player_props for that event (the actual posted lines)
+p("upcoming_player_props for Maxey event 04-19", """
+SELECT TOP 30 upp.event_id, upp.market_key, upp.outcome_point, upp.outcome_name,
+       upp.outcome_price, upp.bookmaker_key, upp.snap_ts
+FROM odds.upcoming_player_props upp
+JOIN nba.players p ON p.player_name = upp.player_name
+WHERE p.player_name LIKE '%Tyrese Maxey%'
+  AND upp.bookmaker_key='fanduel'
+  AND upp.market_key IN ('player_points', 'player_threes', 'player_points_alternate', 'player_threes_alternate')
+  AND CAST(upp.snap_ts AS DATE) = '2026-04-19'
+ORDER BY upp.market_key, upp.outcome_point, upp.outcome_name, upp.snap_ts DESC
+""")
+
+# Show the grading script's relevant behavior: does it write one row per standard line or many?
+p("count rows per (grade_date, market_key) for Maxey", """
+SELECT TOP 20 dg.grade_date, dg.market_key, COUNT(*) AS rows, MIN(dg.line_value) AS min_line, MAX(dg.line_value) AS max_line
+FROM common.daily_grades dg
+JOIN nba.players p ON p.player_id = dg.player_id
+WHERE p.player_name LIKE '%Tyrese Maxey%'
+  AND dg.bookmaker_key='fanduel'
+  AND dg.market_key NOT LIKE '%_alternate'
+GROUP BY dg.grade_date, dg.market_key
+ORDER BY dg.grade_date DESC, dg.market_key
 """)
 
 conn.close()
