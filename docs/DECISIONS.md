@@ -178,3 +178,55 @@ Consequences:
 - `stats.nba.com` calls carry per-request proxy latency (~200-500 ms added) and a small ongoing Webshare cost.
 - Proxy outages block NBA ETL but do not affect live scoreboard or live box score; the live path is CDN-only by design.
 - If Webshare is ever retired, any replacement must be a rotating residential proxy service. Datacenter proxies have been observed to fail the same way direct Azure IPs do.
+
+---
+
+## ADR-0011 [mlb][etl][database] `mlb.games` stores today's scheduled games, not only Final
+Date: 2026-04-20
+
+Context: The MLB game strip on the web app needs to show matchups and start times before any game has gone Final, even on days when the nightly ETL has not produced new data. A pure "Final games only" store would leave the strip empty until the first game of the day finished. Adding a second table (`mlb.scheduled_games` vs `mlb.games`) was rejected because the web route would then need to UNION two tables and handle duplicate rows as games transitioned from scheduled to Final.
+
+Decision: `etl/mlb_etl.py:load_todays_schedule` upserts today's regular-season games into `mlb.games` regardless of status. `game_status` carries the raw MLB status code (`Scheduled`, `Warmup`, `In Progress`, `Final`, etc.), which is normalized to `'F'` only when the game reaches Final state. `away_team_score` / `home_team_score` are populated where available, NULL otherwise. The web filters by `game_date` and relies on `game_status` for styling decisions.
+
+Consequences:
+
+- `mlb.games` is not strictly a historical table. Queries that need "completed games only" must filter `game_status IN ('F')` explicitly.
+- The play-by-play loader's game-selection query already filters `game_status = 'F' AND game_type = 'R'` correctly and is unaffected.
+- Today's games get upserted every nightly run plus any intraday refresh. They are overwritten atomically via the existing MERGE, so racing with a Final update is safe.
+- No intraday refresh workflow exists today. A Final-state update only happens on the next nightly run, meaning scores can lag by up to 24 hours on the web. Flagged as an open question in `/etl/mlb/README.md`.
+
+---
+
+## ADR-0012 [mlb][etl][web] Pitch-level `mlb.play_by_play` stays ETL-internal; web reads aggregate views only
+Date: 2026-04-20
+
+Context: `mlb.play_by_play` stores one row per pitch with full Statcast pitch and hit data, roughly 300 rows per game. At current volume (roughly 2000 games per season) that is 600,000 rows per season and growing. A web page that queries raw pitch rows per render would hammer the DB and make cold-starts unacceptable. Power BI's DAX model could afford in-memory pitch aggregation; a web app with Azure SQL Serverless cannot.
+
+Decision: Treat `mlb.play_by_play` as an ETL-internal source. The web app queries only aggregate derivations of it, never raw pitch rows. Current examples:
+
+- `/api/mlb-linescore` groups by `(inning, is_top_inning)` with the `is_last_pitch = 1` predicate and returns a pre-shaped per-half-inning runs array
+- `/api/mlb-atbats` filters to `is_last_pitch = 1 AND result_event_type IS NOT NULL` and returns one row per completed at-bat with only the last-pitch Statcast metrics
+
+Future features needing pitch-level data (pitch log per at-bat, per-pitcher velocity distribution, etc.) should either be materialized into purpose-built tables via ETL (preferred) or be implemented as tightly scoped SQL aggregations that never return more than a few hundred rows.
+
+Consequences:
+
+- The web layer does not need to know about pitch-level data structure. Only aggregates.
+- New visuals that demand pitch-level fidelity require an ETL change (new materialized table) rather than a web-layer change, reinforcing ADR-0004.
+- If `mlb.play_by_play` grows to the point where even aggregate reads are slow, add indexes on `game_pk + is_last_pitch` and `game_pk + inning + is_top_inning`. The write path can tolerate index overhead because writes happen in batched inserts, not streaming.
+
+---
+
+## ADR-0013 [mlb][etl] Play-by-play uses direct INSERT, not MERGE, because diff-before-fetch guarantees new rows
+Date: 2026-04-20
+
+Context: The standard ETL upsert pattern in `etl/db.py:upsert` creates a `#stage_` temp table, populates it via `to_sql`, then runs a MERGE into the permanent table. This is safe and idempotent but carries per-row overhead from the MERGE comparison. For `mlb.play_by_play` at roughly 300 rows per game, 50 games per run, the MERGE overhead dominates wall-clock time even though every row is guaranteed new (games are pre-diffed against the destination).
+
+Decision: `mlb_play_by_play.py` bypasses the staging/MERGE pattern and writes directly to the permanent table via `to_sql(if_exists='append')` with `fast_executemany=True`. The diff against `SELECT DISTINCT game_pk FROM mlb.play_by_play` runs once at the top of the loader and is the only idempotency check. Explicit `INSERT_DTYPES` (SQLAlchemy `VARCHAR(N)` mappings) are passed to `to_sql` to prevent pandas from inferring column widths from the first row in a batch and right-truncating longer rows later.
+
+Consequences:
+
+- Load is approximately 10x faster than MERGE through a slow engine.
+- If a `game_pk` is partially loaded (process killed mid-game), a retry will see that `game_pk` in the destination and skip it — but the partial rows remain. Manual cleanup with `DELETE FROM mlb.play_by_play WHERE game_pk = X` is required before retry. No automatic partial-load detection.
+- The pattern only applies when pre-diffing guarantees no key collisions. Using direct INSERT for a table that might have duplicate keys will raise a PK violation.
+- `fast_executemany=True` for this loader is deliberate. Reverting to `get_engine_slow` would reintroduce the ~10x slowdown without meaningful benefit; `INSERT_DTYPES` already solves the VARCHAR truncation problem that motivates the slow engine elsewhere.
