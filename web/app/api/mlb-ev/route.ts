@@ -17,13 +17,16 @@ import { getPool } from '@/lib/db';
 //      a second query covers the projected fallback if either team has no
 //      actual starters yet.
 //   2. Aggregate mlb.player_at_bats over IX_player_at_bats_batter for the
-//      ≤18 batter_ids, filtered to season_year and game_pk != selected
+//      <=18 batter_ids, filtered to season_year and game_pk != selected
 //   3. Pull per-at-bat detail for the same batter_ids for tap-to-expand
 //
 // Why no materialization: at ~30-50 BBE per batter across 18 batters, this
 // is a single-digit-ms indexed scan. ADR-0019 establishes no-runtime-agg
 // as an invariant for lifetime BvP, but season-to-date EV does not need a
 // matching rollup table until data volume justifies one.
+//
+// Column note: mlb.players.bat_side is the batter-hand column (L/R/S),
+// matching the VS route. There is no `bats` column.
 
 interface StarterRow {
   playerId: number;
@@ -108,7 +111,7 @@ export async function GET(req: NextRequest) {
          bs.team_id        AS teamId,
          bs.side           AS side,
          bs.position       AS position,
-         p.bats            AS bats,
+         p.bat_side        AS bats,
          bs.batting_order  AS battingOrder
        FROM mlb.batting_stats bs
        LEFT JOIN mlb.players p ON p.player_id = bs.player_id
@@ -126,7 +129,9 @@ export async function GET(req: NextRequest) {
   }
 
   // --- Step 3: projected fallback for any team missing actual starters ---
-  // Top 9 batters by PA in the last 14 days for that team
+  // Top 9 batters by PA in the last 14 days for that team. Position is
+  // dropped on the projected path because bs.position varies per game and
+  // there is no stable per-player position column to GROUP BY on.
   async function projectedForTeam(teamId: number, side: 'A' | 'H'): Promise<StarterRow[]> {
     const res = await pool
       .request()
@@ -137,8 +142,7 @@ export async function GET(req: NextRequest) {
            bs.player_id     AS playerId,
            p.player_name    AS playerName,
            bs.team_id       AS teamId,
-           p.position       AS position,
-           p.bats           AS bats,
+           p.bat_side       AS bats,
            SUM(bs.pa)       AS paTotal
          FROM mlb.batting_stats bs
          LEFT JOIN mlb.players p ON p.player_id = bs.player_id
@@ -147,7 +151,7 @@ export async function GET(req: NextRequest) {
            AND g.game_date >= DATEADD(day, -14, @gameDate)
            AND g.game_date <  @gameDate
            AND bs.pa IS NOT NULL
-         GROUP BY bs.player_id, p.player_name, bs.team_id, p.position, p.bats
+         GROUP BY bs.player_id, p.player_name, bs.team_id, p.bat_side
          ORDER BY paTotal DESC`
       );
     return res.recordset.map((r: any, idx: number) => ({
@@ -155,7 +159,7 @@ export async function GET(req: NextRequest) {
       playerName: r.playerName,
       teamId: r.teamId,
       side,
-      position: r.position,
+      position: null,
       bats: r.bats,
       battingOrder: (idx + 1) * 100,
       projected: true,
@@ -193,38 +197,33 @@ export async function GET(req: NextRequest) {
   }
 
   // --- Step 4: aggregate season-to-date EV per batter, excluding current game ---
-  // Build a table-valued parameter for playerIds
-  const idTable = new mssql.Table();
-  idTable.columns.add('id', mssql.Int);
-  for (const id of playerIds) idTable.rows.add(id);
-
-  const summaryReq = pool
-    .request()
-    .input('seasonStart', mssql.Date, seasonStart)
-    .input('gamePk', mssql.Int, gamePk);
   // SQL Server doesn't accept arrays; use a comma-joined IN list. Safe because
   // playerIds are ints we just pulled from the DB.
   const idList = playerIds.join(',');
 
-  const summary = await summaryReq.query(
-    `SELECT
-       batter_id AS playerId,
-       COUNT(*)  AS bbe,
-       AVG(CAST(hit_launch_speed AS FLOAT))    AS avgEv,
-       MAX(hit_launch_speed)                    AS maxEv,
-       SUM(CASE WHEN hit_launch_speed >= 95 THEN 1 ELSE 0 END) AS hardHitCount,
-       AVG(CAST(hit_launch_angle AS FLOAT))     AS avgLa,
-       SUM(CASE WHEN hit_launch_angle BETWEEN 8 AND 32 THEN 1 ELSE 0 END) AS sweetSpotCount,
-       SUM(CASE WHEN hit_launch_speed >= 95 AND hit_launch_angle BETWEEN 8 AND 32 THEN 1 ELSE 0 END) AS barrelCount,
-       SUM(CASE WHEN result_event_type = 'home_run' THEN 1 ELSE 0 END) AS hrCount,
-       AVG(CAST(hit_probability AS FLOAT))      AS avgXba
-     FROM mlb.player_at_bats
-     WHERE batter_id IN (${idList})
-       AND game_date >= @seasonStart
-       AND game_pk   <> @gamePk
-       AND hit_launch_speed IS NOT NULL
-     GROUP BY batter_id`
-  );
+  const summary = await pool
+    .request()
+    .input('seasonStart', mssql.Date, seasonStart)
+    .input('gamePk', mssql.Int, gamePk)
+    .query(
+      `SELECT
+         batter_id AS playerId,
+         COUNT(*)  AS bbe,
+         AVG(CAST(hit_launch_speed AS FLOAT))    AS avgEv,
+         MAX(hit_launch_speed)                    AS maxEv,
+         SUM(CASE WHEN hit_launch_speed >= 95 THEN 1 ELSE 0 END) AS hardHitCount,
+         AVG(CAST(hit_launch_angle AS FLOAT))     AS avgLa,
+         SUM(CASE WHEN hit_launch_angle BETWEEN 8 AND 32 THEN 1 ELSE 0 END) AS sweetSpotCount,
+         SUM(CASE WHEN hit_launch_speed >= 95 AND hit_launch_angle BETWEEN 8 AND 32 THEN 1 ELSE 0 END) AS barrelCount,
+         SUM(CASE WHEN result_event_type = 'home_run' THEN 1 ELSE 0 END) AS hrCount,
+         AVG(CAST(hit_probability AS FLOAT))      AS avgXba
+       FROM mlb.player_at_bats
+       WHERE batter_id IN (${idList})
+         AND game_date >= @seasonStart
+         AND game_pk   <> @gamePk
+         AND hit_launch_speed IS NOT NULL
+       GROUP BY batter_id`
+    );
 
   const summaryRows: EvSummaryRow[] = summary.recordset.map((r: any) => {
     const bbe: number = r.bbe ?? 0;
