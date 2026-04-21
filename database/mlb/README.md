@@ -1,42 +1,121 @@
 # MLB Database
 
-**STATUS:** design phase. Schema decisions driven by `/docs/DECISIONS.md` ADR-0004 (all visual stats pre-aggregated).
+**STATUS:** 7 tables live (nightly-loaded reference, games, per-game box scores, season snapshots). 1 pitch-level table live (on-demand). 5 derived entities from ADR-0004 not yet implemented.
 
 ## Purpose
 
-The `mlb` schema will hold the 9 entities that feed the web UI, plus any internal-only Statcast pitch-level storage.
+The `mlb` schema holds the current MLB dataset. Seven tables populate from the nightly ETL, one populates from the on-demand play-by-play loader. All DDL for these 8 tables is owned by the two Python ETL scripts — there is no separate `.sql` migration file.
 
 ## Files
 
-No DDL scripts yet. Table designs will follow from the 9-entity specification in `/etl/mlb/README.md`.
+- `/etl/mlb_batting_stats_migration.sql` — one-time column migration for `mlb.batting_stats` (kept for reference; do not re-run)
+
+Live DDL sources:
+
+- `etl/mlb_etl.py` — implicit DDL via pandas `to_sql` for truncate-and-reload tables. Permanent tables' columns are defined by the row dict keys in each loader function
+- `etl/mlb_play_by_play.py` — explicit `CREATE TABLE IF NOT EXISTS` and `ALTER COLUMN` statements in `DDL_CREATE` and `DDL_ALTER_DESCRIPTIONS`
 
 ## Key Concepts
 
-Per ADR-0004, the 9 visual-feeding entities:
+### Tables that exist today
 
-1. Upcoming games
-2. Batter context per game
-3. Batter projections per game
-4. Player game stats
-5. Player at-bat stats
-6. Player trend and pattern stats
-7. Player platoon splits
-8. Career batter vs pitcher matchup
-9. Pitcher season stats
+| Table | Purpose | Primary key | Load strategy |
+|-------|---------|-------------|----------------|
+| `mlb.teams` | Team reference | `team_id` | Truncate + reload |
+| `mlb.players` | Player reference including bat_side and pitch_hand | `player_id` | Truncate + reload |
+| `mlb.games` | One row per game (Final + today's scheduled) | `game_pk` | Upsert |
+| `mlb.batting_stats` | Per-batter per-game box score | `batter_game_id` | Upsert |
+| `mlb.pitching_stats` | Per-pitcher per-game box score | `pitcher_game_id` | Upsert |
+| `mlb.player_season_batting` | Season cumulative batting snapshot | (no enforced PK; unique on `player_id`) | Truncate + reload |
+| `mlb.pitcher_season_stats` | Season cumulative pitching snapshot | (no enforced PK; unique on `player_id`) | Truncate + reload |
+| `mlb.play_by_play` | One row per pitch/baserunning event with Statcast metrics | `play_event_id` | Direct INSERT (pre-diffed) |
 
-Pitch-level Statcast data is ETL-internal only. An intermediate table such as `mlb.statcast_pitches` may exist but is not queried by the web.
+### `mlb.teams`
+
+Columns: `team_id`, `team_abbreviation`, `full_name`, `venue_id`.
+
+### `mlb.players`
+
+Columns: `player_id`, `player_name`, `team_id`, `position`, `bat_side`, `pitch_hand`.
+
+`bat_side` codes: `L` | `R` | `S` (switch). `pitch_hand` codes: `L` | `R`.
+
+No foreign key to `mlb.teams`. Historical box scores retain the team context via `batting_stats.team_id`, so `players.team_id` always reflects the current roster.
+
+### `mlb.games`
+
+One row per regular-season game. Final games plus today's scheduled games (see ADR-0011 below). Columns:
+
+- Identity: `game_pk` (PK), `game_date`, `game_datetime`, `game_type` (`R`), `game_status` (`F` for Final, else MLB status code), `abstract_game_state`, `day_night`, `double_header`, `game_number`, `game_display` (`AWY@HME`), `venue_id`, `venue_name`
+- Away team: `away_team_id`, `away_team_score`, `away_is_winner`, `away_pitcher_id`, `away_pitcher_name`, `away_pitcher_hand`
+- Home team: `home_team_id`, `home_team_score`, `home_is_winner`, `home_pitcher_id`, `home_pitcher_name`, `home_pitcher_hand`
+- Series metadata (currently NULL-filled): `is_tie`, `games_in_series`, `series_game_number`, `game_date_index`
+
+### `mlb.batting_stats`
+
+One row per batter per game. PK: `batter_game_id = '{player_id}-{game_pk}-{team_id}'`. Including `team_id` in the PK preserves trade history — a player who appeared for two teams in the same season has two distinct keys.
+
+Full columns: `batter_game_id`, `game_pk`, `game_date`, `player_id`, `team_id`, `side` (`A`|`H`), `position`, `batting_order`, `games_played`, `plate_appearances`, `at_bats`, `runs`, `hits`, `doubles`, `triples`, `home_runs`, `total_bases`, `rbi`, `stolen_bases`, `walks`, `intentional_walks`, `strikeouts`, `hit_by_pitch`, `left_on_base`, `sac_bunts`, `sac_flies`, `fly_outs`, `ground_outs`, `air_outs`, `pop_outs`, `line_outs`, `batting_avg`, `obp`, `slg`, `ops`.
+
+### `mlb.pitching_stats`
+
+One row per pitcher per game. PK: `pitcher_game_id = '{player_id}-{game_pk}'`. No `team_id` in the PK because a pitcher does not switch teams mid-game.
+
+Columns: `pitcher_game_id`, `game_pk`, `game_date`, `player_id`, `team_id`, `side`, `innings_pitched` (decimal; `.1` = 1/3, `.2` = 2/3), `hits_allowed`, `runs_allowed`, `earned_runs`, `walks`, `strikeouts`, `hr_allowed`, `era`, `pitches`, `strikes`, `note` (`SP` for starting pitcher, else NULL).
+
+### `mlb.player_season_batting`
+
+Full-season snapshot per player. Truncated and reloaded nightly. Columns:
+
+`player_id`, `player_name`, `team_id`, `season_year`, `age`, `games_played`, `at_bats`, `plate_appearances`, `hits`, `doubles`, `triples`, `home_runs`, `runs`, `rbi`, `walks`, `intentional_walks`, `strikeouts`, `hit_by_pitch`, `stolen_bases`, `caught_stealing`, `stolen_base_pct`, `caught_stealing_pct`, `ground_into_double_play`, `total_bases`, `left_on_base`, `sac_bunts`, `sac_flies`, `ground_outs`, `air_outs`, `pitches_seen`, `batting_avg`, `obp`, `slg`, `ops`, `babip`, `ground_outs_to_air_outs`, `at_bats_per_hr`, `catchers_interference`.
+
+### `mlb.pitcher_season_stats`
+
+Full-season snapshot per pitcher. 58 columns. Covers core rate stats (`era`, `whip`, `strike_pct`, `win_pct`), per-9 metrics (`k_per_9`, `bb_per_9`, `h_per_9`, `runs_per_9`, `hr_per_9`), platoon-independent totals (`wins`, `losses`, `saves`, `blown_saves`, `holds`, `complete_games`, `shutouts`, `games_finished`), counts allowed (`hits_allowed`, `hr_allowed`, `walks`, `hit_by_pitch`, `stolen_bases_allowed`), and derived ratios (`strikeout_walk_ratio`, `pitches_per_inning`).
+
+### `mlb.play_by_play`
+
+One row per play event (pitch, pickoff attempt, stolen base) across all Final regular-season games loaded so far. PK: `play_event_id = '{game_pk}-{at_bat_number}-{play_event_index}'`.
+
+Column families:
+
+- Identity: `play_event_id`, `game_pk`, `game_date`, `at_bat_number`, `play_event_index`, `inning`, `is_top_inning`, `team_id`, `vs_team_id`, `away_team_id`, `home_team_id`, `venue_id`
+- At-bat result (populated only on the last pitch of the at-bat): `result_event_type`, `result_description`, `result_rbi`, `result_is_out`, `at_bat_is_complete`, `at_bat_is_scoring_play`, `at_bat_has_out`, `at_bat_end_time`, `play_end_time`, `is_at_bat`, `is_plate_appearance`
+- Matchup: `batter_id`, `batter_hand_code`, `batter_split`, `pitcher_id`, `pitcher_hand_code`, `pitcher_split`
+- Event metadata: `play_id`, `play_event_type`, `is_pitch`, `is_base_running_play`, `pitch_number`, `pitch_call_code`, `pitch_type_code`, `play_event_description`
+- Pitch outcome: `is_hit_into_play`, `is_strike`, `is_ball`, `is_out`, `runner_going`, `count_balls_strikes`, `count_outs`, `is_last_pitch`, `play_event_end_time`
+- Statcast pitch data: `pitch_start_speed`, `pitch_end_speed`, `pitch_zone`, `strike_zone_top`, `strike_zone_bottom`
+- Statcast hit data: `hit_launch_speed`, `hit_launch_angle`, `hit_total_distance`, `hit_trajectory`, `hit_hardness`, `hit_location`, `hit_probability`, `hit_bat_speed`, `home_run_ballparks`
+- Audit: `created_at` (defaults to `GETUTCDATE()`)
+
+### Tables from ADR-0004 that do not exist yet
+
+Five of the nine visual-feeding entities from ADR-0004 have no current materialization:
+
+- Batter context per game
+- Batter projections per game
+- Player trend and pattern stats
+- Player platoon splits
+- Career batter vs pitcher matchup
+
+Player at-bat stats (the sixth missing entity) is partially served today by querying `mlb.play_by_play` directly in `/api/mlb-atbats`. Whether that view should be materialized is an open question.
 
 ## Invariants
 
-- No runtime aggregation in any query feeding the web layer (ADR-0004).
-- Pitch-level Statcast stays internal to the ETL.
+- `batter_game_id` includes `team_id` so mid-season trades create distinct rows. Do not change the PK format
+- `pitcher_game_id` does **not** include `team_id` because pitchers do not switch teams mid-game
+- `mlb.games` stores both Final games and today's scheduled (non-Final) games. The web strip depends on this
+- Game PK is MLB's `game_pk` integer, not a synthetic key
+- `mlb.play_by_play` result-related columns are NULL on all pitches except the last one of an at-bat (`is_last_pitch = 1`). Queries that need at-bat results must filter on that predicate
+- Pitch-level Statcast stays internal to the ETL layer. Web reads only aggregate views of `mlb.play_by_play` (linescore, at-bats summary), never raw pitch rows
 
 ## Recent Changes
 
-See `/docs/CHANGELOG.md` filtered by `[mlb][database]`.
+See `/docs/CHANGELOG.md` filtered by `[mlb][database]`. Historical entries before the restructure are in the legacy root `/CHANGELOG.md`.
 
 ## Open Questions
 
-- Exact table names and column lists for each of the 9 entities.
-- Whether MLB-specific extensions to `common.*` should be namespaced to `mlb.*` (for example, `mlb.player_line_patterns` if that concept applies to baseball).
-- Storage format for Statcast intermediate data: Azure Blob (the existing `schnappmlbdata` container, ~4.17 GB Parquet) vs. Azure SQL. The current separation is intentional; the decision stays deferred until a concrete use case appears.
+- Whether the 5 missing ADR-0004 entities should be materialized as tables (pre-aggregated, keeps the runtime-no-aggregation invariant) or computed as SQL views (simpler, but violates ADR-0004)
+- Whether `/api/mlb-atbats` should migrate off `mlb.play_by_play` onto a materialized `mlb.player_at_bats` table
+- Whether the Azure Blob Statcast data (`schnappmlbdata`, ~4.17 GB Parquet, 2015-2026) should be ingested into `mlb.play_by_play` as a backfill, kept parallel for historical-only queries, or dropped once the nightly PBP ETL catches up
+- Whether to add FK constraints across the 7 tables or leave them off. They were deliberately dropped when `teams` and `players` became truncate-reload, and re-adding them would require a different load strategy
