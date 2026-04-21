@@ -2,30 +2,37 @@
 mlb_play_by_play.py
 
 Loads pitch-level play-by-play data for MLB games into mlb.play_by_play, then
-in-lockstep materializes one-row-per-at-bat data into mlb.player_at_bats for
-the same games.
+in-lockstep materializes derived tables for the same games:
+  mlb.player_at_bats          — one row per completed at-bat, IDs only
+  mlb.career_batter_vs_pitcher — lifetime counts + rates per (batter, pitcher)
 
 Source: https://statsapi.mlb.com/api/v1/game/{game_pk}/withMetrics
 
-Two tables written:
-  mlb.play_by_play    — one row per play event (pitch, pickoff, baserunning)
-  mlb.player_at_bats  — one row per completed at-bat, IDs only (no names)
+Three tables written:
+  mlb.play_by_play               — one row per play event (pitch, pickoff, baserunning)
+  mlb.player_at_bats             — one row per completed at-bat, IDs only (no names)
+  mlb.career_batter_vs_pitcher   — one row per (batter_id, pitcher_id) lifetime
 
-Why no denormalized names:
+Why no denormalized names on player_at_bats:
   mlb.players is truncate-and-reload scoped to the current season, so roughly
   30% of pitcher_ids and 20% of batter_ids across historical PBP would land
   as NULL if we joined at write time. Web routes join mlb.players at read
   time instead — the table has under a thousand rows with a PK on player_id,
   so the read-time join is effectively free.
 
-Write strategy:
-  Both tables use direct INSERT via to_sql(if_exists='append') with
-  fast_executemany=True. The pre-diff against existing game_pks guarantees
-  every game written is new, so MERGE is unnecessary (ADR-0013).
-
-  The at-bats materializer diffs against mlb.player_at_bats separately, so
-  partial runs that landed PBP rows but not at-bat rows are self-healing on
-  the next invocation.
+Write strategies (by table):
+  play_by_play:
+    Direct INSERT via to_sql(if_exists='append') + fast_executemany=True. The
+    pre-diff against existing game_pks guarantees every game is new (ADR-0013).
+  player_at_bats:
+    Direct INSERT. Separate diff against player_at_bats.game_pk so partial
+    runs (PBP wrote, at-bats failed) are self-healing (ADR-0018).
+  career_batter_vs_pitcher:
+    Staged MERGE. Unlike the other two, a (batter_id, pitcher_id) pair that
+    appeared in a flush five runs ago already has a row; the new flush needs
+    to update it, not insert a duplicate. For each flush, recompute lifetime
+    rows for the (batter_id, pitcher_id) pairs present in the flushed games,
+    stage to a temp table, MERGE into the permanent table.
 
 Incremental logic:
   PBP:
@@ -33,16 +40,23 @@ Incremental logic:
     2. Load existing game_pk set from mlb.play_by_play.
     3. Diff: only process games not already loaded.
     4. Process oldest --batch games per run.
-  At-bats (always runs after each PBP flush, plus standalone mode):
+  At-bats (always runs after each PBP flush, plus --rebuild-at-bats mode):
     1. Candidate game_pks = games present in mlb.play_by_play.
     2. Existing game_pks = games already in mlb.player_at_bats.
     3. Diff. For each new game, build at-bat rows from PBP and INSERT.
+  Career BvP (always runs after each at-bats flush, plus --rebuild-bvp mode):
+    1. Determine (batter_id, pitcher_id) pairs affected by the flushed games.
+    2. Recompute lifetime counts + rates for those pairs from the full
+       mlb.player_at_bats table.
+    3. Stage + MERGE into mlb.career_batter_vs_pitcher.
 
-Rebuild mode:
-  --rebuild-at-bats skips the PBP fetch loop entirely and only runs the
-  at-bats materializer against the full mlb.play_by_play. Use when adding
-  a column or fixing a denormalization. Manual DELETE required first if
-  you actually want to rebuild (not just fill gaps).
+Rebuild modes:
+  --rebuild-at-bats: skip PBP fetch; rebuild mlb.player_at_bats from existing
+    PBP data. Does NOT delete rows; for a full rebuild, DELETE first.
+  --rebuild-bvp: skip PBP fetch; rebuild mlb.career_batter_vs_pitcher from
+    the full mlb.player_at_bats table. Chunked by batter_id. Does NOT delete
+    rows; for a full rebuild, DELETE first.
+  The two flags are independent. Passing both runs at-bats first, then bvp.
 
 Runs exclusively in GitHub Actions. Credentials injected as environment variables.
 """
@@ -266,6 +280,50 @@ IF NOT EXISTS (
         ON mlb.player_at_bats (batter_id, game_date);
 """
 
+# career_batter_vs_pitcher: lifetime counts + rates per (batter, pitcher).
+# Compound PK (batter_id, pitcher_id), clustered. All rate stats stored
+# pre-computed so the web can read without re-deriving AVG/OBP/SLG/OPS.
+DDL_CREATE_BVP = """
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA = 'mlb' AND TABLE_NAME = 'career_batter_vs_pitcher'
+)
+CREATE TABLE mlb.career_batter_vs_pitcher (
+    batter_id        INT           NOT NULL,
+    pitcher_id       INT           NOT NULL,
+    plate_appearances INT          NOT NULL,
+    at_bats          INT           NOT NULL,
+    hits             INT           NOT NULL,
+    singles          INT           NOT NULL,
+    doubles          INT           NOT NULL,
+    triples          INT           NOT NULL,
+    home_runs        INT           NOT NULL,
+    rbi              INT           NOT NULL,
+    walks            INT           NOT NULL,
+    strikeouts       INT           NOT NULL,
+    hit_by_pitch     INT           NOT NULL,
+    sac_flies        INT           NOT NULL,
+    total_bases      INT           NOT NULL,
+    batting_avg      DECIMAL(5,3)  NULL,
+    obp              DECIMAL(5,3)  NULL,
+    slg              DECIMAL(5,3)  NULL,
+    ops              DECIMAL(5,3)  NULL,
+    last_faced_date  DATE          NULL,
+    updated_at       DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
+    CONSTRAINT PK_career_batter_vs_pitcher PRIMARY KEY CLUSTERED (batter_id, pitcher_id)
+);
+"""
+
+DDL_CREATE_BVP_INDEXES = """
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = 'IX_bvp_pitcher'
+      AND object_id = OBJECT_ID('mlb.career_batter_vs_pitcher')
+)
+    CREATE NONCLUSTERED INDEX IX_bvp_pitcher
+        ON mlb.career_batter_vs_pitcher (pitcher_id, batter_id);
+"""
+
 
 def ensure_table(engine):
     with engine.begin() as conn:
@@ -274,7 +332,9 @@ def ensure_table(engine):
         conn.execute(text(DDL_CREATE_AT_BATS))
         conn.execute(text(DDL_DROP_NAME_COLUMNS))
         conn.execute(text(DDL_CREATE_AT_BATS_INDEXES))
-    log.info("mlb.play_by_play and mlb.player_at_bats tables ensured.")
+        conn.execute(text(DDL_CREATE_BVP))
+        conn.execute(text(DDL_CREATE_BVP_INDEXES))
+    log.info("mlb.play_by_play, mlb.player_at_bats, and mlb.career_batter_vs_pitcher tables ensured.")
 
 
 def safe_int(val):
@@ -583,6 +643,280 @@ def rebuild_player_at_bats(engine):
         load_player_at_bats_for_games(engine, chunk)
 
 
+# SQL expression that classifies a row from mlb.player_at_bats into at-bat
+# count buckets. Reused by both the per-flush loader and the full rebuild.
+# Event types follow the MLB Stats API contract observed in production data.
+BVP_AGGREGATE_SELECT = """
+    batter_id,
+    pitcher_id,
+    COUNT(*) AS plate_appearances,
+    SUM(CASE
+        WHEN result_event_type IN (
+            'walk','intent_walk','hit_by_pitch','sac_fly','sac_fly_double_play',
+            'sac_bunt','sac_bunt_double_play','catcher_interf'
+        ) THEN 0 ELSE 1
+    END) AS at_bats,
+    SUM(CASE WHEN result_event_type IN ('single','double','triple','home_run') THEN 1 ELSE 0 END) AS hits,
+    SUM(CASE WHEN result_event_type = 'single'   THEN 1 ELSE 0 END) AS singles,
+    SUM(CASE WHEN result_event_type = 'double'   THEN 1 ELSE 0 END) AS doubles,
+    SUM(CASE WHEN result_event_type = 'triple'   THEN 1 ELSE 0 END) AS triples,
+    SUM(CASE WHEN result_event_type = 'home_run' THEN 1 ELSE 0 END) AS home_runs,
+    SUM(ISNULL(result_rbi, 0)) AS rbi,
+    SUM(CASE WHEN result_event_type IN ('walk','intent_walk') THEN 1 ELSE 0 END) AS walks,
+    SUM(CASE WHEN result_event_type IN ('strikeout','strikeout_double_play') THEN 1 ELSE 0 END) AS strikeouts,
+    SUM(CASE WHEN result_event_type = 'hit_by_pitch' THEN 1 ELSE 0 END) AS hit_by_pitch,
+    SUM(CASE WHEN result_event_type IN ('sac_fly','sac_fly_double_play') THEN 1 ELSE 0 END) AS sac_flies,
+    SUM(
+        CASE WHEN result_event_type = 'single'   THEN 1
+             WHEN result_event_type = 'double'   THEN 2
+             WHEN result_event_type = 'triple'   THEN 3
+             WHEN result_event_type = 'home_run' THEN 4
+             ELSE 0 END
+    ) AS total_bases,
+    MAX(game_date) AS last_faced_date
+"""
+
+
+def _merge_bvp_from_temp(conn, temp_table):
+    """
+    MERGE a staging temp table (columns matching the permanent table shape)
+    into mlb.career_batter_vs_pitcher. Called by both the incremental loader
+    and the full rebuilder once staging is populated.
+    """
+    conn.execute(text(f"""
+        MERGE mlb.career_batter_vs_pitcher AS tgt
+        USING {temp_table} AS src
+        ON tgt.batter_id = src.batter_id AND tgt.pitcher_id = src.pitcher_id
+        WHEN MATCHED THEN UPDATE SET
+            plate_appearances = src.plate_appearances,
+            at_bats           = src.at_bats,
+            hits              = src.hits,
+            singles           = src.singles,
+            doubles           = src.doubles,
+            triples           = src.triples,
+            home_runs         = src.home_runs,
+            rbi               = src.rbi,
+            walks             = src.walks,
+            strikeouts        = src.strikeouts,
+            hit_by_pitch      = src.hit_by_pitch,
+            sac_flies         = src.sac_flies,
+            total_bases       = src.total_bases,
+            batting_avg       = CASE WHEN src.at_bats > 0
+                                     THEN CAST(src.hits AS DECIMAL(10,4)) / src.at_bats
+                                     ELSE NULL END,
+            obp               = CASE WHEN (src.at_bats + src.walks + src.hit_by_pitch + src.sac_flies) > 0
+                                     THEN CAST(src.hits + src.walks + src.hit_by_pitch AS DECIMAL(10,4))
+                                        / (src.at_bats + src.walks + src.hit_by_pitch + src.sac_flies)
+                                     ELSE NULL END,
+            slg               = CASE WHEN src.at_bats > 0
+                                     THEN CAST(src.total_bases AS DECIMAL(10,4)) / src.at_bats
+                                     ELSE NULL END,
+            ops               = CASE WHEN src.at_bats > 0
+                                           AND (src.at_bats + src.walks + src.hit_by_pitch + src.sac_flies) > 0
+                                     THEN (CAST(src.hits + src.walks + src.hit_by_pitch AS DECIMAL(10,4))
+                                            / (src.at_bats + src.walks + src.hit_by_pitch + src.sac_flies))
+                                        + (CAST(src.total_bases AS DECIMAL(10,4)) / src.at_bats)
+                                     ELSE NULL END,
+            last_faced_date   = src.last_faced_date,
+            updated_at        = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN INSERT (
+            batter_id, pitcher_id,
+            plate_appearances, at_bats, hits,
+            singles, doubles, triples, home_runs,
+            rbi, walks, strikeouts, hit_by_pitch, sac_flies, total_bases,
+            batting_avg, obp, slg, ops,
+            last_faced_date
+        ) VALUES (
+            src.batter_id, src.pitcher_id,
+            src.plate_appearances, src.at_bats, src.hits,
+            src.singles, src.doubles, src.triples, src.home_runs,
+            src.rbi, src.walks, src.strikeouts, src.hit_by_pitch, src.sac_flies, src.total_bases,
+            CASE WHEN src.at_bats > 0
+                 THEN CAST(src.hits AS DECIMAL(10,4)) / src.at_bats
+                 ELSE NULL END,
+            CASE WHEN (src.at_bats + src.walks + src.hit_by_pitch + src.sac_flies) > 0
+                 THEN CAST(src.hits + src.walks + src.hit_by_pitch AS DECIMAL(10,4))
+                    / (src.at_bats + src.walks + src.hit_by_pitch + src.sac_flies)
+                 ELSE NULL END,
+            CASE WHEN src.at_bats > 0
+                 THEN CAST(src.total_bases AS DECIMAL(10,4)) / src.at_bats
+                 ELSE NULL END,
+            CASE WHEN src.at_bats > 0
+                       AND (src.at_bats + src.walks + src.hit_by_pitch + src.sac_flies) > 0
+                 THEN (CAST(src.hits + src.walks + src.hit_by_pitch AS DECIMAL(10,4))
+                        / (src.at_bats + src.walks + src.hit_by_pitch + src.sac_flies))
+                    + (CAST(src.total_bases AS DECIMAL(10,4)) / src.at_bats)
+                 ELSE NULL END,
+            src.last_faced_date
+        );
+    """))
+
+
+def load_career_bvp_for_games(engine, game_pks):
+    """
+    Recompute mlb.career_batter_vs_pitcher rows for every (batter_id,
+    pitcher_id) pair that appears in the given game_pks.
+
+    Unlike the at-bats materializer, this cannot use pre-diffed INSERT: a
+    pair in this flush may already have a row from a previous flush and
+    needs an UPDATE rather than an INSERT. Staged MERGE handles both.
+
+    Steps:
+      1. Find affected (batter, pitcher) pairs from player_at_bats where
+         game_pk IN game_pks.
+      2. Recompute lifetime counts for those pairs across the full
+         player_at_bats table.
+      3. Stage into #stage_bvp.
+      4. MERGE into mlb.career_batter_vs_pitcher.
+    """
+    if not game_pks:
+        return
+
+    game_pks = list(set(int(g) for g in game_pks))
+    placeholders = ", ".join(str(g) for g in game_pks)
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            IF OBJECT_ID('tempdb..#stage_bvp') IS NOT NULL DROP TABLE #stage_bvp;
+            CREATE TABLE #stage_bvp (
+                batter_id         INT NOT NULL,
+                pitcher_id        INT NOT NULL,
+                plate_appearances INT NOT NULL,
+                at_bats           INT NOT NULL,
+                hits              INT NOT NULL,
+                singles           INT NOT NULL,
+                doubles           INT NOT NULL,
+                triples           INT NOT NULL,
+                home_runs         INT NOT NULL,
+                rbi               INT NOT NULL,
+                walks             INT NOT NULL,
+                strikeouts        INT NOT NULL,
+                hit_by_pitch      INT NOT NULL,
+                sac_flies         INT NOT NULL,
+                total_bases       INT NOT NULL,
+                last_faced_date   DATE NULL,
+                PRIMARY KEY (batter_id, pitcher_id)
+            );
+        """))
+
+        conn.execute(text(f"""
+            WITH affected_pairs AS (
+                SELECT DISTINCT batter_id, pitcher_id
+                FROM mlb.player_at_bats
+                WHERE game_pk IN ({placeholders})
+                  AND batter_id IS NOT NULL
+                  AND pitcher_id IS NOT NULL
+            )
+            INSERT INTO #stage_bvp (
+                batter_id, pitcher_id, plate_appearances, at_bats, hits,
+                singles, doubles, triples, home_runs,
+                rbi, walks, strikeouts, hit_by_pitch, sac_flies, total_bases,
+                last_faced_date
+            )
+            SELECT {BVP_AGGREGATE_SELECT}
+            FROM mlb.player_at_bats
+            WHERE (batter_id, pitcher_id) IN (SELECT batter_id, pitcher_id FROM affected_pairs)
+              AND batter_id IS NOT NULL
+              AND pitcher_id IS NOT NULL
+            GROUP BY batter_id, pitcher_id;
+        """))
+
+        result = conn.execute(text("SELECT COUNT(*) FROM #stage_bvp")).fetchone()
+        staged = result[0] if result else 0
+        if staged == 0:
+            log.info("career_bvp: no pairs found for %d games.", len(game_pks))
+            return
+
+        _merge_bvp_from_temp(conn, "#stage_bvp")
+        log.info("career_bvp: merged %d (batter, pitcher) pairs from %d games.",
+                 staged, len(game_pks))
+
+
+def rebuild_career_bvp(engine):
+    """
+    Standalone rebuilder for --rebuild-bvp mode. Rebuilds
+    mlb.career_batter_vs_pitcher from the full mlb.player_at_bats table.
+
+    Chunked by batter_id to keep the staging temp table bounded. Each chunk
+    aggregates a slice of batters against all pitchers they've faced, then
+    merges. Deterministic chunk boundaries via NTILE over the sorted batter
+    list so chunks don't overlap.
+
+    Does NOT delete existing rows. Because every chunk MERGEs on
+    (batter_id, pitcher_id), stale rows for pairs that no longer appear
+    in player_at_bats would remain. That case shouldn't occur in normal
+    operation (player_at_bats only grows). For a hard rebuild, DELETE
+    FROM mlb.career_batter_vs_pitcher first.
+    """
+    with engine.connect() as conn:
+        batters = [
+            row[0] for row in conn.execute(text(
+                "SELECT DISTINCT batter_id FROM mlb.player_at_bats "
+                "WHERE batter_id IS NOT NULL ORDER BY batter_id"
+            )).fetchall()
+        ]
+
+    log.info("rebuild-bvp: %d distinct batters in mlb.player_at_bats.", len(batters))
+    if not batters:
+        return
+
+    CHUNK = 200
+    total_pairs = 0
+    for start in range(0, len(batters), CHUNK):
+        chunk = batters[start:start + CHUNK]
+        placeholders = ", ".join(str(b) for b in chunk)
+
+        with engine.begin() as conn:
+            conn.execute(text("""
+                IF OBJECT_ID('tempdb..#stage_bvp') IS NOT NULL DROP TABLE #stage_bvp;
+                CREATE TABLE #stage_bvp (
+                    batter_id         INT NOT NULL,
+                    pitcher_id        INT NOT NULL,
+                    plate_appearances INT NOT NULL,
+                    at_bats           INT NOT NULL,
+                    hits              INT NOT NULL,
+                    singles           INT NOT NULL,
+                    doubles           INT NOT NULL,
+                    triples           INT NOT NULL,
+                    home_runs         INT NOT NULL,
+                    rbi               INT NOT NULL,
+                    walks             INT NOT NULL,
+                    strikeouts        INT NOT NULL,
+                    hit_by_pitch      INT NOT NULL,
+                    sac_flies         INT NOT NULL,
+                    total_bases       INT NOT NULL,
+                    last_faced_date   DATE NULL,
+                    PRIMARY KEY (batter_id, pitcher_id)
+                );
+            """))
+
+            conn.execute(text(f"""
+                INSERT INTO #stage_bvp (
+                    batter_id, pitcher_id, plate_appearances, at_bats, hits,
+                    singles, doubles, triples, home_runs,
+                    rbi, walks, strikeouts, hit_by_pitch, sac_flies, total_bases,
+                    last_faced_date
+                )
+                SELECT {BVP_AGGREGATE_SELECT}
+                FROM mlb.player_at_bats
+                WHERE batter_id IN ({placeholders})
+                  AND pitcher_id IS NOT NULL
+                GROUP BY batter_id, pitcher_id;
+            """))
+
+            result = conn.execute(text("SELECT COUNT(*) FROM #stage_bvp")).fetchone()
+            staged = result[0] if result else 0
+            total_pairs += staged
+
+            if staged > 0:
+                _merge_bvp_from_temp(conn, "#stage_bvp")
+
+        log.info("rebuild-bvp: batters %d-%d of %d (%d pairs merged this chunk).",
+                 start + 1, start + len(chunk), len(batters), staged)
+
+    log.info("rebuild-bvp: done. %d total pairs merged.", total_pairs)
+
+
 def load_play_by_play(engine, seasons, batch_size):
     season_list = ", ".join(str(s) for s in seasons)
     with engine.connect() as conn:
@@ -645,6 +979,7 @@ def load_play_by_play(engine, seasons, batch_size):
             flush(engine, flush_rows)
             log.info("Wrote %d PBP rows after game %d of %d.", len(flush_rows), i, len(work))
             load_player_at_bats_for_games(engine, flush_games)
+            load_career_bvp_for_games(engine, flush_games)
             flush_rows  = []
             flush_games = []
 
@@ -663,18 +998,28 @@ def main():
         action="store_true",
         help="Skip PBP fetch loop; rebuild mlb.player_at_bats from existing PBP data.",
     )
+    parser.add_argument(
+        "--rebuild-bvp",
+        action="store_true",
+        help="Skip PBP fetch loop; rebuild mlb.career_batter_vs_pitcher from existing player_at_bats data.",
+    )
     args = parser.parse_args()
 
     seasons = args.seasons or SEASONS
     log.info("=== MLB Play-by-Play ETL started ===")
-    log.info("Seasons: %s  Batch: %d  Rebuild at-bats: %s",
-             seasons, args.batch, args.rebuild_at_bats)
+    log.info("Seasons: %s  Batch: %d  Rebuild at-bats: %s  Rebuild BvP: %s",
+             seasons, args.batch, args.rebuild_at_bats, args.rebuild_bvp)
 
     engine = get_engine()
     ensure_table(engine)
 
-    if args.rebuild_at_bats:
-        rebuild_player_at_bats(engine)
+    rebuild_mode = args.rebuild_at_bats or args.rebuild_bvp
+
+    if rebuild_mode:
+        if args.rebuild_at_bats:
+            rebuild_player_at_bats(engine)
+        if args.rebuild_bvp:
+            rebuild_career_bvp(engine)
     else:
         load_play_by_play(engine, seasons, args.batch)
 
