@@ -5,11 +5,13 @@ Deliberately brief. Detailed task tracking lives in component READMEs under "Ope
 ## Active
 
 - **Documentation restructure** (complete, 2026-04-20). Migrated from monolithic `PROJECT_REFERENCE.md` to co-located component READMEs with central `/docs/`. See ADR-0001 and ADR-0016. Archived originals at `/docs/_archive/`.
+- **NFL ETL** (live, 2026-04-21). 7 tables populated via `nflreadpy` on a Tuesday 09:00 UTC schedule. See `etl/nfl/README.md`.
 
-## Next up after migration completes
+## Next up
 
-- **MLB build**. Design phase complete; ETL, database tables, and web components all need to be built. See `/database/mlb/README.md` and `/web/mlb/README.md` once those are populated for the 9-entity catalog and visual inventory. ADR-0004 captures the architectural commitment to pre-aggregated stats.
-- **NFL planning**. No design work started. Next step is a parallel design session like the MLB visual catalog: identify what visuals matter, what stats feed them, what the pre-aggregation layer needs to produce.
+- **MLB build**. Design phase complete; ETL, database tables, and web components all need to be built. See `/database/mlb/README.md` and `/web/mlb/README.md` for the 9-entity catalog and visual inventory. ADR-0004 captures the architectural commitment to pre-aggregated stats.
+- **NFL web surface**. ETL is live but no web layer exists yet. Parallel design session like the MLB visual catalog: identify what visuals matter, what stats feed them, what the pre-aggregation layer needs to produce. See `web/nfl/README.md`.
+- **NFL odds ingestion**. `odds_etl.py` reportedly mentions NFL sport keys but has not been verified. Decide whether to extend it or add a dedicated `nfl-odds-etl.py`. See `etl/nfl/README.md` open questions.
 
 ## On the horizon (no active work yet)
 
