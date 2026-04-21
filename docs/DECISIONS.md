@@ -301,3 +301,28 @@ Consequences:
 - The "when to deviate" section in the skill is capped at four bullets by design. Adding a fifth is a signal that deviation has become the norm and the protocol itself needs revision.
 - `/docs/skills/` is now a directory. Future Claude-facing skill files (testing playbooks, debugging runbooks, etc.) go there. User-facing runbooks for infrastructure operations continue to live at `/infrastructure/runbooks/`.
 - `/docs/README.md` now lists the skill under "Read first every session." The router is the one place where the reading order is authoritative; anyone editing the reading order edits the router.
+
+---
+
+## ADR-0018 [mlb][etl][database][web] First ADR-0004 derived entity: `mlb.player_at_bats` materialized in-lockstep with PBP writes
+Date: 2026-04-21
+
+Context: ADR-0004 committed to pre-aggregating all visual-feeding MLB entities instead of computing them at query time. Five of the nine entities had no materialization as of the Step 5 migration (including player at-bats). The old `/api/mlb-atbats` route violated ADR-0004 by running a filtered aggregation against `mlb.play_by_play` on every request (`is_last_pitch = 1 AND result_event_type IS NOT NULL` plus two joins to `mlb.players`). Shipping the first derived entity establishes the pattern for the other four, unblocks the future Player Analysis page's access path, and removes the last remaining runtime PBP aggregation the web app relied on.
+
+Three subsidiary decisions within this ADR:
+
+1. Materialization runs inline in `etl/mlb_play_by_play.py` after each PBP flush, not in a separate workflow. The two datasets must stay consistent; a separate workflow creates a window where PBP has a game and at-bats don't. Inline keeps the at-bats table automatically covered by any backfill run.
+2. The diff for the materializer runs against `mlb.player_at_bats.game_pk`, not against the PBP diff that drives the fetch loop. This makes partial runs (PBP wrote, at-bats failed) self-healing on the next invocation, and makes `--rebuild-at-bats` the same code path with a different game set.
+3. Names are NOT denormalized onto `mlb.player_at_bats`. An initial design that did denormalize produced 19.8% NULL `batter_name` and 32.4% NULL `pitcher_name` across the 5,092-game backfill because `mlb.players` is truncate-and-reload scoped to the current season, leaving 983 historical player IDs unresolvable. The web route joins `mlb.players` at read time instead. The joined table has under a thousand rows with a PK on `player_id`, so the cost is negligible.
+
+Decision: Create `mlb.player_at_bats` with PK `at_bat_id = '{game_pk}-{at_bat_number}'`. Populate via `load_player_at_bats_for_games(engine, game_pks)` called inline after each PBP flush in `mlb_play_by_play.py`. Add `--rebuild-at-bats` CLI flag and matching `rebuild_at_bats` workflow_dispatch input on `mlb-pbp-etl.yml` for full rebuilds. Store only IDs — `batter_id` and `pitcher_id` — never names. Web `/api/mlb-atbats` reads this table directly and joins `mlb.players` at read time for names. Two indexes: `IX_player_at_bats_game_pk` for the web access path, `IX_player_at_bats_batter` on `(batter_id, game_date)` as the intended Player Analysis access path.
+
+Initial backfill from 5,092 existing PBP games produced 384,040 at-bat rows in 76 seconds.
+
+Consequences:
+
+- `/api/mlb-atbats` no longer runs a filter-and-aggregate over pitch-level data on every request. ADR-0004's "no runtime aggregation of pitch-level data" invariant is enforced for this route
+- Any future schema change to `mlb.player_at_bats` requires a full rebuild via `--rebuild-at-bats` after `DELETE FROM mlb.player_at_bats`. The flag skips the PBP fetch loop so it is safe to run independently
+- Partial-run self-healing means a failure between PBP flush and at-bats materialization is automatically recovered on the next PBP workflow run, regardless of whether the next run is rebuild-mode or normal-mode
+- The four remaining ADR-0004 entities (batter context, batter projections, trend/pattern, platoon splits, career BvP) follow this same pattern: direct INSERT, pre-diff against the destination, materialization lives in the ETL script that produces the source data
+- ID-only storage is the right default for any future derived table that needs player references. Denormalizing names only works if the reference table covers the full historical time range, which `mlb.players` does not
