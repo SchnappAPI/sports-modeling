@@ -8,16 +8,27 @@ Ingests NBA data from `stats.nba.com`, `cdn.nba.com`, and The Odds API. Produces
 
 ## Files
 
-Code files live flat in `/etl/` per ADR-0002.
+ETL code lives flat in `/etl/` per ADR-0002. Grading code lives in `/grading/` as a separate top-level folder.
+
+ETL (`/etl/`):
 
 - `etl/nba_etl.py` - main ETL entry point. Box scores, PT stats, schedule, rosters, players
 - `etl/nba_live.py` - today-only schedule refresh from the public CDN scoreboard. Does not write live per-player rows to the DB
-- `etl/nba_grading.py`, `etl/grade_props.py` - grading pipeline
 - `etl/odds_etl.py` - odds ingestion, shared with MLB, dispatches by sport
 - `etl/lineup_poll.py` - two-stage lineup polling
 - `etl/runner.py` - Flask live-data service on the VM, port 5000
 - `etl/compute_patterns.py` - nightly recomputation of `common.player_line_patterns`
 - `etl/db.py` - shared upsert via staging + `MERGE`
+- `etl/db_inventory.py` - prints table inventory, used by `db_inventory.yml`
+- `etl/game_day_gate.py`, `etl/gate_check.py` - cron gating helpers
+- `etl/lineup_cleanup.py`, `etl/nba_clear.py` - dispatch-only maintenance
+- `etl/signal_backtest.py`, `etl/streak_analysis.py` - analysis scripts
+- `etl/seed_user_codes.py`, `etl/migrate_common_teams.py` - one-shot migrations
+
+Grading (`/grading/`):
+
+- `grading/grade_props.py` - grading entry point. Modes: `upcoming`, `intraday`, `backfill`, `outcomes`
+- `grading/migrate_grades_v2.py` - legacy migration helper
 
 Workflows under `.github/workflows/` orchestrate these scripts on schedule. The NBA-relevant ones are listed in the Invariants section below.
 
@@ -34,34 +45,58 @@ Workflows under `.github/workflows/` orchestrate these scripts on schedule. The 
 
 ### Grading pipeline
 
-Order of operations, one step triggering the next:
+Order of operations across workflows:
 
 1. `odds-etl.yml` fetches FanDuel lines
-2. `grading.yml` runs on `workflow_run` after odds-etl succeeds; calls `grade_props.py run_upcoming`
-3. `compute-grade-outcomes.yml` resolves Won/Lost after games finish
+2. `grading.yml` runs on `workflow_run` after `odds-etl.yml` succeeds; calls `python grading/grade_props.py --mode upcoming`
+3. `compute-grade-outcomes.yml` resolves Won/Lost after games finish; calls `grade_props.py --mode outcomes`
 4. `compute-patterns.yml` runs nightly at 07:30 UTC to refresh `common.player_line_patterns` from resolved outcomes
 
-`_common_grade_data` returns a 6-tuple. The sixth element is the personal pattern table keyed by `(player_id, market_key, line_value)`. Grade components live:
+`grade_props.py` has four modes:
 
-- `weighted_hit_rate`: 60% L20 + 40% L60, falls back to L60 when L20 sample < 5
-- `trend_grade`: L10 mean vs L30 mean, centered at 50
-- `momentum_grade`: consecutive hit or miss streak, log-scaled
-- `pattern_grade`: historical reversal rate after runs of current streak length
-- `matchup_grade`: defense rank for player position vs today's opponent (rank 1 = most allowed)
-- `regression_grade`: z-score of recent L10 vs full season
-- `composite_grade`: equal-weighted mean of all non-NULL components
+- `upcoming` - grade today's standard + alternate lines, Over and Under
+- `intraday` - re-grade only player-market pairs whose posted line has moved since last grade (used by `refresh-data.yml`)
+- `backfill` - grade historical dates in batches; re-dispatches itself until `nothing to do`
+- `outcomes` - pure SQL `UPDATE` to set `outcome` = `'Won'` / `'Lost'` on resolved rows
 
-All components invert for Under rows (`100 - value`). Rising trend is bad for an under.
+`_common_grade_data` returns a 6-tuple: `(history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns)`. The last element is the personal pattern table keyed by `(player_id, market_key, line_value)`. Never revert to a 5-tuple form.
+
+### Grade components (actual code, not description)
+
+All scores are 0-100 floats. Constants live at the top of `grade_props.py`:
+
+- `weighted_hit_rate`: `0.60 * hit_rate_20 + 0.40 * hit_rate_60` when `sample_size_20 >= MIN_SAMPLE (5)`, else `hit_rate_60` only. Stored as a probability; `grade` column is this times 100 rounded
+- `trend_grade`: `50 + (mean(last 10) - mean(last 30)) / mean(last 30) * 150`, clamped to [0, 100]. Requires at least `TREND_MIN = 3` obs
+- `momentum_grade`: reads the player's personal lag-1 transition probability from `common.player_line_patterns` and scales to 0-100. Uses `p_hit_after_hit` when the player is on a hit streak, `p_hit_after_miss` on a miss streak. Falls back to `hit_rate_60 * 100 + streak * 2` on a hit streak or `hit_rate_60 * 100` on a miss streak when no personal pattern exists. Score interpretation: 80 means an 80% personal probability of the next game hitting
+- `pattern_grade`: `pattern_strength * 300`, clamped to [0, 100], plus a sample-size bonus up to 20 points (scaling with `n` above 10). Measures how predictable the player's pattern is, not a reversal rate
+- `matchup_grade`: `(30 - defense_rank + 1) / 30 * 100`. Defense rank by position group (G/F/C) vs today's opponent. Rank 1 = most allowed = highest score
+- `regression_grade`: z-score of `last 10` vs full-season mean, transformed to `50 - z * 25` and clamped to [0, 100]
+- `composite_grade`: equal-weighted mean of all non-NULL components, with `weighted_hit_rate` multiplied by 100 first so it lives on the same 0-100 scale
+
+All six components invert for Under rows (`100 - value`). Rising trend is bad for an under.
+
+### Bracket expansion and Under grading
+
+Standard markets (`player_points`, `player_rebounds`, `player_points_rebounds_assists`, etc.) expand into a line bracket: `BRACKET_STEPS = 5` on each side of the posted line in `BRACKET_INCREMENT = 1.0` steps. Only the center line (step 0) carries the actual posted price; bracket lines have `over_price = NULL`.
+
+Alternate markets (`*_alternate`) are posted at fixed grids defined in `ALT_GRIDS` and never bracket-expand. `drop_bracket_lines_covered_by_alts` removes standard bracket lines whose stat + line already appears in an alternate row for the same player.
+
+Under grading applies only to standard markets. Under prices come from `odds.upcoming_player_props` where `outcome_name = 'Under'`, matched to the same `(player_id, market_key, line_value)` as the Over. Alternate lines remain Over-only.
 
 `precompute_line_grades` iterates by `(player_id, market_key)` pair, loads the stat sequence once, and fans across line values. Roughly 560 outer iterations vs. 6,200 in the per-line design it replaced.
 
-### Signal design
+### Signal display (web only)
 
-Signals are sourced from `shared/signals.ts` and are computed on grade outputs.
+Signals are a UI concept and live in `web/lib/signals.ts`. The grading pipeline does not import them; it writes raw component grades and the web computes chips from those at render time.
 
-- **STREAK** is the strongest positive signal (+21.4% lift in the last backtest). Fires when `momentum_grade > 70`.
-- **DUE** (formerly labeled SLUMP) is a bounce-back signal for miss streaks. Fires when `momentum_grade > 65 AND hr60 >= 0.35`. Rendered green in the UI.
-- HOT, COLD, FADE are player-level and follow legacy thresholds.
+Two signal families:
+
+- **Player-level** (same across every line for this player): `HOT` if `trend_grade > 72`, `COLD` if `trend_grade < 28`, `DUE` if `regression_grade > 72`, `FADE` if `regression_grade < 28`. HOT suppresses FADE. DUE suppresses COLD.
+- **Line-level** (per posted line): `STREAK` when `momentum_grade > 70`. `SLUMP` (displayed as the green DUE chip) when `momentum_grade > 65` and `hit_rate_60 >= 0.35` and `STREAK` did not fire. Note: this line-level DUE is a different signal from the player-level DUE above.
+
+`LONGSHOT` is a cell-level value signal flagged when `over_price > 250`, `hit_rate_20 > 0`, and `hit_rate_60 >= 0.20`.
+
+STREAK was the strongest positive signal in the last backtest (+21.4% lift per the April 2026 session); a re-run is pending under the personal-pattern grading.
 
 ### `common.player_line_patterns`
 
@@ -69,14 +104,14 @@ Populated nightly by `compute-patterns.yml` at 07:30 UTC. Stores lag-1 transitio
 
 - `MIN_GAMES = 10` to create a row
 - `MIN_TRANSITION_OBS = 3` per state before a transition probability is stored
-- Grading reads these directly and falls back to season hit rate when no pattern row exists
+- Grading reads these directly via `fetch_player_patterns` and falls back to a season-hit-rate baseline when no pattern row exists
 
 ### Odds API client
 
 - Bookmaker is FanDuel only (`bookmakers=fanduel`). See ADR-0007.
 - `includeLinks=true` is valid only on the per-event endpoint (`/v4/sports/{sport}/events/{event_id}/odds`). Not valid on the bulk endpoint.
 - Event-level links write to `odds.upcoming_player_props.link VARCHAR(500)` and surface as tappable FanDuel betslip deep links in the web UI when the game is still open.
-- Missing cells in a props table (e.g., a 5+ PTS line that shows as a dash) reflect Odds API feed coverage, not an ingestion bug. FanDuel's native app may display lines that the Odds API does not return.
+- Missing cells in a props table (for example, a 5+ PTS line shown as a dash) reflect Odds API feed coverage, not an ingestion bug. FanDuel's native app may display lines that the Odds API does not return.
 - Modes: `discover`, `probe`, `backfill`, `mappings`, `upcoming`. Upcoming mode writes to `odds.event_game_map` and runs nightly for `days-ahead=1`.
 
 ### Two-stage lineup poll
@@ -88,22 +123,26 @@ Populated nightly by `compute-patterns.yml` at 07:30 UTC. Stores lag-1 transitio
 - `PREVIEW_TIMEOUT = 20s`, no retry. Single attempt is sufficient; 404 on live games is expected and handled.
 - `BETWEEN_GAMES_DELAY = 0.5s`.
 - Position strings written to `nba.daily_lineups` are full (PG, SG, SF, PF, C). Consumers must use `posToGroup()` (PG/SG → G, SF/PF → F, C → C, compound values by `LEFT(1)`). Never `position[0]`.
-- Runs inside every cycle of `nba-game-day.yml` and inside `refresh-data.yml`.
+- Runs inside every cycle of `nba-game-day.yml` and inside `refresh-data.yml` with `--hours-ahead 6`.
 
 ### Scheduled re-grading
 
-`refresh-lines.yml` runs at 12:00 PM, 3:00 PM, and 6:00 PM ET daily. It refreshes FanDuel lines and re-runs grading. Unauthenticated and also callable from the web via `POST /api/refresh-lines`.
+`refresh-lines.yml` runs at 17:00, 20:00, and 23:00 UTC (12 PM, 3 PM, 6 PM ET) daily. It refreshes FanDuel lines and re-runs grading in `upcoming` mode. Also callable via `workflow_dispatch`.
 
-`refresh-data.yml` is the admin-only full refresh (live box score + odds + grading + lineup poll). Requires `ADMIN_REFRESH_CODE`. Called from the in-app Refresh Data button.
+`refresh-data.yml` is `workflow_dispatch`-only. Triggered from the web app's Refresh Data button via `POST /api/refresh-data`, which validates `ADMIN_REFRESH_CODE` and dispatches the workflow via the GitHub Actions REST API. Runs four steps: live box score + schedule (`nba_live.py`), odds (`odds_etl.py --mode upcoming`), grading (`grade_props.py --mode intraday`), lineup poll (`lineup_poll.py --hours-ahead 6`).
 
 ## Invariants
 
 Do not revert these without a superseding ADR.
 
+- Grading code lives under `/grading/`, not `/etl/`. The entry point is `grading/grade_props.py`.
 - `_common_grade_data` returns a 6-tuple. The sixth element is patterns. Never revert to the 5-tuple form.
-- `common.daily_grades` has `outcome_name` (Over/Under) and `over_price`. UNIQUE key includes `outcome_name`.
+- `common.daily_grades` has `outcome_name` (Over/Under), `over_price`, and `outcome` (Won/Lost/NULL). UNIQUE key includes `outcome_name`.
 - `precompute_line_grades` iterates by `(player_id, market_key)` pair, not per line value.
 - Under components invert via `100 - value`.
+- Standard markets bracket-expand via `BRACKET_STEPS = 5` at `BRACKET_INCREMENT = 1.0`. Alternate markets do not.
+- Alternate markets are Over-only. Under grading is standard-markets-only.
+- `drop_bracket_lines_covered_by_alts` runs before grading to avoid duplicate lines.
 - Lineup poll Stage 2 always runs.
 - Lineup poll `PREVIEW_TIMEOUT = 20s` with no retry.
 - Position grouping uses `posToGroup()`, never `position[0]` or `LEFT(position, 2)`.
@@ -113,6 +152,7 @@ Do not revert these without a superseding ADR.
 - `nba_live.py` never writes live per-player rows to the DB. Live data is served from the Flask runner off the CDN.
 - `compute-patterns.yml` runs nightly at 07:30 UTC.
 - `grading.yml` is triggered by `workflow_run` on `odds-etl.yml` success. Do not reintroduce a fixed time buffer.
+- `refresh-data.yml` uses grading mode `intraday`, not `upcoming`, so only moved lines are re-graded.
 
 Active NBA workflows:
 
@@ -121,10 +161,11 @@ Active NBA workflows:
 | `nba-game-day.yml` | 09:30 UTC daily + every 15 min 00:00-06:00 + every 15 min 22:00-23:59 UTC | Live scoreboard refresh, odds refresh, grading, lineup poll |
 | `nba-etl.yml` | 09:00 UTC daily | Box scores, PT stats, schedule, rosters |
 | `odds-etl.yml` | 10:00 UTC daily | Today's FanDuel lines |
-| `grading.yml` | `workflow_run` after `odds-etl.yml` succeeds | Grade today's props |
+| `grading.yml` | `workflow_run` after `odds-etl.yml` succeeds, plus `workflow_dispatch` for backfill | `grade_props.py --mode upcoming` (or `--mode backfill`) |
 | `nba-backfill.yml` | Dispatched by `nba-game-day.yml` when a game goes Final | Odds + grade backfill |
-| `refresh-lines.yml` | `POST /api/refresh-lines` | Unauthenticated odds + grade refresh |
-| `refresh-data.yml` | `POST /api/refresh-data` with `ADMIN_REFRESH_CODE` | Full four-step refresh |
+| `refresh-lines.yml` | Cron at 17/20/23 UTC + `workflow_dispatch` | Odds refresh + `grade_props.py --mode upcoming` |
+| `refresh-data.yml` | `workflow_dispatch` (from web via `/api/refresh-data` with `ADMIN_REFRESH_CODE`) | Four-step full refresh including `grade_props.py --mode intraday` |
+| `compute-grade-outcomes.yml` | Scheduled + `workflow_dispatch` | `grade_props.py --mode outcomes` |
 | `compute-patterns.yml` | 07:30 UTC nightly + `workflow_dispatch` | Update `common.player_line_patterns` |
 | `restart-flask.yml` | `workflow_dispatch` | Restart `schnapp-flask.service` |
 | `install-mcp.yml` | `workflow_dispatch` | Install or update MCP server on VM |
@@ -137,5 +178,5 @@ See `/docs/CHANGELOG.md` filtered by `[nba][etl]`. Historical entries before the
 
 ## Open Questions
 
-- Signal backtest re-run is pending once enough resolved outcomes have accumulated under the personal-pattern grading.
+- Signal backtest re-run is pending once enough resolved outcomes have accumulated under the personal-pattern grading (`etl/signal_backtest.py`, `signal-backtest.yml`).
 - Extraction of common ingestion helpers into `etl/_shared.py` is deferred until MLB and NFL converge on the same patterns.
