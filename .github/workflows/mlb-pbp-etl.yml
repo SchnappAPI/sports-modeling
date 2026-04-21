@@ -16,6 +16,11 @@ on:
         required: false
         default: 'false'
         type: boolean
+      rebuild_bvp:
+        description: 'Skip PBP fetch; rebuild mlb.career_batter_vs_pitcher from existing player_at_bats data'
+        required: false
+        default: 'false'
+        type: boolean
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -36,8 +41,19 @@ jobs:
 
       - name: Run MLB Play-by-Play ETL
         run: |
-          if [ "${{ github.event.inputs.rebuild_at_bats }}" = "true" ]; then
-            python etl/mlb_play_by_play.py --rebuild-at-bats
+          REBUILD_AB="${{ github.event.inputs.rebuild_at_bats }}"
+          REBUILD_BVP="${{ github.event.inputs.rebuild_bvp }}"
+
+          if [ "$REBUILD_AB" = "true" ] || [ "$REBUILD_BVP" = "true" ]; then
+            FLAGS=""
+            if [ "$REBUILD_AB" = "true" ]; then
+              FLAGS="$FLAGS --rebuild-at-bats"
+            fi
+            if [ "$REBUILD_BVP" = "true" ]; then
+              FLAGS="$FLAGS --rebuild-bvp"
+            fi
+            echo "Running rebuild mode with flags:$FLAGS"
+            python etl/mlb_play_by_play.py $FLAGS
           else
             python etl/mlb_play_by_play.py \
               --batch ${{ github.event.inputs.batch }} \
