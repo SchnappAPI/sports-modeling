@@ -8,21 +8,27 @@ NBA pages, components, and canonical UI invariants. The source of truth for stat
 
 ## Files
 
-Components live in `/web/components/`. Pages under `/web/app/nba/`.
+Components live in `/web/components/`. Pages under `/web/app/nba/`. Signal logic lives in `/web/lib/signals.ts`.
 
-Components:
+Components (standalone `.tsx` files):
 
 - `StatsTable.tsx` - team and aggregate stat tables with compact/all-stats toggle
 - `RosterTable.tsx` - per-game roster view including starter/bench split and Confirmed badge
+- `BoxScoreTable.tsx` - per-game player box score with period filter
 - `MatchupGrid.tsx` - two defense panels side by side on the game Matchups tab
+- `MatchupDefense.tsx` - VS Defense panel on the player page
 - `LiveBoxScore.tsx` - live score header + starter/bench split, refreshes every 30s
-- `TodayPropsSection.tsx` - horizontal props strip on the player page; tap-to-expand panel
-- `MatchupsTab.tsx` - game-page tab wrapping `MatchupGrid`
+- `GameStrip.tsx` - game list with live/final scores or spread-and-total for upcoming
+- `GameTabs.tsx` - tab container for the game page (includes Matchups tab via `MatchupGrid`)
 - `PropMatrix.tsx` - At-a-Glance matrix view
 - `HelpPanel.tsx` - `?` button content in the At-a-Glance header
 - `RefreshDataButton.tsx` - admin-only four-step refresh trigger. Requires `ADMIN_REFRESH_CODE`
 - `PasscodeGate.tsx` - passcode auth for the whole app
-- `GameStrip.tsx` - game list with live/final scores or spread-and-total for upcoming
+
+Not standalone components (live inside other files):
+
+- `TodayPropsSection` - horizontal props strip + tap-to-expand panel. Part of `PlayerPageInner.tsx` under `app/nba/player/[playerId]/`
+- `MatchupsTab` - tab wrapper for `MatchupGrid`. Part of `GameTabs.tsx`
 
 Pages:
 
@@ -74,6 +80,16 @@ Tapping a cell expands a panel below containing: a full-width SVG dot plot (`pre
 Standard line detail rows are intentionally absent from the panel; the strip cell already shows the posted line + grade.
 
 `TodayPropsSection` takes `summaries: GameSummary[]`. `getGrades` reads `dg.outcome_name` + `dg.over_price` directly from `common.daily_grades`. No join to odds tables. The old `best_price` CTE was removed because it attached Over prices to Under rows; do not reintroduce it.
+
+### Signals
+
+`web/lib/signals.ts` defines all chip logic. Two families plus a cell value family:
+
+- **Player-level** (same across every line for this player): `HOT` if `trend_grade > 72`, `COLD` if `trend_grade < 28`, `DUE` if `regression_grade > 72`, `FADE` if `regression_grade < 28`. HOT suppresses FADE. DUE suppresses COLD.
+- **Line-level** (per posted line): `STREAK` when `momentum_grade > 70`. `SLUMP` (displayed as the green DUE chip) when `momentum_grade > 65` and `hit_rate_60 >= 0.35` and `STREAK` did not fire.
+- **Cell value**: `LONGSHOT` when `over_price > 250` and `hit_rate_20 > 0` and `hit_rate_60 >= 0.20`.
+
+Note: player-level `DUE` and line-level `SLUMP` both display with the "DUE" label but are different signals with different inputs.
 
 ### At a Glance
 
@@ -155,6 +171,7 @@ Do not revert without an ADR.
 - Position grouping via `posToGroup()` (PG/SG → G, SF/PF → F, C → C, compound by `LEFT(1)`)
 - FanDuel betslip link appears when `row.link` is present and the game is open
 - `RefreshDataButton` requires `ADMIN_REFRESH_CODE`; `/api/refresh-lines` is unauthenticated
+- Signal logic lives in `web/lib/signals.ts`. Player-level `DUE` (regression-based) and line-level `SLUMP` displayed as `DUE` (momentum-based) are distinct signals with different inputs
 
 ## Recent Changes
 
