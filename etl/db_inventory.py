@@ -6,109 +6,48 @@ conn = pyodbc.connect(
     "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
 )
 cur = conn.cursor()
-def p(label, q, params=None):
+def p(label, q):
     print(f"\n=== {label} ===")
-    cur.execute(q) if not params else cur.execute(q, params)
+    cur.execute(q)
     for r in cur.fetchall(): print(r)
 
-p("player_props standard coverage", """
+p("discover_cursors", """
+SELECT sport_key, season_year, oldest_snapshot_ts, snapshots_walked, events_found, last_walked_at
+FROM odds.discover_cursors
+ORDER BY sport_key, season_year
+""")
+
+p("discovered_events date range by sport/season", """
+SELECT sport_key, season_year,
+    MIN(CAST(commence_time AS DATE)) AS min_date,
+    MAX(CAST(commence_time AS DATE)) AS max_date,
+    COUNT(*) AS total_events
+FROM odds.discovered_events
+GROUP BY sport_key, season_year
+ORDER BY sport_key, season_year
+""")
+
+p("events loaded vs discovered for NBA 2024", """
 SELECT
-    MIN(CAST(egm.game_date AS DATE)) AS min_date,
-    MAX(CAST(egm.game_date AS DATE)) AS max_date,
-    COUNT(DISTINCT egm.game_id) AS games
-FROM odds.player_props pp
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pp.bookmaker_key = 'fanduel'
-  AND pp.sport_key = 'basketball_nba'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key NOT LIKE '%alternate%'
+    (SELECT COUNT(*) FROM odds.discovered_events WHERE sport_key='basketball_nba' AND season_year=2024) AS discovered,
+    (SELECT COUNT(*) FROM odds.events WHERE sport_key='basketball_nba' AND season_year=2024) AS loaded,
+    (SELECT MAX(CAST(commence_time AS DATE)) FROM odds.events WHERE sport_key='basketball_nba' AND season_year=2024) AS max_loaded_date
 """)
 
-p("player_props alternate coverage", """
-SELECT
-    MIN(CAST(egm.game_date AS DATE)) AS min_date,
-    MAX(CAST(egm.game_date AS DATE)) AS max_date,
-    COUNT(DISTINCT egm.game_id) AS games
-FROM odds.player_props pp
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pp.bookmaker_key = 'fanduel'
-  AND pp.sport_key = 'basketball_nba'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key LIKE '%alternate%'
+p("discovered NBA 2024 events NOT yet loaded (oldest 20)", """
+SELECT TOP 20 de.event_id, CAST(de.commence_time AS DATE) AS game_date, de.away_team, de.home_team
+FROM odds.discovered_events de
+WHERE de.sport_key = 'basketball_nba' AND de.season_year = 2024
+  AND NOT EXISTS (SELECT 1 FROM odds.events e WHERE e.event_id = de.event_id)
+ORDER BY de.commence_time ASC
 """)
 
-p("upcoming_player_props standard coverage", """
-SELECT
-    MIN(CAST(egm.game_date AS DATE)) AS min_date,
-    MAX(CAST(egm.game_date AS DATE)) AS max_date,
-    COUNT(DISTINCT egm.game_id) AS games
-FROM odds.upcoming_player_props pp
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pp.bookmaker_key = 'fanduel'
-  AND pp.sport_key = 'basketball_nba'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key NOT LIKE '%alternate%'
-""")
-
-p("upcoming_player_props alternate coverage", """
-SELECT
-    MIN(CAST(egm.game_date AS DATE)) AS min_date,
-    MAX(CAST(egm.game_date AS DATE)) AS max_date,
-    COUNT(DISTINCT egm.game_id) AS games
-FROM odds.upcoming_player_props pp
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pp.bookmaker_key = 'fanduel'
-  AND pp.sport_key = 'basketball_nba'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key LIKE '%alternate%'
-""")
-
-p("Banchero standard in player_props", """
-SELECT TOP 10
-    CAST(egm.game_date AS DATE) AS game_date,
-    pp.market_key,
-    pp.outcome_point,
-    pp.outcome_price
-FROM odds.player_props pp
-JOIN odds.player_map pm ON pm.odds_player_name = pp.player_name AND pm.sport_key = 'basketball_nba'
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pm.player_id = 1629029
-  AND pp.bookmaker_key = 'fanduel'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key NOT LIKE '%alternate%'
-ORDER BY egm.game_date DESC, pp.market_key
-""")
-
-p("Banchero alternates in player_props", """
-SELECT TOP 10
-    CAST(egm.game_date AS DATE) AS game_date,
-    pp.market_key,
-    pp.outcome_point,
-    pp.outcome_price
-FROM odds.player_props pp
-JOIN odds.player_map pm ON pm.odds_player_name = pp.player_name AND pm.sport_key = 'basketball_nba'
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pm.player_id = 1629029
-  AND pp.bookmaker_key = 'fanduel'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key LIKE '%alternate%'
-ORDER BY egm.game_date DESC, pp.market_key, pp.outcome_point
-""")
-
-p("Banchero standard in upcoming_player_props", """
-SELECT TOP 10
-    CAST(egm.game_date AS DATE) AS game_date,
-    pp.market_key,
-    pp.outcome_point,
-    pp.outcome_price
-FROM odds.upcoming_player_props pp
-JOIN odds.player_map pm ON pm.odds_player_name = pp.player_name AND pm.sport_key = 'basketball_nba'
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pm.player_id = 1629029
-  AND pp.bookmaker_key = 'fanduel'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key NOT LIKE '%alternate%'
-ORDER BY egm.game_date DESC, pp.market_key
+p("discovered NBA 2024 events NOT yet loaded (newest 20)", """
+SELECT TOP 20 de.event_id, CAST(de.commence_time AS DATE) AS game_date, de.away_team, de.home_team
+FROM odds.discovered_events de
+WHERE de.sport_key = 'basketball_nba' AND de.season_year = 2024
+  AND NOT EXISTS (SELECT 1 FROM odds.events e WHERE e.event_id = de.event_id)
+ORDER BY de.commence_time DESC
 """)
 
 conn.close()
