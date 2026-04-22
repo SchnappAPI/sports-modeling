@@ -2,20 +2,20 @@ import { NextRequest, NextResponse } from 'next/server';
 import mssql from 'mssql';
 import { getPool } from '@/lib/db';
 
-// Returns the canonical FanDuel posted line per game per market for a player.
-// Used by the player game log to colour-code stat values vs prop lines and to
-// populate the per-game prop expand panel.
+// Returns FanDuel posted lines from odds.player_props per game per market.
+// Used by the player game log for both coloring and the prop expand panel.
 //
-// Source of truth: odds.player_props (raw API data), not common.daily_grades.
-// daily_grades historically stored multiple line values per game/market due to
-// bracket extrapolation (now removed), making grade_id ordering unreliable for
-// identifying the actual posted line. player_props contains exactly what FanDuel
-// posted, so it is unambiguous.
+// Returns one row per (gameId, marketKey, lineValue), covering both standard
+// and alternate markets. Each row includes:
+//   - lineType: 'standard' | 'alternate'
+//   - overPrice: the FanDuel Over price
 //
-// Returns one row per (gameId, marketKey): standard (non-alternate) Over lines
-// only. When no player_props row exists for a graded game, no row is returned
-// for that market — the game log shows neutral gray rather than a potentially
-// wrong value.
+// The game log coloring logic uses only standard rows (lineType = 'standard').
+// The expand panel shows standard rows at the top, then alternate rows below.
+//
+// Within each (gameId, marketKey), only the most recent snap_ts is kept per
+// line value to avoid showing the same line twice when odds were polled
+// multiple times.
 export async function GET(req: NextRequest) {
   const playerIdRaw = req.nextUrl.searchParams.get('playerId');
   if (!playerIdRaw) {
@@ -31,43 +31,48 @@ export async function GET(req: NextRequest) {
       .request()
       .input('playerId', mssql.Int, playerId)
       .query(
-        `WITH graded_games AS (
-           SELECT DISTINCT
-             egm.game_id   AS gameId,
-             dg.event_id,
-             dg.market_key AS marketKey,
-             pm.odds_player_name
+        `-- Get the player's odds_player_name for the join
+         WITH player AS (
+           SELECT TOP 1 odds_player_name
+           FROM odds.player_map
+           WHERE player_id = @playerId
+             AND sport_key = 'basketball_nba'
+         ),
+         -- All graded games for this player (standard markets only, for game coverage)
+         graded_games AS (
+           SELECT DISTINCT egm.game_id, dg.event_id
            FROM common.daily_grades dg
            JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
-           JOIN odds.player_map pm
-             ON pm.player_id = dg.player_id
-            AND pm.sport_key = 'basketball_nba'
            WHERE dg.player_id     = @playerId
              AND dg.bookmaker_key = 'fanduel'
              AND dg.market_key NOT LIKE '%_alternate'
-         )
-         SELECT gameId, marketKey, lineValue, outcomeName
-         FROM (
+         ),
+         -- All FanDuel Over lines from player_props for those games,
+         -- both standard and alternate, deduped to most recent snap per line value
+         all_lines AS (
            SELECT
-             gg.gameId,
-             gg.marketKey,
+             gg.game_id       AS gameId,
+             pp.market_key    AS marketKey,
              pp.outcome_point AS lineValue,
-             pp.outcome_name  AS outcomeName,
+             pp.outcome_price AS overPrice,
+             CASE WHEN pp.market_key LIKE '%_alternate' THEN 'alternate' ELSE 'standard' END AS lineType,
              ROW_NUMBER() OVER (
-               PARTITION BY gg.gameId, gg.marketKey
+               PARTITION BY gg.game_id, pp.market_key, pp.outcome_point
                ORDER BY pp.snap_ts DESC
              ) AS rn
            FROM graded_games gg
+           JOIN player p ON 1=1
            JOIN odds.player_props pp
              ON pp.event_id      = gg.event_id
-            AND pp.market_key    = gg.marketKey
-            AND pp.player_name   = gg.odds_player_name
+            AND pp.player_name   = p.odds_player_name
             AND pp.bookmaker_key = 'fanduel'
             AND pp.outcome_name  = 'Over'
             AND pp.outcome_point IS NOT NULL
-         ) ranked
+         )
+         SELECT gameId, marketKey, lineValue, overPrice, lineType
+         FROM all_lines
          WHERE rn = 1
-         ORDER BY gameId, marketKey`
+         ORDER BY gameId, marketKey, lineValue`
       );
     return NextResponse.json({ grades: result.recordset });
   } catch (err) {
