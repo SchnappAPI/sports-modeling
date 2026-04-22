@@ -31,6 +31,10 @@ on:
         description: 'Backfill mode only: minutes before exiting and re-dispatching. Max 330.'
         required: false
         default: '300'
+      force:
+        description: 'Backfill mode only: regrade dates already in daily_grades (existing rows UPDATE via MERGE, snapshots archived).'
+        required: false
+        default: 'false'
 
 env:
   AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
@@ -62,6 +66,7 @@ jobs:
           DATE_INPUT:         ${{ github.event.inputs.date               || '' }}
           BATCH:              ${{ github.event.inputs.batch              || '10' }}
           TIME_LIMIT_MINUTES: ${{ github.event.inputs.time_limit_minutes || '300' }}
+          FORCE:              ${{ github.event.inputs.force              || 'false' }}
         run: |
           set -euo pipefail
 
@@ -85,6 +90,7 @@ jobs:
 
             ARGS="--mode backfill --batch $BATCH"
             [ -n "$DATE_INPUT" ] && ARGS="$ARGS --date $DATE_INPUT"
+            [ "$FORCE" = "true" ] && ARGS="$ARGS --force"
 
             OUTPUT=$(python grading/grade_props.py $ARGS 2>&1) || { echo "$OUTPUT"; exit 1; }
             echo "$OUTPUT"
@@ -110,6 +116,7 @@ jobs:
           BATCH:              ${{ github.event.inputs.batch              || '10' }}
           TIME_LIMIT_MINUTES: ${{ github.event.inputs.time_limit_minutes || '300' }}
           DATE_INPUT:         ${{ github.event.inputs.date              || '' }}
+          FORCE:              ${{ github.event.inputs.force              || 'false' }}
         run: |
           [ "${{ needs.grade.result }}" = "cancelled" ] && exit 0
           [ "$DONE" = "true" ] && exit 0
@@ -119,4 +126,5 @@ jobs:
             --field mode="backfill" \
             --field date="$DATE_INPUT" \
             --field batch="$BATCH" \
-            --field time_limit_minutes="$TIME_LIMIT_MINUTES"
+            --field time_limit_minutes="$TIME_LIMIT_MINUTES" \
+            --field force="$FORCE"

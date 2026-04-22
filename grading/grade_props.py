@@ -1591,17 +1591,25 @@ def run_intraday(engine):
     log.info(f"  {written} rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
 
-def run_backfill(engine, batch_size, specific_date=None):
+def run_backfill(engine, batch_size, specific_date=None, force=False):
     if specific_date:
         work_dates = [specific_date]
     else:
+        # force=True: re-grade every date with odds history, even if rows
+        # already exist in daily_grades. Existing rows get UPDATE via the
+        # MERGE in upsert_grades; no deletion needed, and the archive
+        # trigger in upsert_grades snapshots any superseded rows first.
+        skip_clause = "" if force else (
+            " AND NOT EXISTS(SELECT 1 FROM common.daily_grades g "
+            "WHERE g.grade_date=CAST(egm.game_date AS DATE))"
+        )
         df = pd.read_sql(text(
             "SELECT DISTINCT CAST(egm.game_date AS DATE) AS game_date"
             " FROM odds.player_props pp"
             " JOIN odds.event_game_map egm ON egm.event_id=pp.event_id AND egm.game_id IS NOT NULL"
             " WHERE pp.sport_key='basketball_nba' AND pp.bookmaker_key=:bk"
             " AND pp.outcome_name='Over' AND pp.outcome_point IS NOT NULL AND egm.game_date IS NOT NULL"
-            " AND NOT EXISTS(SELECT 1 FROM common.daily_grades g WHERE g.grade_date=CAST(egm.game_date AS DATE))"
+            f"{skip_clause}"
             " ORDER BY game_date ASC"
         ), engine, params={"bk": BOOKMAKER})
         work_dates = df["game_date"].astype(str).tolist()[:batch_size]
@@ -1736,6 +1744,9 @@ def main():
     parser.add_argument("--mode",  choices=["upcoming", "intraday", "backfill", "outcomes"], default="upcoming")
     parser.add_argument("--batch", type=int, default=BATCH_DEFAULT)
     parser.add_argument("--date",  type=str, default=None)
+    parser.add_argument("--force", action="store_true",
+                        help="Backfill mode only: regrade dates already in daily_grades. "
+                             "Existing rows get UPDATE via MERGE; snapshots archived.")
     args = parser.parse_args()
     engine = get_engine()
     ensure_tables(engine)
@@ -1744,7 +1755,7 @@ def main():
     elif args.mode == "intraday":
         run_intraday(engine)
     elif args.mode == "backfill":
-        run_backfill(engine, batch_size=args.batch, specific_date=args.date)
+        run_backfill(engine, batch_size=args.batch, specific_date=args.date, force=args.force)
     else:
         run_outcomes(engine, specific_date=args.date)
     log.info("Done.")
