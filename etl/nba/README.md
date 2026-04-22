@@ -59,7 +59,7 @@ Order of operations across workflows:
 - `backfill` - grade historical dates in batches; re-dispatches itself until `nothing to do`
 - `outcomes` - pure SQL `UPDATE` to set `outcome` = `'Won'` / `'Lost'` on resolved rows
 
-`_common_grade_data` returns a 6-tuple: `(history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns)`. The last element is the personal pattern table keyed by `(player_id, market_key, line_value)`. Never revert to a 5-tuple form.
+`_common_grade_data` returns a 7-tuple: `(history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns, opp_df)`. `patterns` is the personal pattern table keyed by `(player_id, market_key, line_value)`; `opp_df` is the per-game opportunity frame used by the opportunity grades. Never revert to a 5-tuple or 6-tuple form.
 
 ### Grade components (actual code, not description)
 
@@ -163,7 +163,6 @@ Populated nightly by `compute-patterns.yml` at 07:30 UTC. Stores lag-1 transitio
 Do not revert these without a superseding ADR.
 
 - Grading code lives under `/grading/`, not `/etl/`. The entry point is `grading/grade_props.py`.
-- `_common_grade_data` returns a 6-tuple. The sixth element is patterns. Never revert to the 5-tuple form.
 - `common.daily_grades` has `outcome_name` (Over/Under), `over_price`, and `outcome` (Won/Lost/NULL). UNIQUE key includes `outcome_name`.
 - `precompute_line_grades` iterates by `(player_id, market_key)` pair, not per line value.
 - Under components invert via `100 - value`.
