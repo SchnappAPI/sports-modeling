@@ -45,27 +45,59 @@ def main():
     conn = connect()
     cur = conn.cursor()
 
-    # 1) Ensure archive tables exist (same schema as source, no rows yet).
-    print("Step 1: ensure archive tables exist")
-    cur.execute("""
+    # 1) Ensure archive tables exist without IDENTITY on any column.
+    #    SELECT INTO preserves IDENTITY from the source, so we build the archive
+    #    table columns explicitly to avoid the 'explicit value for identity'
+    #    error on INSERT. Idempotent: if an archive table exists but has an
+    #    IDENTITY column (from an earlier run), drop and rebuild.
+    print("Step 1: ensure archive tables exist (no IDENTITY)")
+
+    def ensure_archive(schema, source_name, archive_name):
+        # If archive exists, check whether any column is IDENTITY. If yes, drop.
+        cur.execute(f"""
+SELECT TOP 1 c.name
+  FROM sys.columns c
+ WHERE c.object_id = OBJECT_ID('{schema}.{archive_name}')
+   AND c.is_identity = 1
+""")
+        bad = cur.fetchone()
+        if bad is not None:
+            print(f"  {schema}.{archive_name}: dropping (had IDENTITY column '{bad[0]}')")
+            cur.execute(f"DROP TABLE {schema}.{archive_name}")
+
+        cur.execute(f"""
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-               WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props_archive')
+               WHERE TABLE_SCHEMA='{schema}' AND TABLE_NAME='{archive_name}')
 BEGIN
-  SELECT TOP 0 *, CAST(NULL AS DATETIME2) AS archived_at
-    INTO odds.upcoming_player_props_archive
-    FROM odds.upcoming_player_props;
+  DECLARE @cols NVARCHAR(MAX);
+  SELECT @cols = STRING_AGG(
+           QUOTENAME(COLUMN_NAME) + ' ' + DATA_TYPE +
+           CASE
+             WHEN DATA_TYPE IN ('varchar','nvarchar','char','nchar')
+               THEN '(' +
+                 CASE WHEN CHARACTER_MAXIMUM_LENGTH = -1 THEN 'MAX'
+                      ELSE CAST(CHARACTER_MAXIMUM_LENGTH AS VARCHAR(10)) END
+                 + ')'
+             WHEN DATA_TYPE IN ('decimal','numeric')
+               THEN '(' + CAST(NUMERIC_PRECISION AS VARCHAR(10))
+                 + ',' + CAST(NUMERIC_SCALE AS VARCHAR(10)) + ')'
+             ELSE ''
+           END +
+           CASE WHEN IS_NULLABLE='NO' THEN ' NOT NULL' ELSE ' NULL' END,
+           ', '
+         ) WITHIN GROUP (ORDER BY ORDINAL_POSITION)
+    FROM INFORMATION_SCHEMA.COLUMNS
+   WHERE TABLE_SCHEMA='{schema}' AND TABLE_NAME='{source_name}';
+
+  DECLARE @sql NVARCHAR(MAX) = N'CREATE TABLE {schema}.{archive_name} (' + @cols
+    + N', archived_at DATETIME2 NULL)';
+  EXEC sp_executesql @sql;
 END
 """)
-    cur.execute("""
-IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-               WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive')
-BEGIN
-  SELECT TOP 0 *, CAST(NULL AS DATETIME2) AS archived_at
-    INTO common.daily_grades_archive
-    FROM common.daily_grades;
-END
-""")
-    print("  archives ready")
+        print(f"  {schema}.{archive_name}: ready")
+
+    ensure_archive("odds", "upcoming_player_props", "upcoming_player_props_archive")
+    ensure_archive("common", "daily_grades", "daily_grades_archive")
 
     # 2) odds.upcoming_player_props: NBA cleanup.
     print("Step 2: clean odds.upcoming_player_props (NBA)")
