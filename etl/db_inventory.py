@@ -6,38 +6,109 @@ conn = pyodbc.connect(
     "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
 )
 cur = conn.cursor()
-def p(label, q):
+def p(label, q, params=None):
     print(f"\n=== {label} ===")
-    cur.execute(q)
+    cur.execute(q) if not params else cur.execute(q, params)
     for r in cur.fetchall(): print(r)
 
-p("both archives: exist?", """
-SELECT TABLE_SCHEMA, TABLE_NAME
-FROM INFORMATION_SCHEMA.TABLES
-WHERE (TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive')
-   OR (TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props_archive')
+p("player_props standard coverage", """
+SELECT
+    MIN(CAST(egm.game_date AS DATE)) AS min_date,
+    MAX(CAST(egm.game_date AS DATE)) AS max_date,
+    COUNT(DISTINCT egm.game_id) AS games
+FROM odds.player_props pp
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pp.bookmaker_key = 'fanduel'
+  AND pp.sport_key = 'basketball_nba'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key NOT LIKE '%alternate%'
 """)
 
-p("daily_grades_archive grade_id identity?", """
-SELECT c.name, c.is_identity, c.is_nullable
-FROM sys.columns c
-WHERE c.object_id=OBJECT_ID('common.daily_grades_archive')
-  AND c.name IN ('grade_id','archived_at')
+p("player_props alternate coverage", """
+SELECT
+    MIN(CAST(egm.game_date AS DATE)) AS min_date,
+    MAX(CAST(egm.game_date AS DATE)) AS max_date,
+    COUNT(DISTINCT egm.game_id) AS games
+FROM odds.player_props pp
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pp.bookmaker_key = 'fanduel'
+  AND pp.sport_key = 'basketball_nba'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key LIKE '%alternate%'
 """)
 
-p("upcoming_player_props_archive col check", """
-SELECT COUNT(*) AS col_count FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props_archive'
+p("upcoming_player_props standard coverage", """
+SELECT
+    MIN(CAST(egm.game_date AS DATE)) AS min_date,
+    MAX(CAST(egm.game_date AS DATE)) AS max_date,
+    COUNT(DISTINCT egm.game_id) AS games
+FROM odds.upcoming_player_props pp
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pp.bookmaker_key = 'fanduel'
+  AND pp.sport_key = 'basketball_nba'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key NOT LIKE '%alternate%'
 """)
 
-p("row counts", """
-SELECT 'upp_archive' AS t, COUNT(*) FROM odds.upcoming_player_props_archive
-UNION ALL
-SELECT 'dg_archive', COUNT(*) FROM common.daily_grades_archive
-UNION ALL
-SELECT 'upp', COUNT(*) FROM odds.upcoming_player_props
-UNION ALL
-SELECT 'dg', COUNT(*) FROM common.daily_grades
+p("upcoming_player_props alternate coverage", """
+SELECT
+    MIN(CAST(egm.game_date AS DATE)) AS min_date,
+    MAX(CAST(egm.game_date AS DATE)) AS max_date,
+    COUNT(DISTINCT egm.game_id) AS games
+FROM odds.upcoming_player_props pp
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pp.bookmaker_key = 'fanduel'
+  AND pp.sport_key = 'basketball_nba'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key LIKE '%alternate%'
+""")
+
+p("Banchero standard in player_props", """
+SELECT TOP 10
+    CAST(egm.game_date AS DATE) AS game_date,
+    pp.market_key,
+    pp.outcome_point,
+    pp.outcome_price
+FROM odds.player_props pp
+JOIN odds.player_map pm ON pm.odds_player_name = pp.player_name AND pm.sport_key = 'basketball_nba'
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pm.player_id = 1629029
+  AND pp.bookmaker_key = 'fanduel'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key NOT LIKE '%alternate%'
+ORDER BY egm.game_date DESC, pp.market_key
+""")
+
+p("Banchero alternates in player_props", """
+SELECT TOP 10
+    CAST(egm.game_date AS DATE) AS game_date,
+    pp.market_key,
+    pp.outcome_point,
+    pp.outcome_price
+FROM odds.player_props pp
+JOIN odds.player_map pm ON pm.odds_player_name = pp.player_name AND pm.sport_key = 'basketball_nba'
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pm.player_id = 1629029
+  AND pp.bookmaker_key = 'fanduel'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key LIKE '%alternate%'
+ORDER BY egm.game_date DESC, pp.market_key, pp.outcome_point
+""")
+
+p("Banchero standard in upcoming_player_props", """
+SELECT TOP 10
+    CAST(egm.game_date AS DATE) AS game_date,
+    pp.market_key,
+    pp.outcome_point,
+    pp.outcome_price
+FROM odds.upcoming_player_props pp
+JOIN odds.player_map pm ON pm.odds_player_name = pp.player_name AND pm.sport_key = 'basketball_nba'
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pm.player_id = 1629029
+  AND pp.bookmaker_key = 'fanduel'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key NOT LIKE '%alternate%'
+ORDER BY egm.game_date DESC, pp.market_key
 """)
 
 conn.close()
