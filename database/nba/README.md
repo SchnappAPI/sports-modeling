@@ -54,6 +54,7 @@ Defined in `grading/grade_props.py:ensure_tables`. Full column list:
 - Market: `market_key VARCHAR(100)`, `bookmaker_key VARCHAR(50)`, `line_value DECIMAL(6,1)`, `outcome_name VARCHAR(5) DEFAULT 'Over'` (`'Over'` / `'Under'`), `over_price INT NULL` (direction-appropriate price, name kept for migration simplicity)
 - Hit rates: `hit_rate_60 FLOAT`, `hit_rate_20 FLOAT`, `sample_size_60 INT`, `sample_size_20 INT`, `weighted_hit_rate FLOAT`, `grade FLOAT`
 - Component grades: `trend_grade FLOAT`, `momentum_grade FLOAT`, `pattern_grade FLOAT`, `matchup_grade FLOAT`, `regression_grade FLOAT`, `composite_grade FLOAT`
+- Opportunity grades (added 2026-04-22, ADR-0017): `opportunity_short_grade FLOAT`, `opportunity_long_grade FLOAT`, `opportunity_matchup_grade FLOAT`, `opportunity_streak_grade FLOAT`, `opportunity_volume_grade FLOAT` (threes only; NULL elsewhere), `opportunity_expected_grade FLOAT` (threes only; NULL elsewhere). See `/etl/nba/README.md` for definitions
 - Opponent: `hit_rate_opp FLOAT`, `sample_size_opp INT`
 - Resolution: `outcome VARCHAR(5) NULL` (`'Won'` / `'Lost'` / `NULL`). Populated by `grade_props.py --mode outcomes` as a pure SQL `UPDATE` after games go Final (`nba.schedule.game_status = 3`)
 - Audit: `created_at DATETIME2 DEFAULT GETUTCDATE()`

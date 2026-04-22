@@ -71,7 +71,34 @@ All scores are 0-100 floats. Constants live at the top of `grade_props.py`:
 - `pattern_grade`: `pattern_strength * 300`, clamped to [0, 100], plus a sample-size bonus up to 20 points (scaling with `n` above 10). Measures how predictable the player's pattern is, not a reversal rate
 - `matchup_grade`: `(30 - defense_rank + 1) / 30 * 100`. Defense rank by position group (G/F/C) vs today's opponent. Rank 1 = most allowed = highest score
 - `regression_grade`: z-score of `last 10` vs full-season mean, transformed to `50 - z * 25` and clamped to [0, 100]
-- `composite_grade`: equal-weighted mean of all non-NULL components, with `weighted_hit_rate` multiplied by 100 first so it lives on the same 0-100 scale
+- `composite_grade`: equal-weighted mean of all non-NULL components, with `weighted_hit_rate` multiplied by 100 first so it lives on the same 0-100 scale. Opportunity grades (below) enter the mean when populated; opportunity volume/expected stay out (they are parallel diagnostic columns)
+
+#### Opportunity grades (added 2026-04-22, ADR-0017)
+
+Six per-(player, market) components derived from per-game attempt and tracking data, not made-stat outcomes. All 0-100, 50 = neutral; Under rows invert via `100 - value`.
+
+- `opportunity_short_grade`: short-vs-long trend on the player per-game opportunity value. Scaling matches `trend_grade`: `50 + (mean(last 10) - mean(last 30)) / mean(last 30) * 150`, clamped
+- `opportunity_long_grade`: long-vs-season trend on the same metric: `50 + (mean(last 30) - season_mean) / season_mean * 150`, clamped
+- `opportunity_matchup_grade`: how much the opponent allows of this market's opportunity stats to the player's position group. Averages component-level ranks from the extended `fetch_matchup_defense` (`rank_opp_pts`, `rank_opp_fg3m`, `rank_reb_chances`, `rank_potential_ast`), then scales `(30 - avg_rank + 1) / 30 * 100`
+- `opportunity_streak_grade`: sign-based run count of games above/below player's season opportunity mean. Minimum run length `OPP_STREAK_MIN = 2`. Delta = `run * 6` capped at ±30 from neutral 50
+- `opportunity_volume_grade`: threes-only. Short-vs-long trend on raw `3PA` (pure attempt volume)
+- `opportunity_expected_grade`: threes-only. Short-vs-long trend on `3PA * rolling 3PT%` (expected made threes)
+
+Per-market opportunity definitions (`MARKET_OPP_COMPONENTS`):
+
+| Market | Opportunity = |
+|--------|----------------|
+| points / points_alternate | `(FGA - 3PA) * r2 * 2 + 3PA * r3 * 3 + FTA * rft` |
+| rebounds / rebounds_alternate | `reb_chances` |
+| assists / assists_alternate | `potential_ast` |
+| threes / threes_alternate | `3PA * r3` (+ parallel volume/expected columns) |
+| PRA / PR / PA / RA (+ alternates) | sum of component opportunities |
+
+`r2`, `r3`, `rft` are per-player trailing shooting percentages: shift-1 rolling(10, min_periods=3) mean of per-game pcts with expanding-season fallback. Shift-1 prevents look-ahead bias; game G's percentages use games 1..G-1 only.
+
+Blocks and steals markets have no opportunity grades (no per-player attempt rate). Those rows keep the six columns NULL and skip them in the composite.
+
+Backfill dates before `player_passing_stats` and `player_rebound_chances` were populated will have NULL rebounds/assists opportunity. Combo markets (PRA/PR/PA/RA) treat missing components as 0 via `sum(min_count=1)`, so they still produce a (degraded) opportunity grade.
 
 All six components invert for Under rows (`100 - value`). Rising trend is bad for an under.
 
@@ -153,6 +180,11 @@ Do not revert these without a superseding ADR.
 - `compute-patterns.yml` runs nightly at 07:30 UTC.
 - `grading.yml` is triggered by `workflow_run` on `odds-etl.yml` success. Do not reintroduce a fixed time buffer.
 - `refresh-data.yml` uses grading mode `intraday`, not `upcoming`, so only moved lines are re-graded.
+- Opportunity grades live on `common.daily_grades` (six columns prefixed `opportunity_`). ADR-0017. Under rows invert via `100 - value` like every other grade.
+- `fetch_matchup_defense` produces 5 opportunity ranks (`rank_opp_pts`, `rank_opp_fg3a`, `rank_opp_fg3m`, `rank_reb_chances`, `rank_potential_ast`) in addition to the stat ranks. Never drop those; `precompute_opportunity_grades` reads them directly.
+- `_common_grade_data` returns a 7-tuple; the seventh element is `opp_df`. Do not revert to 6-tuple.
+- `MARKET_OPP_COMPONENTS` is the single source of truth for which components contribute to which market's opportunity metric. Modify only alongside a CHANGELOG note.
+- Opportunity grading uses `groupby().transform()` (pandas 3.x safe); never use `groupby(group_keys=False).apply()`, which drops the grouping column in pandas 3.x.
 
 Active NBA workflows:
 

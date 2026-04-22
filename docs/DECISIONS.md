@@ -363,3 +363,35 @@ Consequences:
 - The `rebuild_bvp` and `rebuild_at_bats` workflow flags are independent and compose: setting both runs at-bats first (populating the source), then bvp (aggregating from the source). This ordering is encoded in `main()` and should not be reversed
 - The four remaining ADR-0004 entities (batter context per game, batter projections per game, player trend/pattern stats, player platoon splits) reduce to three after this ADR lands. Player trend/pattern stats likely also want staged MERGE (rolling windows change as new games land); batter context and projections likely fit the append-only player_at_bats model (one row per batter per game). Platoon splits are a structural variant of career_batter_vs_pitcher and should share its write strategy
 - Ratios are stored pre-computed in the permanent table. If a bug in the ratio math is ever found, the fix requires a full rebuild via `--rebuild-bvp` after a DELETE. No view layer abstracts this away. That is an intentional trade: the web reads are dumb and fast
+
+
+## ADR-0017: Opportunity-based grading (2026-04-22)
+
+**Context.** The existing grading stack (hit rate, trend, momentum, pattern, matchup, regression) was entirely outcome-based: it measured what happened (made stat cleared the line) without distinguishing "efficient with few attempts" from "inefficient with many attempts." A player shooting 12 threes a night on a 2.5 line got the same signal as one shooting 6, provided their hit rates matched.
+
+**Decision.** Add six per-(player, market) opportunity grades to `common.daily_grades`:
+- `opportunity_short_grade`, `opportunity_long_grade`: short-vs-long trend and long-vs-season trend on per-game opportunity.
+- `opportunity_matchup_grade`: how much the opponent allows of this opportunity stat to this position group.
+- `opportunity_streak_grade`: sign-based run vs player's own opportunity mean.
+- `opportunity_volume_grade`, `opportunity_expected_grade`: threes-only parallel columns for raw `3PA` trend vs `3PA * 3PT%` trend.
+
+Opportunity per market:
+- Points / combos with P: `(FGA - 3PA) * r2 * 2 + 3PA * r3 * 3 + FTA * rft` where r2/r3/rft are per-player trailing shooting percentages.
+- Rebounds / combos with R: `reb_chances` from `nba.player_rebound_chances`.
+- Assists / combos with A: `potential_ast` from `nba.player_passing_stats`.
+- Threes: `3PA * r3` primary, with raw `3PA` and `3PA * r3` as parallel volume/expected columns.
+- Combo markets (PRA/PR/PA/RA) sum the component opportunities; missing components count as 0 via `sum(min_count=1)`.
+
+Look-ahead bias is prevented by using shift(1) rolling averages: game G's opportunity uses percentages computed from games 1..G-1 only.
+
+**Alternatives considered.** (a) Flat league-average FTA-to-possession coefficient (0.44) — rejected because it folds opportunity into a possession metric, which was not the question. (b) Per-player FTA-to-possession ratio from play-by-play — rejected as higher-complexity for marginal lift over weighting each attempt by its own expected points. (c) A new workflow and table for opportunity — rejected; source data (`player_box_score_stats`, `player_passing_stats`, `player_rebound_chances`) is already ingested daily by `nba_etl.py`, so no new ETL or cron is needed. The grading pipeline consumes the extra data on existing schedules.
+
+**Consequences.**
+- `common.daily_grades` gains 6 columns (nullable, non-breaking for existing readers; `web/lib/queries.ts:getGrades` already uses column-existence checks).
+- `composite_grade` now averages 7-11 components instead of 5-6 depending on market and coverage. Historical rows are unchanged until re-graded by backfill.
+- `fetch_matchup_defense` SQL widened to include opportunity ranks; slightly heavier but still a single query per grading run.
+- Backfill dates before tracking data was populated will have NULL for rebound/assist opportunity grades.
+- Blocks and steals have no opportunity grade (no per-player attempt rate).
+- `precompute_opportunity_grades` uses `groupby().transform()` not `.apply(group_keys=False)` — the latter drops the grouping column in pandas 3.x.
+
+**Supersedes.** Nothing. Extends the grading stack from ADR-0005.

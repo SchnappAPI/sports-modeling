@@ -45,6 +45,15 @@ BRACKET_STEPS     = 5
 BRACKET_INCREMENT = 1.0
 BATCH_DEFAULT     = 10
 
+# Opportunity grading knobs. OPP_TREND_SHORT/LONG are game-count windows for
+# short-vs-long trend on per-game opportunity (analogous to TREND_SHORT/LONG
+# on the raw stat). OPP_STREAK_MIN is the minimum run length in games that
+# counts as a streak vs the player's own opportunity mean.
+OPP_TREND_SHORT = 10
+OPP_TREND_LONG  = 30
+OPP_TREND_MIN   = 3
+OPP_STREAK_MIN  = 2
+
 STANDARD_MARKETS = {
     "player_points", "player_rebounds", "player_assists", "player_threes",
     "player_blocks", "player_steals",
@@ -163,6 +172,43 @@ MARKET_TO_ACTUAL_COL = {
     "player_rebounds_assists_alternate":        "ra",
 }
 
+# Opportunity grading map. Market -> components (pts/reb/ast/fg3m) that sum
+# per game to produce the per-game opportunity value for that market.
+#   pts  = (fga - fg3a) * r2 * 2 + fg3a * r3 * 3 + fta * rft where r2/r3/rft
+#          are per-player trailing rolling 2PT%/3PT%/FT% (shift-1 look-ahead safe)
+#   reb  = reb_chances (from nba.player_rebound_chances)
+#   ast  = potential_ast (from nba.player_passing_stats)
+#   fg3m = fg3a * r3 (expected made threes); threes market also gets a
+#          volume-only parallel column using raw fg3a.
+# Blocks and steals are deliberately excluded; no per-player attempt rate.
+MARKET_OPP_COMPONENTS = {
+    "player_points":                            ("pts",),
+    "player_points_alternate":                  ("pts",),
+    "player_rebounds":                          ("reb",),
+    "player_rebounds_alternate":                ("reb",),
+    "player_assists":                           ("ast",),
+    "player_assists_alternate":                 ("ast",),
+    "player_threes":                            ("fg3m",),
+    "player_threes_alternate":                  ("fg3m",),
+    "player_points_rebounds_assists":           ("pts", "reb", "ast"),
+    "player_points_rebounds_assists_alternate": ("pts", "reb", "ast"),
+    "player_points_rebounds":                   ("pts", "reb"),
+    "player_points_rebounds_alternate":         ("pts", "reb"),
+    "player_points_assists":                    ("pts", "ast"),
+    "player_points_assists_alternate":          ("pts", "ast"),
+    "player_rebounds_assists":                  ("reb", "ast"),
+    "player_rebounds_assists_alternate":        ("reb", "ast"),
+}
+
+# Which matchup rank column to read per component. Populated by the extended
+# fetch_matchup_defense SQL.
+OPP_MATCHUP_RANK = {
+    "pts":  "rank_opp_pts",
+    "reb":  "rank_reb_chances",
+    "ast":  "rank_potential_ast",
+    "fg3m": "rank_opp_fg3m",
+}
+
 # Column list matching the archive table's definition order.
 # Used as the INSERT target list and (with dg. prefix) the SELECT source list.
 # Never use SELECT dg.*: physical ordinal positions can diverge between the two
@@ -173,7 +219,10 @@ _ARCHIVE_COLS = (
     "hit_rate_60, hit_rate_20, sample_size_60, sample_size_20, "
     "weighted_hit_rate, grade, trend_grade, momentum_grade, pattern_grade, "
     "matchup_grade, regression_grade, composite_grade, hit_rate_opp, "
-    "sample_size_opp, outcome, created_at"
+    "sample_size_opp, outcome, created_at, "
+    "opportunity_short_grade, opportunity_long_grade, "
+    "opportunity_matchup_grade, opportunity_streak_grade, "
+    "opportunity_volume_grade, opportunity_expected_grade"
 )
 
 # Same list with dg. alias prefix for use in the SELECT clause when daily_grades
@@ -270,6 +319,15 @@ CREATE TABLE common.daily_grades(
             ("sample_size_opp", "INT"),
             ("outcome_name",    "VARCHAR(5)"),
             ("outcome",         "VARCHAR(5)"),   # 'Won' / 'Lost' / NULL
+            # Opportunity grading columns (ADR-0017, 2026-04-22).
+            # All 0-100, 50 = neutral; Under rows invert via 100 - value.
+            ("opportunity_short_grade",    "FLOAT"),
+            ("opportunity_long_grade",     "FLOAT"),
+            ("opportunity_matchup_grade",  "FLOAT"),
+            ("opportunity_streak_grade",   "FLOAT"),
+            # Threes-only parallel columns (NULL for every other market).
+            ("opportunity_volume_grade",   "FLOAT"),
+            ("opportunity_expected_grade", "FLOAT"),
         ]:
             conn.execute(text(
                 f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
@@ -329,6 +387,13 @@ CREATE TABLE common.daily_grades_archive(
             ("sample_size_opp", "INT"),
             ("outcome",         "VARCHAR(5)"),
             ("archived_at",     "DATETIME2"),
+            # Opportunity grading columns (ADR-0017). Must mirror daily_grades.
+            ("opportunity_short_grade",    "FLOAT"),
+            ("opportunity_long_grade",     "FLOAT"),
+            ("opportunity_matchup_grade",  "FLOAT"),
+            ("opportunity_streak_grade",   "FLOAT"),
+            ("opportunity_volume_grade",   "FLOAT"),
+            ("opportunity_expected_grade", "FLOAT"),
         ]:
             conn.execute(text(
                 f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
@@ -398,6 +463,99 @@ def fetch_season_history(engine, player_ids, as_of_date):
     return df
 
 
+def fetch_opportunity_history(engine, player_ids, as_of_date):
+    """
+    Per-player, per-game opportunity data used for opportunity grading.
+
+    Joins nba.player_box_score_stats (FGA, 3PA, FTA, made counts) with
+    nba.player_passing_stats (potential_ast) and nba.player_rebound_chances
+    (reb_chances) on (player_id, game_date). Passing and rebound rows may
+    be missing for older dates or players with no tracking coverage - those
+    come through as NULL.
+
+    Returns a DataFrame with columns:
+      player_id, game_date, game_id, team_id, opp_team_id,
+      fga, fg3a, fta, fgm, fg3m, ftm,
+      potential_ast, reb_chances,
+      pct2_game, pct3_game, pctft_game,
+      r2, r3, rft,
+      opp_pts, opp_reb, opp_ast,
+      opp_fg3m_expected, opp_fg3m_volume
+
+    r2/r3/rft are per-player trailing rolling 2PT%/3PT%/FT%: shifted-by-1
+    rolling(10, min_periods=3) mean of per-game pcts, falling back to
+    expanding season mean. shift(1) prevents look-ahead bias.
+
+    opp_pts = (fga - fg3a) * r2 * 2 + fg3a * r3 * 3 + fta * rft, with league-
+    average fallbacks (0.48/0.36/0.77) when trailing pct is NaN.
+    """
+    if not player_ids:
+        return pd.DataFrame()
+    pid_list = ", ".join(str(int(p)) for p in player_ids)
+    sql = text(f"""
+        SELECT b.player_id, b.game_date, b.game_id, b.team_id,
+               CASE WHEN b.team_id = s.home_team_id THEN s.away_team_id ELSE s.home_team_id END AS opp_team_id,
+               SUM(CAST(b.fga  AS INT)) AS fga,
+               SUM(CAST(b.fg3a AS INT)) AS fg3a,
+               SUM(CAST(b.fta  AS INT)) AS fta,
+               SUM(CAST(b.fgm  AS INT)) AS fgm,
+               SUM(CAST(b.fg3m AS INT)) AS fg3m,
+               SUM(CAST(b.ftm  AS INT)) AS ftm,
+               MAX(pa.potential_ast)    AS potential_ast,
+               MAX(rc.reb_chances)      AS reb_chances
+          FROM nba.player_box_score_stats b
+          JOIN nba.schedule s ON s.game_id = b.game_id
+          LEFT JOIN nba.player_passing_stats pa
+                 ON pa.player_id = b.player_id AND pa.game_date = b.game_date
+          LEFT JOIN nba.player_rebound_chances rc
+                 ON rc.player_id = b.player_id AND rc.game_date = b.game_date
+         WHERE b.player_id IN ({pid_list})
+           AND b.game_date >= :ss
+           AND b.game_date <  :aod
+         GROUP BY b.player_id, b.game_id, b.game_date, b.team_id, s.home_team_id, s.away_team_id
+    """)
+    df = pd.read_sql(sql, engine, params={"ss": SEASON_START, "aod": str(as_of_date)})
+    if df.empty:
+        log.info("  Opportunity history: 0 rows.")
+        return df
+    df["game_date"] = pd.to_datetime(df["game_date"])
+    df = df.sort_values(["player_id", "game_date"]).reset_index(drop=True)
+
+    def _pct(made, att):
+        a = att.replace(0, np.nan)
+        return (made / a).astype(float)
+
+    df["pct2_game"]  = _pct(df["fgm"] - df["fg3m"], df["fga"] - df["fg3a"])
+    df["pct3_game"]  = _pct(df["fg3m"], df["fg3a"])
+    df["pctft_game"] = _pct(df["ftm"], df["fta"])
+
+    # Trailing means via groupby().transform() - pandas 3.x compatible.
+    # groupby().apply(group_keys=False) drops the grouping column in 3.x.
+    grouped = df.groupby("player_id")
+    for src_col, out in [("pct2_game", "r2"), ("pct3_game", "r3"), ("pctft_game", "rft")]:
+        long_mean  = grouped[src_col].transform(lambda s: s.shift(1).expanding(min_periods=1).mean())
+        short_mean = grouped[src_col].transform(lambda s: s.shift(1).rolling(window=10, min_periods=3).mean())
+        df[out] = short_mean.where(short_mean.notna(), long_mean)
+
+    pa2 = (df["fga"].fillna(0) - df["fg3a"].fillna(0)).clip(lower=0)
+    df["opp_pts"] = (
+        pa2 * df["r2"].fillna(0.48) * 2.0
+        + df["fg3a"].fillna(0) * df["r3"].fillna(0.36) * 3.0
+        + df["fta"].fillna(0)  * df["rft"].fillna(0.77) * 1.0
+    )
+    df["opp_reb"] = df["reb_chances"].astype(float)
+    df["opp_ast"] = df["potential_ast"].astype(float)
+    df["opp_fg3m_expected"] = df["fg3a"].fillna(0) * df["r3"].fillna(0.36)
+    df["opp_fg3m_volume"]   = df["fg3a"].astype(float)
+
+    log.info(
+        f"  Opportunity history: {len(df)} rows for {df['player_id'].nunique()} players; "
+        f"reb_chances coverage={df['reb_chances'].notna().sum()}, "
+        f"potential_ast coverage={df['potential_ast'].notna().sum()}."
+    )
+    return df
+
+
 def fetch_opp_info(engine, player_ids, grade_date_str):
     if not player_ids:
         return {}
@@ -425,6 +583,13 @@ def fetch_matchup_defense(engine, opp_player_pairs):
     if not unique:
         return {}
     values_rows = ", ".join(f"({tid}, '{pg}')" for tid, pg in unique)
+    # Extended 2026-04-22 (ADR-0017): also joins player_passing_stats and
+    # player_rebound_chances on (player_id, game_date) and exposes five new
+    # opportunity ranks: rank_opp_pts, rank_opp_fg3a, rank_opp_fg3m,
+    # rank_reb_chances, rank_potential_ast. avg_opp_pts uses league-average
+    # conversion constants (0.48/0.36/0.77) because we do not have per-player
+    # r2/r3/rft inside the per-position-group aggregate; ranking is what
+    # matters for the matchup grade, not absolute scale.
     sql = text(f"""
 WITH ss AS (
     SELECT CAST(CAST(
@@ -432,29 +597,47 @@ WITH ss AS (
     AS VARCHAR(4))+'-10-01' AS DATE) AS dt
 ),
 gt AS (
-    SELECT pbs.player_id,pbs.game_id,
+    SELECT pbs.player_id,pbs.game_id,pbs.game_date,
            CASE WHEN pbs.team_id=s.home_team_id THEN s.away_team_id ELSE s.home_team_id END AS opp_team_id,
            SUM(pbs.pts) AS pts,SUM(pbs.reb) AS reb,SUM(pbs.ast) AS ast,
-           SUM(pbs.stl) AS stl,SUM(pbs.blk) AS blk,SUM(pbs.fg3m) AS fg3m,SUM(pbs.tov) AS tov
+           SUM(pbs.stl) AS stl,SUM(pbs.blk) AS blk,SUM(pbs.fg3m) AS fg3m,SUM(pbs.tov) AS tov,
+           SUM(CAST(pbs.fga  AS INT)) AS fga,
+           SUM(CAST(pbs.fg3a AS INT)) AS fg3a,
+           SUM(CAST(pbs.fta  AS INT)) AS fta
     FROM nba.player_box_score_stats pbs
     JOIN nba.schedule s ON s.game_id=pbs.game_id
     WHERE s.game_date>=(SELECT dt FROM ss)
-    GROUP BY pbs.player_id,pbs.game_id,pbs.team_id,s.home_team_id,s.away_team_id
+    GROUP BY pbs.player_id,pbs.game_id,pbs.game_date,pbs.team_id,s.home_team_id,s.away_team_id
 ),
 pf AS (
     SELECT gt.*,LEFT(p.position,1) AS pos_group FROM gt
     JOIN nba.players p ON p.player_id=gt.player_id
     WHERE LEFT(p.position,1) IN ('G','F','C')
 ),
+pf2 AS (
+    SELECT pf.*, pa.potential_ast, rc.reb_chances
+      FROM pf
+      LEFT JOIN nba.player_passing_stats   pa ON pa.player_id=pf.player_id AND pa.game_date=pf.game_date
+      LEFT JOIN nba.player_rebound_chances rc ON rc.player_id=pf.player_id AND rc.game_date=pf.game_date
+),
 tp AS (SELECT opp_team_id,pos_group FROM (VALUES {values_rows}) AS t(opp_team_id,pos_group)),
 td AS (
-    SELECT pf.opp_team_id,pf.pos_group,COUNT(*) AS games_defended,
-           AVG(CAST(pf.pts AS FLOAT)) AS avg_pts,AVG(CAST(pf.reb AS FLOAT)) AS avg_reb,
-           AVG(CAST(pf.ast AS FLOAT)) AS avg_ast,AVG(CAST(pf.stl AS FLOAT)) AS avg_stl,
-           AVG(CAST(pf.blk AS FLOAT)) AS avg_blk,AVG(CAST(pf.fg3m AS FLOAT)) AS avg_fg3m,
-           AVG(CAST(pf.tov AS FLOAT)) AS avg_tov
-    FROM pf JOIN tp ON tp.opp_team_id=pf.opp_team_id AND tp.pos_group=pf.pos_group
-    GROUP BY pf.opp_team_id,pf.pos_group
+    SELECT pf2.opp_team_id,pf2.pos_group,COUNT(*) AS games_defended,
+           AVG(CAST(pf2.pts AS FLOAT)) AS avg_pts,AVG(CAST(pf2.reb AS FLOAT)) AS avg_reb,
+           AVG(CAST(pf2.ast AS FLOAT)) AS avg_ast,AVG(CAST(pf2.stl AS FLOAT)) AS avg_stl,
+           AVG(CAST(pf2.blk AS FLOAT)) AS avg_blk,AVG(CAST(pf2.fg3m AS FLOAT)) AS avg_fg3m,
+           AVG(CAST(pf2.tov AS FLOAT)) AS avg_tov,
+           AVG(CAST(
+               ((pf2.fga - pf2.fg3a) * 0.48 * 2.0)
+             + (pf2.fg3a * 0.36 * 3.0)
+             + (pf2.fta * 0.77)
+           AS FLOAT)) AS avg_opp_pts,
+           AVG(CAST(pf2.fg3a AS FLOAT))            AS avg_opp_fg3a,
+           AVG(CAST(pf2.fg3a * 0.36 AS FLOAT))     AS avg_opp_fg3m,
+           AVG(CAST(pf2.reb_chances  AS FLOAT))    AS avg_reb_chances,
+           AVG(CAST(pf2.potential_ast AS FLOAT))   AS avg_potential_ast
+    FROM pf2 JOIN tp ON tp.opp_team_id=pf2.opp_team_id AND tp.pos_group=pf2.pos_group
+    GROUP BY pf2.opp_team_id,pf2.pos_group
 )
 SELECT pos_group,opp_team_id,games_defended,
        avg_pts,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_pts  DESC) AS rank_pts,
@@ -463,7 +646,17 @@ SELECT pos_group,opp_team_id,games_defended,
        avg_stl,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_stl  DESC) AS rank_stl,
        avg_blk,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_blk  DESC) AS rank_blk,
        avg_fg3m, RANK() OVER (PARTITION BY pos_group ORDER BY avg_fg3m DESC) AS rank_fg3m,
-       avg_tov,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_tov  DESC) AS rank_tov
+       avg_tov,  RANK() OVER (PARTITION BY pos_group ORDER BY avg_tov  DESC) AS rank_tov,
+       avg_opp_pts,
+       RANK() OVER (PARTITION BY pos_group ORDER BY avg_opp_pts      DESC) AS rank_opp_pts,
+       avg_opp_fg3a,
+       RANK() OVER (PARTITION BY pos_group ORDER BY avg_opp_fg3a     DESC) AS rank_opp_fg3a,
+       avg_opp_fg3m,
+       RANK() OVER (PARTITION BY pos_group ORDER BY avg_opp_fg3m     DESC) AS rank_opp_fg3m,
+       avg_reb_chances,
+       RANK() OVER (PARTITION BY pos_group ORDER BY avg_reb_chances  DESC) AS rank_reb_chances,
+       avg_potential_ast,
+       RANK() OVER (PARTITION BY pos_group ORDER BY avg_potential_ast DESC) AS rank_potential_ast
 FROM td
 """)
     df = pd.read_sql(sql, engine)
@@ -807,6 +1000,159 @@ def precompute_player_market_grades(season_df, props_df):
     return result
 
 
+def _opp_components_for_market(mkt: str):
+    return MARKET_OPP_COMPONENTS.get(mkt, ())
+
+
+def _combine_opp_components(pdf, components):
+    """
+    Sum per-game opportunity components. NaN components contribute 0 via
+    pandas sum(min_count=1); row-level NaN only when every component is NaN.
+    This makes combo markets degrade gracefully when tracking coverage is thin.
+    """
+    import numpy as np  # local import for safety when patched
+    if not components:
+        return pd.Series([], dtype=float)
+    col_map = {"pts": "opp_pts", "reb": "opp_reb", "ast": "opp_ast", "fg3m": "opp_fg3m_expected"}
+    cols = [col_map[c] for c in components if c in col_map]
+    if not cols or not all(c in pdf.columns for c in cols):
+        return pd.Series([np.nan] * len(pdf), index=pdf.index)
+    return pdf[cols].sum(axis=1, min_count=1)
+
+
+def precompute_opportunity_grades(opp_df, props_df, opp_info, matchup_cache):
+    """
+    Compute opportunity grades per (player_id, market_key).
+
+    Returns dict keyed by (player_id, market_key) with:
+        opportunity_short_grade     (0-100, 50 = neutral)
+        opportunity_long_grade      (0-100, 50 = neutral)
+        opportunity_matchup_grade   (0-100, higher = easier matchup)
+        opportunity_streak_grade    (0-100, 50 = neutral)
+        opportunity_volume_grade    (threes only; NULL otherwise)
+        opportunity_expected_grade  (threes only; NULL otherwise)
+
+    Short-vs-long trend scaling matches trend_grade:
+        50 + (short_mean - long_mean) / long_mean * 150  clamped [0, 100]
+    Long-vs-season uses the same scaling against the season mean.
+
+    Streak uses sign-based run count on opportunity vs player's season mean.
+    Run of >= OPP_STREAK_MIN counts; delta = run * 6 capped at +/- 30 from 50.
+    """
+    if opp_df is None or opp_df.empty:
+        return {}
+
+    result = {}
+    combos = props_df[["player_id", "market_key"]].drop_duplicates()
+    player_groups = {pid: grp.sort_values("game_date").reset_index(drop=True)
+                     for pid, grp in opp_df.groupby("player_id")}
+
+    for _, row in combos.iterrows():
+        pid = int(row["player_id"])
+        mkt = row["market_key"]
+        key = (pid, mkt)
+
+        components = _opp_components_for_market(mkt)
+        pdf = player_groups.get(pid)
+        if not components or pdf is None or pdf.empty:
+            result[key] = {
+                "opportunity_short_grade":    None,
+                "opportunity_long_grade":     None,
+                "opportunity_matchup_grade":  None,
+                "opportunity_streak_grade":   None,
+                "opportunity_volume_grade":   None,
+                "opportunity_expected_grade": None,
+            }
+            continue
+
+        series = _combine_opp_components(pdf, components).dropna()
+        vals = series.values if len(series) else np.array([])
+
+        short_grade = None
+        long_grade  = None
+        if len(vals) >= OPP_TREND_MIN:
+            short = vals[-OPP_TREND_SHORT:] if len(vals) >= OPP_TREND_SHORT else vals
+            long_slice = vals[-OPP_TREND_LONG:] if len(vals) >= OPP_TREND_LONG else vals
+            season = vals
+            sm = float(np.mean(short))
+            lm = float(np.mean(long_slice))
+            season_m = float(np.mean(season))
+            if lm > 0:
+                short_grade = _safe(max(0.0, min(100.0, 50.0 + (sm - lm) / lm * 150.0)))
+            if season_m > 0:
+                long_grade = _safe(max(0.0, min(100.0, 50.0 + (lm - season_m) / season_m * 150.0)))
+
+        streak_grade = None
+        if len(vals) >= OPP_STREAK_MIN:
+            baseline = float(np.mean(vals))
+            if baseline > 0:
+                diffs = np.sign(vals - baseline)
+                run = 0
+                for d in reversed(diffs):
+                    if d == 0:
+                        break
+                    if run == 0:
+                        run = int(d)
+                    elif (run > 0 and d > 0) or (run < 0 and d < 0):
+                        run = run + int(d)
+                    else:
+                        break
+                if abs(run) >= OPP_STREAK_MIN:
+                    delta = max(-30.0, min(30.0, run * 6.0))
+                    streak_grade = _safe(50.0 + delta)
+                else:
+                    streak_grade = 50.0
+
+        matchup_grade = None
+        info = opp_info.get(pid, {})
+        pos = info.get("position", "") or ""
+        opp_team_id = info.get("opp_team_id")
+        pg = "G" if pos.startswith("G") else "F" if pos.startswith("F") else "C" if pos.startswith("C") else None
+        if opp_team_id is not None and pg is not None:
+            defense = matchup_cache.get((int(opp_team_id), pg))
+            if defense is not None:
+                ranks = []
+                for comp in components:
+                    rank_col = OPP_MATCHUP_RANK.get(comp)
+                    if rank_col is None:
+                        continue
+                    rk = defense.get(rank_col)
+                    if rk is not None and not (isinstance(rk, float) and math.isnan(rk)):
+                        ranks.append(int(rk))
+                if ranks:
+                    avg_rank = float(np.mean(ranks))
+                    matchup_grade = _safe(max(0.0, min(100.0, (30 - avg_rank + 1) / 30.0 * 100.0)))
+
+        volume_grade = None
+        expected_grade = None
+        if mkt in ("player_threes", "player_threes_alternate"):
+            vol_vals = pdf["opp_fg3m_volume"].dropna().values
+            exp_vals = pdf["opp_fg3m_expected"].dropna().values
+            if len(vol_vals) >= OPP_TREND_MIN:
+                short = vol_vals[-OPP_TREND_SHORT:] if len(vol_vals) >= OPP_TREND_SHORT else vol_vals
+                long_slice = vol_vals[-OPP_TREND_LONG:] if len(vol_vals) >= OPP_TREND_LONG else vol_vals
+                sm = float(np.mean(short)); lm = float(np.mean(long_slice))
+                if lm > 0:
+                    volume_grade = _safe(max(0.0, min(100.0, 50.0 + (sm - lm) / lm * 150.0)))
+            if len(exp_vals) >= OPP_TREND_MIN:
+                short = exp_vals[-OPP_TREND_SHORT:] if len(exp_vals) >= OPP_TREND_SHORT else exp_vals
+                long_slice = exp_vals[-OPP_TREND_LONG:] if len(exp_vals) >= OPP_TREND_LONG else exp_vals
+                sm = float(np.mean(short)); lm = float(np.mean(long_slice))
+                if lm > 0:
+                    expected_grade = _safe(max(0.0, min(100.0, 50.0 + (sm - lm) / lm * 150.0)))
+
+        result[key] = {
+            "opportunity_short_grade":    short_grade,
+            "opportunity_long_grade":     long_grade,
+            "opportunity_matchup_grade":  matchup_grade,
+            "opportunity_streak_grade":   streak_grade,
+            "opportunity_volume_grade":   volume_grade,
+            "opportunity_expected_grade": expected_grade,
+        }
+
+    return result
+
+
 def precompute_line_grades(season_df, props_df, patterns: dict = None):
     """
     Compute momentum_grade and pattern_grade per (player, market, line).
@@ -913,10 +1259,17 @@ def compute_matchup_grade(market_key, opp_team_id, position, matchup_cache):
     return _safe(max(0.0, min(100.0, (30 - int(rank) + 1) / 30.0 * 100.0)))
 
 
-def compute_composite(whr, trend, momentum, pattern, matchup, regression):
+def compute_composite(whr, trend, momentum, pattern, matchup, regression,
+                      opp_short=None, opp_long=None, opp_matchup=None, opp_streak=None):
+    """
+    Equal-weighted mean of all non-NULL components. whr is scaled *100 to
+    match the 0-100 scale of the others. Opportunity volume/expected grades
+    are NOT in composite - they are parallel diagnostic columns for threes.
+    """
     parts = []
     if whr is not None: parts.append(whr * 100.0)
-    for v in (trend, momentum, pattern, matchup, regression):
+    for v in (trend, momentum, pattern, matchup, regression,
+              opp_short, opp_long, opp_matchup, opp_streak):
         if v is not None: parts.append(float(v))
     return _safe(sum(parts) / len(parts)) if parts else None
 
@@ -940,18 +1293,24 @@ CREATE TABLE #stage_grades(
     market_key VARCHAR(100),bookmaker_key VARCHAR(50),line_value DECIMAL(6,1),outcome_name VARCHAR(5),over_price INT,
     hit_rate_60 FLOAT,hit_rate_20 FLOAT,sample_size_60 INT,sample_size_20 INT,weighted_hit_rate FLOAT,grade FLOAT,
     trend_grade FLOAT,momentum_grade FLOAT,pattern_grade FLOAT,matchup_grade FLOAT,regression_grade FLOAT,
-    composite_grade FLOAT,hit_rate_opp FLOAT,sample_size_opp INT
+    composite_grade FLOAT,hit_rate_opp FLOAT,sample_size_opp INT,
+    opportunity_short_grade FLOAT,opportunity_long_grade FLOAT,
+    opportunity_matchup_grade FLOAT,opportunity_streak_grade FLOAT,
+    opportunity_volume_grade FLOAT,opportunity_expected_grade FLOAT
 )"""))
         for i in range(0, len(rows), 500):
             chunk = rows[i:i + 500]
             conn.exec_driver_sql(
-                "INSERT INTO #stage_grades VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO #stage_grades VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r["grade_date"], r["event_id"], r["game_id"], r["player_id"], r["player_name"],
                   r["market_key"], r["bookmaker_key"], r["line_value"], r.get("outcome_name", "Over"),
                   r["over_price"], r["hit_rate_60"], r["hit_rate_20"], r["sample_size_60"],
                   r["sample_size_20"], r["weighted_hit_rate"], r["grade"], r["trend_grade"],
                   r["momentum_grade"], r["pattern_grade"], r["matchup_grade"], r["regression_grade"],
-                  r["composite_grade"], r["hit_rate_opp"], r["sample_size_opp"])
+                  r["composite_grade"], r["hit_rate_opp"], r["sample_size_opp"],
+                  r.get("opportunity_short_grade"), r.get("opportunity_long_grade"),
+                  r.get("opportunity_matchup_grade"), r.get("opportunity_streak_grade"),
+                  r.get("opportunity_volume_grade"), r.get("opportunity_expected_grade"))
                  for r in chunk]
             )
         conn.execute(text("""
@@ -967,18 +1326,28 @@ WHEN MATCHED THEN UPDATE SET
     t.trend_grade=s.trend_grade,t.momentum_grade=s.momentum_grade,
     t.pattern_grade=s.pattern_grade,t.matchup_grade=s.matchup_grade,
     t.regression_grade=s.regression_grade,t.composite_grade=s.composite_grade,
-    t.hit_rate_opp=s.hit_rate_opp,t.sample_size_opp=s.sample_size_opp
+    t.hit_rate_opp=s.hit_rate_opp,t.sample_size_opp=s.sample_size_opp,
+    t.opportunity_short_grade=s.opportunity_short_grade,
+    t.opportunity_long_grade=s.opportunity_long_grade,
+    t.opportunity_matchup_grade=s.opportunity_matchup_grade,
+    t.opportunity_streak_grade=s.opportunity_streak_grade,
+    t.opportunity_volume_grade=s.opportunity_volume_grade,
+    t.opportunity_expected_grade=s.opportunity_expected_grade
 WHEN NOT MATCHED THEN INSERT(
     grade_date,event_id,game_id,player_id,player_name,market_key,bookmaker_key,
     line_value,outcome_name,over_price,hit_rate_60,hit_rate_20,sample_size_60,
     sample_size_20,weighted_hit_rate,grade,trend_grade,momentum_grade,pattern_grade,
-    matchup_grade,regression_grade,composite_grade,hit_rate_opp,sample_size_opp
+    matchup_grade,regression_grade,composite_grade,hit_rate_opp,sample_size_opp,
+    opportunity_short_grade,opportunity_long_grade,opportunity_matchup_grade,
+    opportunity_streak_grade,opportunity_volume_grade,opportunity_expected_grade
 ) VALUES(
     s.grade_date,s.event_id,s.game_id,s.player_id,s.player_name,s.market_key,
     s.bookmaker_key,s.line_value,s.outcome_name,s.over_price,s.hit_rate_60,
     s.hit_rate_20,s.sample_size_60,s.sample_size_20,s.weighted_hit_rate,s.grade,
     s.trend_grade,s.momentum_grade,s.pattern_grade,s.matchup_grade,s.regression_grade,
-    s.composite_grade,s.hit_rate_opp,s.sample_size_opp
+    s.composite_grade,s.hit_rate_opp,s.sample_size_opp,
+    s.opportunity_short_grade,s.opportunity_long_grade,s.opportunity_matchup_grade,
+    s.opportunity_streak_grade,s.opportunity_volume_grade,s.opportunity_expected_grade
 );"""))
 
         # Archive older snapshots for any group touched by this run, then prune them
@@ -1045,12 +1414,13 @@ DELETE dg
     return len(rows)
 
 
-def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=None, patterns=None):
+def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=None, patterns=None, opp_df=None):
     if props_df.empty: return []
     props_df = props_df.drop_duplicates(subset=["player_id", "market_key", "line_value"]).copy()
     graded_df   = compute_all_hit_rates(props_df, history_df, opp_info, direction=direction, opp_history_df=opp_history_df)
     pm_grades   = precompute_player_market_grades(season_df, graded_df)
     line_grades = precompute_line_grades(season_df, graded_df, patterns=patterns)
+    opp_grades  = precompute_opportunity_grades(opp_df, graded_df, opp_info, matchup_cache) if opp_df is not None else {}
     is_under = (direction == "under")
     rows = []
     for _, r in graded_df.iterrows():
@@ -1060,15 +1430,38 @@ def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df
         info = opp_info.get(pid_int, {}); position = info.get("position", ""); opp_id = info.get("opp_team_id")
         whr = r.get("weighted_hit_rate"); whr = whr if pd.notna(whr) else None
         pm = pm_grades.get((pid_int, mkt), {}); lk = line_grades.get((pid_int, mkt, lv), {})
+        og = opp_grades.get((pid_int, mkt), {})
         t_r  = pm.get("trend_grade");      rg_r = pm.get("regression_grade")
         mo_r = lk.get("momentum_grade");   pa_r = lk.get("pattern_grade")
         ma_r = compute_matchup_grade(mkt, opp_id, position, matchup_cache)
+        os_r = og.get("opportunity_short_grade")
+        ol_r = og.get("opportunity_long_grade")
+        om_r = og.get("opportunity_matchup_grade")
+        ok_r = og.get("opportunity_streak_grade")
+        ov_r = og.get("opportunity_volume_grade")
+        oe_r = og.get("opportunity_expected_grade")
         if is_under:
             trend = _invert(t_r); regression = _invert(rg_r)
             momentum = _invert(mo_r); pattern = _invert(pa_r); matchup = _invert(ma_r)
+            opp_short    = _invert(os_r)
+            opp_long     = _invert(ol_r)
+            opp_matchup  = _invert(om_r)
+            opp_streak   = _invert(ok_r)
+            opp_volume   = _invert(ov_r)
+            opp_expected = _invert(oe_r)
         else:
             trend = t_r; regression = rg_r; momentum = mo_r; pattern = pa_r; matchup = ma_r
-        composite = compute_composite(whr, trend, momentum, pattern, matchup, regression)
+            opp_short    = os_r
+            opp_long     = ol_r
+            opp_matchup  = om_r
+            opp_streak   = ok_r
+            opp_volume   = ov_r
+            opp_expected = oe_r
+        composite = compute_composite(
+            whr, trend, momentum, pattern, matchup, regression,
+            opp_short=opp_short, opp_long=opp_long,
+            opp_matchup=opp_matchup, opp_streak=opp_streak,
+        )
         hr_opp = r.get("hit_rate_opp"); hr_opp = hr_opp if pd.notna(hr_opp) else None
         n_opp  = r.get("sample_size_opp"); n_opp = int(n_opp) if pd.notna(n_opp) and n_opp else None
         raw_price = r.get("over_price"); price = int(raw_price) if pd.notna(raw_price) and raw_price is not None else None
@@ -1097,6 +1490,12 @@ def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df
             "composite_grade":   composite,
             "hit_rate_opp":      hr_opp,
             "sample_size_opp":   n_opp,
+            "opportunity_short_grade":    opp_short,
+            "opportunity_long_grade":     opp_long,
+            "opportunity_matchup_grade":  opp_matchup,
+            "opportunity_streak_grade":   opp_streak,
+            "opportunity_volume_grade":   opp_volume,
+            "opportunity_expected_grade": opp_expected,
         })
     return rows
 
@@ -1123,7 +1522,8 @@ def _common_grade_data(engine, all_over, under_props, today):
     matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
     player_ids = list(all_over["player_id"].dropna().astype(int).unique())
     patterns   = fetch_player_patterns(engine, player_ids)
-    return history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns
+    opp_df     = fetch_opportunity_history(engine, all_player_ids, today)
+    return history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns, opp_df
 
 
 def run_upcoming(engine):
@@ -1143,9 +1543,9 @@ def run_upcoming(engine):
     under_prices = fetch_under_prices(engine)
     under_props  = build_under_props(posted, under_prices)
     log.info(f"  {len(under_props)} under prop rows.")
-    history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns = _common_grade_data(engine, all_over, under_props, today)
-    over_rows  = grade_props_for_date(engine, today, all_over, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns)
-    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df, patterns=patterns) if not under_props.empty else []
+    history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns, opp_df = _common_grade_data(engine, all_over, under_props, today)
+    over_rows  = grade_props_for_date(engine, today, all_over, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns, opp_df=opp_df)
+    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df, patterns=patterns, opp_df=opp_df) if not under_props.empty else []
     written = upsert_grades(engine, over_rows + under_rows)
     log.info(f"  {written} total rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
@@ -1184,9 +1584,9 @@ def run_intraday(engine):
     if over_bracket.empty: return
     under_prices = fetch_under_prices(engine)
     under_props  = build_under_props(moved_posted, under_prices)
-    history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns = _common_grade_data(engine, over_bracket, under_props, today)
-    over_rows  = grade_props_for_date(engine, today, over_bracket, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns)
-    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df, patterns=patterns) if not under_props.empty else []
+    history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns, opp_df = _common_grade_data(engine, over_bracket, under_props, today)
+    over_rows  = grade_props_for_date(engine, today, over_bracket, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns, opp_df=opp_df)
+    under_rows = grade_props_for_date(engine, today, under_props, history_df, season_df, opp_info, matchup_cache, direction="under", opp_history_df=opp_history_df, patterns=patterns, opp_df=opp_df) if not under_props.empty else []
     written = upsert_grades(engine, over_rows + under_rows)
     log.info(f"  {written} rows written ({len(over_rows)} over, {len(under_rows)} under).")
 
@@ -1226,7 +1626,8 @@ def run_backfill(engine, batch_size, specific_date=None):
                 matchup_pairs.append((int(info["opp_team_id"]), pg))
         matchup_cache = fetch_matchup_defense(engine, matchup_pairs)
         patterns = fetch_player_patterns(engine, player_ids)
-        rows  = grade_props_for_date(engine, gd, props, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns)
+        opp_df   = fetch_opportunity_history(engine, player_ids, gd)
+        rows  = grade_props_for_date(engine, gd, props, history_df, season_df, opp_info, matchup_cache, direction="over", opp_history_df=opp_history_df, patterns=patterns, opp_df=opp_df)
         total += upsert_grades(engine, rows)
     log.info(f"Backfill complete. {total} total rows written.")
 
