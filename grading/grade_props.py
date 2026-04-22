@@ -231,7 +231,6 @@ CREATE TABLE common.daily_grades(
     hit_rate_opp      FLOAT         NULL,
     sample_size_opp   INT           NULL,
     outcome           VARCHAR(5)    NULL,
-    is_standard       BIT           NOT NULL DEFAULT 0,
     created_at        DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
     CONSTRAINT pk_daily_grades PRIMARY KEY (grade_id),
     CONSTRAINT uq_daily_grades_v3 UNIQUE (
@@ -463,29 +462,26 @@ def fetch_posted_props(engine, table="odds.upcoming_player_props", date_filter="
 
 
 def build_standard_props(posted_df, under_prices=None):
+    # Posted standard line only. Bracket extrapolation removed 2026-04-22
+    # (one row per player+market = the true FanDuel posted line). Alt-ladder
+    # lines come from build_alt_props, which pulls real FanDuel alternate markets.
     std = posted_df[posted_df["market_key"].isin(STANDARD_MARKETS)].copy()
     if std.empty:
         return pd.DataFrame()
     std = std.drop_duplicates(subset=["player_id", "market_key"])
     rows = []
     for _, r in std.iterrows():
-        center = float(r["line_value"])
-        for step in range(-BRACKET_STEPS, BRACKET_STEPS + 1):
-            lv = round(center + step * BRACKET_INCREMENT, 1)
-            if lv < 0.5:
-                continue
-            rows.append({
-                "event_id":      r["event_id"],
-                "player_id":     r["player_id"],
-                "player_name":   r["player_name"],
-                "market_key":    r["market_key"],
-                "bookmaker_key": r["bookmaker_key"],
-                "line_value":    lv,
-                "game_id":       r["game_id"],
-                "over_price":    int(r["over_price"]) if step == 0 and pd.notna(r.get("over_price")) else None,
-                "outcome_name":  "Over",
-                "is_standard":   1 if step == 0 else 0,
-            })
+        rows.append({
+            "event_id":      r["event_id"],
+            "player_id":     r["player_id"],
+            "player_name":   r["player_name"],
+            "market_key":    r["market_key"],
+            "bookmaker_key": r["bookmaker_key"],
+            "line_value":    float(r["line_value"]),
+            "game_id":       r["game_id"],
+            "over_price":    int(r["over_price"]) if pd.notna(r.get("over_price")) else None,
+            "outcome_name":  "Over",
+        })
     return pd.DataFrame(rows).drop_duplicates(subset=["player_id", "market_key", "line_value"])
 
 
@@ -511,7 +507,6 @@ def build_under_props(posted_df, under_prices):
             "game_id":       r["game_id"],
             "over_price":    price,
             "outcome_name":  "Under",
-            "is_standard":   1,
         })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -549,7 +544,6 @@ def build_alt_props(posted_df, active_players_df, event_map):
                     "game_id":       game_id,
                     "over_price":    price_lookup.get((pid, mkt, float(lv))),
                     "outcome_name":  "Over",
-                    "is_standard":   0,
                 })
     return pd.DataFrame(rows).drop_duplicates(subset=["player_id", "market_key", "line_value"]) if rows else pd.DataFrame()
 
@@ -868,19 +862,18 @@ CREATE TABLE #stage_grades(
     market_key VARCHAR(100),bookmaker_key VARCHAR(50),line_value DECIMAL(6,1),outcome_name VARCHAR(5),over_price INT,
     hit_rate_60 FLOAT,hit_rate_20 FLOAT,sample_size_60 INT,sample_size_20 INT,weighted_hit_rate FLOAT,grade FLOAT,
     trend_grade FLOAT,momentum_grade FLOAT,pattern_grade FLOAT,matchup_grade FLOAT,regression_grade FLOAT,
-    composite_grade FLOAT,hit_rate_opp FLOAT,sample_size_opp INT,is_standard BIT
+    composite_grade FLOAT,hit_rate_opp FLOAT,sample_size_opp INT
 )"""))
         for i in range(0, len(rows), 500):
             chunk = rows[i:i + 500]
             conn.exec_driver_sql(
-                "INSERT INTO #stage_grades VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO #stage_grades VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r["grade_date"], r["event_id"], r["game_id"], r["player_id"], r["player_name"],
                   r["market_key"], r["bookmaker_key"], r["line_value"], r.get("outcome_name", "Over"),
                   r["over_price"], r["hit_rate_60"], r["hit_rate_20"], r["sample_size_60"],
                   r["sample_size_20"], r["weighted_hit_rate"], r["grade"], r["trend_grade"],
                   r["momentum_grade"], r["pattern_grade"], r["matchup_grade"], r["regression_grade"],
-                  r["composite_grade"], r["hit_rate_opp"], r["sample_size_opp"],
-                  1 if r.get("is_standard") else 0)
+                  r["composite_grade"], r["hit_rate_opp"], r["sample_size_opp"])
                  for r in chunk]
             )
         conn.execute(text("""
@@ -896,20 +889,75 @@ WHEN MATCHED THEN UPDATE SET
     t.trend_grade=s.trend_grade,t.momentum_grade=s.momentum_grade,
     t.pattern_grade=s.pattern_grade,t.matchup_grade=s.matchup_grade,
     t.regression_grade=s.regression_grade,t.composite_grade=s.composite_grade,
-    t.hit_rate_opp=s.hit_rate_opp,t.sample_size_opp=s.sample_size_opp,
-    t.is_standard=s.is_standard
+    t.hit_rate_opp=s.hit_rate_opp,t.sample_size_opp=s.sample_size_opp
 WHEN NOT MATCHED THEN INSERT(
     grade_date,event_id,game_id,player_id,player_name,market_key,bookmaker_key,
     line_value,outcome_name,over_price,hit_rate_60,hit_rate_20,sample_size_60,
     sample_size_20,weighted_hit_rate,grade,trend_grade,momentum_grade,pattern_grade,
-    matchup_grade,regression_grade,composite_grade,hit_rate_opp,sample_size_opp,is_standard
+    matchup_grade,regression_grade,composite_grade,hit_rate_opp,sample_size_opp
 ) VALUES(
     s.grade_date,s.event_id,s.game_id,s.player_id,s.player_name,s.market_key,
     s.bookmaker_key,s.line_value,s.outcome_name,s.over_price,s.hit_rate_60,
     s.hit_rate_20,s.sample_size_60,s.sample_size_20,s.weighted_hit_rate,s.grade,
     s.trend_grade,s.momentum_grade,s.pattern_grade,s.matchup_grade,s.regression_grade,
-    s.composite_grade,s.hit_rate_opp,s.sample_size_opp,s.is_standard
+    s.composite_grade,s.hit_rate_opp,s.sample_size_opp
 );"""))
+        # Archive then prune older snapshots for any group touched by this run.
+        # Groups are identified from #stage_grades; within each group, we keep
+        # only the row with the highest grade_id (the one just written) and
+        # move older rows to common.daily_grades_archive.
+        conn.execute(text("""
+IF OBJECT_ID('common.daily_grades_archive', 'U') IS NOT NULL
+BEGIN
+  WITH affected AS (
+    SELECT DISTINCT grade_date, event_id, player_id, market_key,
+                    bookmaker_key, line_value, outcome_name
+      FROM #stage_grades
+  ),
+  ranked AS (
+    SELECT dg.grade_id,
+           ROW_NUMBER() OVER (
+             PARTITION BY dg.grade_date, dg.event_id, dg.player_id,
+                          dg.market_key, dg.bookmaker_key,
+                          dg.line_value, dg.outcome_name
+             ORDER BY dg.grade_id DESC
+           ) AS rn
+      FROM common.daily_grades dg
+      JOIN affected a
+        ON a.grade_date=dg.grade_date AND a.event_id=dg.event_id
+       AND a.player_id=dg.player_id  AND a.market_key=dg.market_key
+       AND a.bookmaker_key=dg.bookmaker_key AND a.line_value=dg.line_value
+       AND a.outcome_name=dg.outcome_name
+  )
+  INSERT INTO common.daily_grades_archive
+  SELECT dg.*, SYSUTCDATETIME() AS archived_at
+    FROM common.daily_grades dg
+    JOIN ranked r ON r.grade_id = dg.grade_id
+   WHERE r.rn > 1;
+
+  WITH ranked AS (
+    SELECT dg.grade_id,
+           ROW_NUMBER() OVER (
+             PARTITION BY dg.grade_date, dg.event_id, dg.player_id,
+                          dg.market_key, dg.bookmaker_key,
+                          dg.line_value, dg.outcome_name
+             ORDER BY dg.grade_id DESC
+           ) AS rn
+      FROM common.daily_grades dg
+      JOIN (SELECT DISTINCT grade_date, event_id, player_id, market_key,
+                            bookmaker_key, line_value, outcome_name
+              FROM #stage_grades) a
+        ON a.grade_date=dg.grade_date AND a.event_id=dg.event_id
+       AND a.player_id=dg.player_id  AND a.market_key=dg.market_key
+       AND a.bookmaker_key=dg.bookmaker_key AND a.line_value=dg.line_value
+       AND a.outcome_name=dg.outcome_name
+  )
+  DELETE dg
+    FROM common.daily_grades dg
+    JOIN ranked r ON r.grade_id = dg.grade_id
+   WHERE r.rn > 1;
+END
+"""))
     return len(rows)
 
 
@@ -955,7 +1003,6 @@ def grade_props_for_date(engine, grade_date_str, props_df, history_df, season_df
             "hit_rate_20":       r.get("hit_rate_20") if pd.notna(r.get("hit_rate_20")) else None,
             "sample_size_60":    int(r["sample_size_60"]) if pd.notna(r.get("sample_size_60")) else 0,
             "sample_size_20":    int(r["sample_size_20"]) if pd.notna(r.get("sample_size_20")) else 0,
-            "is_standard":       int(r["is_standard"]) if pd.notna(r.get("is_standard")) else 0,
             "weighted_hit_rate": whr,
             "grade":             r.get("grade") if pd.notna(r.get("grade")) else None,
             "trend_grade":       trend,
