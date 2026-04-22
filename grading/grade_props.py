@@ -961,19 +961,22 @@ WHEN NOT MATCHED THEN INSERT(
     s.trend_grade,s.momentum_grade,s.pattern_grade,s.matchup_grade,s.regression_grade,
     s.composite_grade,s.hit_rate_opp,s.sample_size_opp
 );"""))
-        # Archive then prune older snapshots for any group touched by this run.
-        # Groups are identified from #stage_grades; within each group, we keep
-        # only the row with the highest grade_id (the one just written) and
-        # move older rows to common.daily_grades_archive.
-        conn.execute(text("""
-IF OBJECT_ID('common.daily_grades_archive', 'U') IS NOT NULL
-BEGIN
-  WITH affected AS (
+
+        # Archive older snapshots for any group touched by this run, then delete them
+        # from daily_grades. Each CTE-based statement must be its own execute() call
+        # because SQL Server via pyodbc treats each call as a separate batch, and a
+        # WITH clause must be the first statement in its batch.
+        if conn.execute(text(
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive'"
+        )).scalar():
+            conn.execute(text("""
+WITH affected AS (
     SELECT DISTINCT grade_date, event_id, player_id, market_key,
                     bookmaker_key, line_value, outcome_name
       FROM #stage_grades
-  ),
-  ranked AS (
+),
+ranked AS (
     SELECT dg.grade_id,
            ROW_NUMBER() OVER (
              PARTITION BY dg.grade_date, dg.event_id, dg.player_id,
@@ -987,14 +990,15 @@ BEGIN
        AND a.player_id=dg.player_id  AND a.market_key=dg.market_key
        AND a.bookmaker_key=dg.bookmaker_key AND a.line_value=dg.line_value
        AND a.outcome_name=dg.outcome_name
-  )
-  INSERT INTO common.daily_grades_archive
-  SELECT dg.*, SYSUTCDATETIME() AS archived_at
-    FROM common.daily_grades dg
-    JOIN ranked r ON r.grade_id = dg.grade_id
-   WHERE r.rn > 1;
-
-  WITH ranked AS (
+)
+INSERT INTO common.daily_grades_archive
+SELECT dg.*, SYSUTCDATETIME() AS archived_at
+  FROM common.daily_grades dg
+  JOIN ranked r ON r.grade_id = dg.grade_id
+ WHERE r.rn > 1;
+"""))
+            conn.execute(text("""
+WITH ranked AS (
     SELECT dg.grade_id,
            ROW_NUMBER() OVER (
              PARTITION BY dg.grade_date, dg.event_id, dg.player_id,
@@ -1010,12 +1014,11 @@ BEGIN
        AND a.player_id=dg.player_id  AND a.market_key=dg.market_key
        AND a.bookmaker_key=dg.bookmaker_key AND a.line_value=dg.line_value
        AND a.outcome_name=dg.outcome_name
-  )
-  DELETE dg
-    FROM common.daily_grades dg
-    JOIN ranked r ON r.grade_id = dg.grade_id
-   WHERE r.rn > 1;
-END
+)
+DELETE dg
+  FROM common.daily_grades dg
+  JOIN ranked r ON r.grade_id = dg.grade_id
+ WHERE r.rn > 1;
 """))
     return len(rows)
 
