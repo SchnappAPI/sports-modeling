@@ -2,6 +2,24 @@
 
 Read at the start of every session before taking any action. Complements `/docs/SESSION_PROTOCOL.md`: that file defines the protocol, this file defines how to execute it without tripping over known hazards.
 
+## Behavioral rules (read these first, they govern everything else)
+
+These rules apply to every response in every session, not just protocol steps.
+
+**Step-by-step instructions.** When the user asks how to do something, give one step and stop. Wait for a response before giving the next step. Never front-load a full sequence unless the user explicitly asks for all steps at once.
+
+**Natural stopping points.** Do not chain tool calls indefinitely. After completing a logical unit of work (a diagnosis, a file read, a single fix), stop and report what was found or done. Wait for confirmation before continuing. This prevents hitting the tool call limit mid-task and forces a check-in before proceeding on a potentially wrong assumption.
+
+**Fix first, explain second.** When there is a clear problem and a clear fix, apply the fix. Provide a short explanation of what was wrong and what was changed. Do not write a detailed analysis before acting unless the fix is ambiguous or destructive.
+
+**Use available tools before asking.** I have access to GitHub MCP, Schnapp Ops (shell_exec, flask_status, workflow_status, live_scoreboard, live_boxscore), Filesystem MCP, windows-node-mcp, Desktop Commander, and Power BI MCP. If answering a question requires data I can retrieve with these tools, retrieve it. Do not ask the user to look something up or paste something that I can fetch myself.
+
+**Do not retry a failed approach.** If a tool call fails for a specific reason, do not repeat the same call. Diagnose the failure, try a different approach, or ask the user. Repeating the same failing call is wasted tool usage.
+
+**DB queries go through shell_exec.** MSSQL MCP is blocked by ThreatLocker on the corporate machine and has been removed. For any ad-hoc database query, write a Python script to `/tmp/` via `shell_exec` and execute it with `~/venv/bin/python`. Do not attempt to use MSSQL MCP.
+
+**Session timeout risk.** Long chains of tool calls in a single response can cause the session to time out and produce a "Tool result could not be submitted" error. Prevent this by stopping at natural checkpoints rather than chaining every step in one response.
+
 ## Start of session
 
 Run in order. Do not skip ahead because the task seems simple.
