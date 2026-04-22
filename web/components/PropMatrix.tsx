@@ -565,14 +565,23 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                                 </span>
                               );
 
+                              // When outcome is known, show W/L badge instead of odds
+                              const resultBadge = won ? (
+                                <span className="font-semibold text-green-400">W</span>
+                              ) : lost ? (
+                                <span className="font-semibold text-red-400">L</span>
+                              ) : null;
+
                               return (
                                 <td key={line} className={`py-1.5 px-2 text-right ${bg} whitespace-nowrap`}>
                                   <span className="inline-flex items-center gap-0.5 justify-end">
-                                    {cell.link && cell.outcome == null ? (
-                                      <a href={cell.link} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 transition-colors">
-                                        {oddsText}
-                                      </a>
-                                    ) : oddsText}
+                                    {resultBadge ?? (
+                                      cell.link ? (
+                                        <a href={cell.link} target="_blank" rel="noopener noreferrer" className="hover:text-blue-400 transition-colors">
+                                          {oddsText}
+                                        </a>
+                                      ) : oddsText
+                                    )}
                                     <CellSignalDots signals={cellSignals} />
                                   </span>
                                 </td>
