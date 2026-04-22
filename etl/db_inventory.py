@@ -6,41 +6,51 @@ conn = pyodbc.connect(
     "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
 )
 cur = conn.cursor()
-def p(label, q):
-    print(f"\n=== {label} ===")
-    cur.execute(q)
-    for r in cur.fetchall(): print(r)
 
-p("upcoming_player_props cols", """
-SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+print("=== upcoming_player_props FULL col list ===")
+cur.execute("""SELECT COLUMN_NAME, DATA_TYPE
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props' ORDER BY ORDINAL_POSITION""")
+WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props'
+ORDER BY ORDINAL_POSITION""")
+for r in cur.fetchall(): print(r)
 
-p("upcoming_events cols", """
-SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_events' ORDER BY ORDINAL_POSITION""")
+print("\n=== sample row ===")
+cur.execute("SELECT TOP 1 * FROM odds.upcoming_player_props")
+cols = [c[0] for c in cur.description]
+for name, val in zip(cols, cur.fetchone()):
+    print(f"  {name}: {val!r}")
 
-p("upcoming_player_props row count + distinct events", """
-SELECT COUNT(*) AS rows, COUNT(DISTINCT event_id) AS events
-FROM odds.upcoming_player_props""")
+print("\n=== upcoming_player_props distinct snap_ts per event (sample) ===")
+cur.execute("""
+SELECT TOP 10 event_id, COUNT(DISTINCT snap_ts) AS distinct_snaps,
+       MIN(snap_ts) AS first_snap, MAX(snap_ts) AS last_snap, COUNT(*) AS rows
+FROM odds.upcoming_player_props
+GROUP BY event_id ORDER BY event_id""")
+for r in cur.fetchall(): print(r)
 
-p("event_game_map cols", """
-SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='event_game_map' ORDER BY ORDINAL_POSITION""")
+print("\n=== commence_time per event (sample) ===")
+cur.execute("""
+SELECT TOP 10 event_id, commence_time FROM odds.upcoming_events ORDER BY commence_time DESC""")
+for r in cur.fetchall(): print(r)
 
-p("daily_grades is_standard state", """
+print("\n=== is_standard column state (fixed CAST) ===")
+cur.execute("""
 SELECT
-  SUM(CASE WHEN is_standard IS NOT NULL THEN 1 ELSE 0 END) AS has_col,
-  SUM(is_standard) AS sum_flag,
-  COUNT(*) AS total
+  COUNT(*) AS total_rows,
+  SUM(CAST(is_standard AS INT)) AS sum_flag
 FROM common.daily_grades""")
+print(cur.fetchone())
 
-p("filtered index existence", """
-SELECT name, is_unique, has_filter, filter_definition
-FROM sys.indexes
-WHERE object_id = OBJECT_ID('common.daily_grades')
-  AND name='uq_daily_grades_standard'""")
+print("\n=== daily_grades_archive exists? ===")
+cur.execute("""
+SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive'""")
+print(cur.fetchone())
+
+print("\n=== upcoming_player_props_archive exists? ===")
+cur.execute("""
+SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props_archive'""")
+print(cur.fetchone())
 
 conn.close()
