@@ -163,11 +163,10 @@ MARKET_TO_ACTUAL_COL = {
     "player_rebounds_assists_alternate":        "ra",
 }
 
-# Explicit column list for INSERT INTO common.daily_grades_archive.
-# Must match the archive table's column definition order exactly.
-# Never use SELECT dg.* here: daily_grades and daily_grades_archive may have
-# accumulated ALTER TABLE ADD columns at different points in time, so their
-# physical ordinal positions can diverge even when both have the same columns.
+# Column list matching the archive table's definition order.
+# Used as the INSERT target list and (with dg. prefix) the SELECT source list.
+# Never use SELECT dg.*: physical ordinal positions can diverge between the two
+# tables when ALTER TABLE ADD columns were applied at different points in time.
 _ARCHIVE_COLS = (
     "grade_id, grade_date, event_id, game_id, player_id, player_name, "
     "market_key, bookmaker_key, line_value, outcome_name, over_price, "
@@ -175,6 +174,12 @@ _ARCHIVE_COLS = (
     "weighted_hit_rate, grade, trend_grade, momentum_grade, pattern_grade, "
     "matchup_grade, regression_grade, composite_grade, hit_rate_opp, "
     "sample_size_opp, outcome, created_at"
+)
+
+# Same list with dg. alias prefix for use in the SELECT clause when daily_grades
+# is aliased as dg and joined to another table (avoids "Ambiguous column name").
+_ARCHIVE_COLS_DG = ", ".join(
+    f"dg.{c.strip()}" for c in _ARCHIVE_COLS.split(",")
 )
 
 
@@ -977,14 +982,12 @@ WHEN NOT MATCHED THEN INSERT(
 );"""))
 
         # Archive older snapshots for any group touched by this run, then prune them
-        # from daily_grades. Two separate execute() calls are required because SQL Server
-        # via pyodbc treats each call as a single batch, and a WITH clause must be the
-        # first statement in its batch.
-        #
-        # The INSERT uses an explicit column list (_ARCHIVE_COLS) rather than SELECT dg.*
-        # because daily_grades and daily_grades_archive may have accumulated ALTER TABLE ADD
-        # columns at different points in time, causing their physical ordinal positions to
-        # diverge. An explicit list is immune to that.
+        # from daily_grades. Notes on the approach:
+        # - Two separate execute() calls: SQL Server via pyodbc treats each call as one
+        #   batch; WITH must be the first statement in its batch.
+        # - _ARCHIVE_COLS / _ARCHIVE_COLS_DG: explicit column lists avoid both physical
+        #   ordinal drift (SELECT dg.* problem) and ambiguous-column errors (bare column
+        #   names when dg is joined to ranked).
         if conn.execute(text(
             "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
             "WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive'"
@@ -1011,7 +1014,7 @@ ranked AS (
        AND a.outcome_name=dg.outcome_name
 )
 INSERT INTO common.daily_grades_archive ({_ARCHIVE_COLS}, archived_at)
-SELECT {_ARCHIVE_COLS}, SYSUTCDATETIME()
+SELECT {_ARCHIVE_COLS_DG}, SYSUTCDATETIME()
   FROM common.daily_grades dg
   JOIN ranked r ON r.grade_id = dg.grade_id
  WHERE r.rn > 1;
