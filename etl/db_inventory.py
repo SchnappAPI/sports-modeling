@@ -6,52 +6,21 @@ conn = pyodbc.connect(
     "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
 )
 cur = conn.cursor()
-def p(label, q):
-    print(f"\n=== {label} ===")
-    cur.execute(q)
-    for r in cur.fetchall(): print(r)
 
-p("NBA 2025: discovered vs loaded", """
-SELECT
-    (SELECT COUNT(*) FROM odds.discovered_events WHERE sport_key='basketball_nba' AND season_year=2025) AS discovered,
-    (SELECT COUNT(*) FROM odds.events WHERE sport_key='basketball_nba' AND season_year=2025) AS loaded,
-    (SELECT MAX(CAST(commence_time AS DATE)) FROM odds.discovered_events WHERE sport_key='basketball_nba' AND season_year=2025) AS max_discovered,
-    (SELECT MAX(CAST(commence_time AS DATE)) FROM odds.events WHERE sport_key='basketball_nba' AND season_year=2025) AS max_loaded
+# Delete the NBA 2025 discover cursor so the next discover run starts from
+# today and walks backward through Apr 4-22 (the gap).
+cur.execute("""
+    DELETE FROM odds.discover_cursors
+    WHERE sport_key = 'basketball_nba' AND season_year = 2025
 """)
+print(f"Deleted {cur.rowcount} cursor row(s).")
 
-p("NBA 2025: player_props coverage (standard only)", """
-SELECT
-    MIN(CAST(egm.game_date AS DATE)) AS min_date,
-    MAX(CAST(egm.game_date AS DATE)) AS max_date,
-    COUNT(DISTINCT egm.game_id) AS games_with_props
-FROM odds.player_props pp
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pp.sport_key = 'basketball_nba'
-  AND pp.bookmaker_key = 'fanduel'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key NOT LIKE '%alternate%'
-  AND egm.game_date >= '2025-10-01'
-""")
+conn.commit()
 
-p("NBA 2025: games in player_props Apr 1+ (standard)", """
-SELECT DISTINCT CAST(egm.game_date AS DATE) AS game_date, COUNT(DISTINCT pp.player_name) AS players
-FROM odds.player_props pp
-JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pp.sport_key = 'basketball_nba'
-  AND pp.bookmaker_key = 'fanduel'
-  AND pp.outcome_name = 'Over'
-  AND pp.market_key NOT LIKE '%alternate%'
-  AND egm.game_date >= '2026-04-01'
-GROUP BY CAST(egm.game_date AS DATE)
-ORDER BY game_date
-""")
-
-p("NBA 2025: loaded events Apr 3+", """
-SELECT TOP 20 CAST(commence_time AS DATE) AS game_date, away_team, home_team
-FROM odds.events
-WHERE sport_key = 'basketball_nba' AND season_year = 2025
-  AND commence_time >= '2026-04-03'
-ORDER BY commence_time
-""")
+# Confirm
+cur.execute("SELECT sport_key, season_year, oldest_snapshot_ts FROM odds.discover_cursors WHERE sport_key='basketball_nba'")
+for r in cur.fetchall():
+    print(r)
 
 conn.close()
+print("Done.")
