@@ -257,6 +257,65 @@ CREATE TABLE common.daily_grades(
                 f"WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades' AND COLUMN_NAME='{col}') "
                 f"ALTER TABLE common.daily_grades ADD {col} {dtype} NULL"
             ))
+
+        # Archive table must match daily_grades exactly (plus archived_at).
+        # Created fresh here if absent; migrated idempotently if it exists
+        # but is missing columns added to daily_grades after initial creation.
+        conn.execute(text("""
+IF NOT EXISTS(
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive'
+)
+CREATE TABLE common.daily_grades_archive(
+    grade_id          INT           NOT NULL,
+    grade_date        DATE          NOT NULL,
+    event_id          VARCHAR(50)   NOT NULL,
+    game_id           VARCHAR(15)   NULL,
+    player_id         BIGINT        NULL,
+    player_name       NVARCHAR(100) NOT NULL,
+    market_key        VARCHAR(100)  NOT NULL,
+    bookmaker_key     VARCHAR(50)   NOT NULL,
+    line_value        DECIMAL(6,1)  NOT NULL,
+    outcome_name      VARCHAR(5)    NULL,
+    over_price        INT           NULL,
+    hit_rate_60       FLOAT         NULL,
+    hit_rate_20       FLOAT         NULL,
+    sample_size_60    INT           NULL,
+    sample_size_20    INT           NULL,
+    weighted_hit_rate FLOAT         NULL,
+    grade             FLOAT         NULL,
+    trend_grade       FLOAT         NULL,
+    momentum_grade    FLOAT         NULL,
+    pattern_grade     FLOAT         NULL,
+    matchup_grade     FLOAT         NULL,
+    regression_grade  FLOAT         NULL,
+    composite_grade   FLOAT         NULL,
+    hit_rate_opp      FLOAT         NULL,
+    sample_size_opp   INT           NULL,
+    outcome           VARCHAR(5)    NULL,
+    created_at        DATETIME2     NULL,
+    archived_at       DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME()
+)
+"""))
+        for col, dtype in [
+            ("outcome_name",    "VARCHAR(5)"),
+            ("over_price",      "INT"),
+            ("trend_grade",     "FLOAT"),
+            ("momentum_grade",  "FLOAT"),
+            ("pattern_grade",   "FLOAT"),
+            ("matchup_grade",   "FLOAT"),
+            ("regression_grade","FLOAT"),
+            ("composite_grade", "FLOAT"),
+            ("hit_rate_opp",    "FLOAT"),
+            ("sample_size_opp", "INT"),
+            ("outcome",         "VARCHAR(5)"),
+            ("archived_at",     "DATETIME2"),
+        ]:
+            conn.execute(text(
+                f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive' AND COLUMN_NAME='{col}') "
+                f"ALTER TABLE common.daily_grades_archive ADD {col} {dtype} NULL"
+            ))
     log.info("Schema verified.")
 
 
