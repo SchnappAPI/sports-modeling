@@ -1,14 +1,18 @@
 name: Odds ETL
 
+# Schedule: daily upcoming run at 10:00 UTC.
+# Manual: defaults to running the full discover → backfill → mappings pipeline.
+# Set mode=upcoming to run the upcoming fetch manually instead.
+
 on:
   schedule:
     - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover | probe | backfill | mappings | upcoming"
+        description: "pipeline (default) | upcoming | discover | backfill | mappings | probe"
         required: false
-        default: "backfill"
+        default: "pipeline"
       sport:
         description: "nfl, nba, mlb, or all"
         required: false
@@ -18,19 +22,19 @@ on:
         required: false
         default: ""
       snapshots:
-        description: "Discover mode: max calendar dates to walk per run."
+        description: "Discover: max calendar dates to walk."
         required: false
-        default: "50"
+        default: "15"
       games:
-        description: "Backfill mode: max events per run."
+        description: "Backfill: max events to process."
         required: false
-        default: "20"
+        default: "30"
       days_ahead:
         description: "Upcoming mode: days ahead to fetch."
         required: false
         default: "1"
       budget:
-        description: "Max credits to spend this run. 0 = unlimited."
+        description: "Max credits per backfill run. 0 = unlimited."
         required: false
         default: "0"
 
@@ -50,22 +54,50 @@ jobs:
       - name: Activate virtualenv
         run: echo "$HOME/venv/bin" >> $GITHUB_PATH
 
-      - name: Build CLI flags
-        id: flags
+      - name: Upcoming (scheduled daily or explicit)
+        if: |
+          github.event_name == 'schedule' ||
+          github.event.inputs.mode == 'upcoming'
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "flags=--mode upcoming --sport nba --days-ahead 1" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          FLAGS="--mode ${{ github.event.inputs.mode || 'backfill' }}"
-          FLAGS="$FLAGS --sport ${{ github.event.inputs.sport || 'nba' }}"
-          FLAGS="$FLAGS --snapshots ${{ github.event.inputs.snapshots || '50' }}"
-          FLAGS="$FLAGS --games ${{ github.event.inputs.games || '20' }}"
-          FLAGS="$FLAGS --days-ahead ${{ github.event.inputs.days_ahead || '1' }}"
-          FLAGS="$FLAGS --budget ${{ github.event.inputs.budget || '0' }}"
-          SEASON="${{ github.event.inputs.season }}"
-          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
-          echo "flags=$FLAGS" >> $GITHUB_OUTPUT
+          DAYS="${{ github.event.inputs.days_ahead || '1' }}"
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          python etl/odds_etl.py --mode upcoming --sport $SPORT --days-ahead $DAYS
 
-      - name: Run Odds ETL
-        run: python etl/odds_etl.py ${{ steps.flags.outputs.flags }}
+      - name: Discover (pipeline or explicit)
+        if: |
+          github.event.inputs.mode == 'pipeline' ||
+          github.event.inputs.mode == 'discover'
+        run: |
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          SNAPS="${{ github.event.inputs.snapshots || '15' }}"
+          SEASON="${{ github.event.inputs.season }}"
+          FLAGS="--mode discover --sport $SPORT --snapshots $SNAPS"
+          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
+          python etl/odds_etl.py $FLAGS
+
+      - name: Backfill (pipeline or explicit)
+        if: |
+          github.event.inputs.mode == 'pipeline' ||
+          github.event.inputs.mode == 'backfill'
+        run: |
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          GAMES="${{ github.event.inputs.games || '30' }}"
+          BUDGET="${{ github.event.inputs.budget || '0' }}"
+          SEASON="${{ github.event.inputs.season }}"
+          FLAGS="--mode backfill --sport $SPORT --games $GAMES --budget $BUDGET"
+          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
+          python etl/odds_etl.py $FLAGS
+
+      - name: Mappings (pipeline or explicit)
+        if: |
+          github.event.inputs.mode == 'pipeline' ||
+          github.event.inputs.mode == 'mappings'
+        run: |
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          python etl/odds_etl.py --mode mappings --sport $SPORT
+
+      - name: Probe (explicit only)
+        if: github.event.inputs.mode == 'probe'
+        run: |
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          python etl/odds_etl.py --mode probe --sport $SPORT
