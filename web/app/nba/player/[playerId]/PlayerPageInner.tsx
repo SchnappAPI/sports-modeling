@@ -41,6 +41,7 @@ interface GradeLine {
   gameId: string;
   marketKey: string;
   lineValue: number;
+  outcomeName: string;
 }
 
 interface TodayGradeRow {
@@ -145,6 +146,21 @@ const PROP_ORDER: string[] = [
   'player_rebounds',
   'player_assists',
   'player_threes',
+  'player_points_rebounds_assists',
+  'player_points_rebounds',
+  'player_points_assists',
+  'player_rebounds_assists',
+  'player_steals',
+  'player_blocks',
+  'player_turnovers',
+];
+
+// Ordered list of markets shown in the expand panel, matching game log column order.
+const EXPAND_MARKET_ORDER: string[] = [
+  'player_points',
+  'player_threes',
+  'player_rebounds',
+  'player_assists',
   'player_points_rebounds_assists',
   'player_points_rebounds',
   'player_points_assists',
@@ -415,6 +431,48 @@ const MARKET_STAT: Record<string, keyof GameSummary> = {
   player_turnovers:         'tov',
 };
 
+// Compute the stat value for a game summary given a market key.
+// Handles combo markets (PRA, PR, PA, RA) explicitly.
+function statForMarket(g: GameSummary, marketKey: string): number | null {
+  switch (marketKey) {
+    case 'player_points':
+    case 'player_points_alternate':
+      return g.pts;
+    case 'player_rebounds':
+    case 'player_rebounds_alternate':
+      return g.reb;
+    case 'player_assists':
+    case 'player_assists_alternate':
+      return g.ast;
+    case 'player_steals':
+    case 'player_steals_alternate':
+      return g.stl;
+    case 'player_blocks':
+    case 'player_blocks_alternate':
+      return g.blk;
+    case 'player_threes':
+    case 'player_threes_alternate':
+      return g.fg3m;
+    case 'player_turnovers':
+    case 'player_turnovers_alternate':
+      return g.tov;
+    case 'player_points_rebounds_assists':
+    case 'player_points_rebounds_assists_alternate':
+      return g.pts + g.reb + g.ast;
+    case 'player_points_rebounds':
+    case 'player_points_rebounds_alternate':
+      return g.pts + g.reb;
+    case 'player_points_assists':
+    case 'player_points_assists_alternate':
+      return g.pts + g.ast;
+    case 'player_rebounds_assists':
+    case 'player_rebounds_assists_alternate':
+      return g.reb + g.ast;
+    default:
+      return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Props section types
 // ---------------------------------------------------------------------------
@@ -430,9 +488,7 @@ interface MarketGroup {
   label: string;
   standardLines: LinePair[];
   altLines: LinePair[];
-  // True when there are no standard lines and altLines are being shown in their place
   altOnly: boolean;
-  // Best-grade row across all lines for this market (used for signals)
   bestRow: TodayGradeRow | null;
 }
 
@@ -491,12 +547,8 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
   return order.map((base) => {
     const standardLines = sortPairs(stdPaired.get(base));
     const altLines      = sortPairs(altPaired.get(base));
-    // When no standard lines exist, promote alt lines into the standard strip
-    // so the section still renders for alt-only players (e.g. some FanDuel props
-    // only post alternate markets on certain days).
     const altOnly       = standardLines.length === 0 && altLines.length > 0;
 
-    // Find the Over row with the best composite grade for signal derivation
     const allOverRows = [
       ...standardLines.map((p) => p.over),
       ...altLines.map((p) => p.over),
@@ -511,7 +563,7 @@ function buildMarketGroups(grades: TodayGradeRow[]): MarketGroup[] {
 }
 
 // ---------------------------------------------------------------------------
-// Player signals section — shown inside TodayPropsSection
+// Player signals section
 // ---------------------------------------------------------------------------
 
 function PlayerSignalsSection({ groups }: { groups: MarketGroup[] }) {
@@ -544,7 +596,7 @@ function PlayerSignalsSection({ groups }: { groups: MarketGroup[] }) {
 }
 
 // ---------------------------------------------------------------------------
-// Dot plot
+// Dot plot — colors each dot vs today's active prop line
 // ---------------------------------------------------------------------------
 
 type DotWindow = 'L10' | 'L30' | 'L50' | 'All';
@@ -628,14 +680,9 @@ function MarketPanel({
   summaries: GameSummary[];
   dotWindow: DotWindow;
 }) {
-  // For alt-only markets, use the alt lines as the primary dot plot source.
-  // Pick the line closest to -110 as the representative line for the chart.
   const primaryLines = group.standardLines.length > 0 ? group.standardLines : group.altLines;
   const posted       = postedLine(primaryLines);
   const lineValue    = posted?.lineValue ?? 0;
-
-  // When alt-only, there's nothing extra to show in the "Alt lines" sub-section
-  // because all lines are already in the primary strip.
   const showAltSection = !group.altOnly && group.altLines.length > 0;
 
   return (
@@ -741,7 +788,6 @@ function TodayPropsSection({
 
   return (
     <div className="border-b border-gray-800">
-      {/* Header row */}
       <div className="flex items-center px-4 py-1.5 border-b border-gray-800">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Today&apos;s Props</span>
         <div className="flex gap-1 ml-auto items-center">
@@ -767,15 +813,11 @@ function TodayPropsSection({
         </div>
       </div>
 
-      {/* Signals section — only when there are signals to show */}
       <PlayerSignalsSection groups={groups} />
 
-      {/* Market strip */}
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
-            // For the strip cell, use the representative line from whichever
-            // line set is primary (standard preferred, alt as fallback).
             const primaryLines = group.standardLines.length > 0 ? group.standardLines : group.altLines;
             const posted       = postedLine(primaryLines);
             const grade        = posted?.over?.compositeGrade ?? null;
@@ -823,7 +865,6 @@ function TodayPropsSection({
         </div>
       </div>
 
-      {/* Chart + alt lines */}
       {expanded && activeGroup && (
         <MarketPanel
           group={activeGroup}
@@ -938,6 +979,63 @@ function GameTeamSelector({
 }
 
 // ---------------------------------------------------------------------------
+// Game log prop expand panel
+// ---------------------------------------------------------------------------
+
+function GamePropExpandRow({
+  game,
+  gradeMap,
+  colSpan,
+}: {
+  game: GameSummary;
+  gradeMap: Map<string, Map<string, { lineValue: number; outcomeName: string }>>;
+  colSpan: number;
+}) {
+  const gameGrades = gradeMap.get(game.gameId);
+
+  if (!gameGrades || gameGrades.size === 0) {
+    return (
+      <tr>
+        <td colSpan={colSpan} className="px-4 py-2 bg-gray-900/60 border-b border-gray-800">
+          <span className="text-xs text-gray-600">No props were posted for this game.</span>
+        </td>
+      </tr>
+    );
+  }
+
+  const entries = EXPAND_MARKET_ORDER
+    .filter((mkt) => gameGrades.has(mkt))
+    .map((mkt) => {
+      const grade = gameGrades.get(mkt)!;
+      const statVal = statForMarket(game, mkt);
+      const hit = statVal != null ? statVal > grade.lineValue : null;
+      return { mkt, grade, statVal, hit };
+    });
+
+  if (entries.length === 0) return null;
+
+  return (
+    <tr>
+      <td colSpan={colSpan} className="px-4 py-2 bg-gray-900/60 border-b border-gray-800">
+        <div className="flex flex-wrap gap-x-5 gap-y-1">
+          {entries.map(({ mkt, grade, statVal, hit }) => (
+            <div key={mkt} className="flex items-center gap-1.5 text-xs tabular-nums">
+              <span className="text-gray-500 font-medium w-7">{marketLabel(mkt)}</span>
+              <span className="text-gray-400">{grade.lineValue.toFixed(1)}</span>
+              {statVal != null && hit != null && (
+                <span className={hit ? 'text-green-400' : 'text-red-400'}>
+                  ({statVal})
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -969,6 +1067,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const [selectedPeriods, setSelectedPeriods] = useState<Set<QuarterKey>>(persistedPeriods.current);
   const [roleFilter, setRoleFilter]           = useState<RoleFilter>(persistedRole.current);
   const [propsExpanded, setPropsExpanded]     = useState<boolean>(persistedPropsExpanded.current);
+  const [expandedGameId, setExpandedGameId]   = useState<string | null>(null);
 
   const [teamPlayers, setTeamPlayers] = useState<{playerId: number; playerName: string}[]>([]);
   const [showAllStats, setShowAllStats] = useState(false);
@@ -1085,6 +1184,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     setError(null);
     setLog([]);
     setGrades([]);
+    setExpandedGameId(null);
     setPlayerInfo({
       oppTeamId: null, position: null, gameLineupPosition: null,
       playerName: null, teamId: null,
@@ -1155,12 +1255,13 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   useEffect(() => { persistedRole.current    = roleFilter; },     [roleFilter]);
   useEffect(() => { persistedPropsExpanded.current = propsExpanded; }, [propsExpanded]);
 
+  // gradeMap: gameId -> marketKey -> { lineValue, outcomeName }
   const gradeMap = useMemo(() => {
-    const m = new Map<string, Map<string, number>>();
+    const m = new Map<string, Map<string, { lineValue: number; outcomeName: string }>>();
     for (const g of grades) {
       if (!m.has(g.gameId)) m.set(g.gameId, new Map());
       if (!m.get(g.gameId)!.has(g.marketKey)) {
-        m.get(g.gameId)!.set(g.marketKey, g.lineValue);
+        m.get(g.gameId)!.set(g.marketKey, { lineValue: g.lineValue, outcomeName: g.outcomeName });
       }
     }
     return m;
@@ -1238,14 +1339,18 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     });
   }
 
-  function getLineCls(gameId: string, market: keyof typeof MARKET_STAT, value: number): string {
+  // Returns color class for a stat vs the graded line for that game.
+  // - green:   stat > line (hit)
+  // - red:     stat <= line (miss)
+  // - neutral: no line was posted for this game/market (text-gray-400, same as
+  //            uncolored stats, so there's no false impression of a miss)
+  function getLineCls(gameId: string, market: string, value: number): string {
     if (!showPropColors) return 'text-gray-300';
-    const statKey = MARKET_STAT[market];
     const gameMap = gradeMap.get(gameId);
-    if (!gameMap || !statKey) return 'text-gray-300';
-    const line = gameMap.get(market);
-    if (line == null) return 'text-gray-300';
-    return value > line ? 'text-green-400' : 'text-red-400';
+    if (!gameMap) return 'text-gray-300'; // no grades at all for this game
+    const entry = gameMap.get(market);
+    if (entry == null) return 'text-gray-300'; // no line for this market
+    return value > entry.lineValue ? 'text-green-400' : 'text-red-400';
   }
 
   function getComboLineCls(gameId: string, value: number, markets: string[]): string {
@@ -1253,8 +1358,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     const gameMap = gradeMap.get(gameId);
     if (!gameMap) return 'text-gray-300';
     for (const market of markets) {
-      const line = gameMap.get(market);
-      if (line != null) return value > line ? 'text-green-400' : 'text-red-400';
+      const entry = gameMap.get(market);
+      if (entry != null) return value > entry.lineValue ? 'text-green-400' : 'text-red-400';
     }
     return 'text-gray-300';
   }
@@ -1333,6 +1438,9 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     { value: 'started', label: 'Started' },
     { value: 'bench',   label: 'Bench' },
   ];
+
+  // Total column count for the game log table (used for colSpan in expand row).
+  const logColCount = showAllStats ? 18 : 12;
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -1557,7 +1665,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               };
 
               const gameHref = `/nba?gameId=${g.gameId}&tab=boxscore&date=${g.gameDate.slice(0, 10)}`;
-              const dnpColSpan = showAllStats ? 18 : 10;
+              const dnpColSpan = showAllStats ? 18 : 12;
+              const isExpanded = expandedGameId === g.gameId;
 
               if (g.dnp) {
                 return (
@@ -1587,77 +1696,100 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const paLine   = getComboLineCls(g.gameId, g.pts + g.ast, ['player_points_assists', 'player_points_assists_alternate']);
               const raLine   = getComboLineCls(g.gameId, g.reb + g.ast, ['player_rebounds_assists', 'player_rebounds_assists_alternate']);
 
-              const rowCls = g.started === true
+              const rowBorderCls = g.started === true
                 ? 'border-b border-gray-800 border-l-2 border-l-blue-800'
                 : 'border-b border-gray-800';
 
+              const rowBgCls = isExpanded ? 'bg-gray-900/40' : '';
+
               return (
-                <tr key={g.gameId} className={rowCls}>
-                  <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">
-                    <Link href={gameHref} className="hover:text-blue-400 transition-colors">{g.gameDate.slice(5)}</Link>
-                  </td>
-                  <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
-                    <Link href={gameHref} className="hover:text-blue-400 transition-colors">
-                      {g.isHome ? '' : '@'}{g.opponentAbbr}
-                    </Link>
-                  </td>
-                  <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">
-                    {fmtM(g.min, g.started)}
-                  </td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${ptsLine}`}>{g.pts}</td>
-                  {showAllStats ? (
-                    <>
-                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fgm}</td>
-                      <td
-                        className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
-                        style={{ backgroundColor: volumeBg(g.fga, attemptRanges.fga) }}
+                <>
+                  <tr
+                    key={g.gameId}
+                    className={`${rowBorderCls} ${rowBgCls} cursor-pointer hover:bg-gray-900/30 transition-colors`}
+                    onClick={() => setExpandedGameId(isExpanded ? null : g.gameId)}
+                  >
+                    <td className="px-4 py-1.5 text-gray-400 sticky left-0 bg-gray-950 z-10 whitespace-nowrap">
+                      <span
+                        className="hover:text-blue-400 transition-colors"
+                        onClick={(e) => { e.stopPropagation(); router.push(gameHref); }}
                       >
-                        {g.fga}
-                      </td>
+                        {g.gameDate.slice(5)}
+                      </span>
+                    </td>
+                    <td className="px-2 py-1.5 text-gray-400 whitespace-nowrap">
+                      <span
+                        className="hover:text-blue-400 transition-colors"
+                        onClick={(e) => { e.stopPropagation(); router.push(gameHref); }}
+                      >
+                        {g.isHome ? '' : '@'}{g.opponentAbbr}
+                      </span>
+                    </td>
+                    <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">
+                      {fmtM(g.min, g.started)}
+                    </td>
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${ptsLine}`}>{g.pts}</td>
+                    {showAllStats ? (
+                      <>
+                        <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.fgm}</td>
+                        <td
+                          className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
+                          style={{ backgroundColor: volumeBg(g.fga, attemptRanges.fga) }}
+                        >
+                          {g.fga}
+                        </td>
+                        <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
+                        <td
+                          className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
+                          style={{ backgroundColor: volumeBg(g.fg3a, attemptRanges.fg3a) }}
+                        >
+                          {g.fg3a}
+                        </td>
+                        <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.ftm}</td>
+                        <td
+                          className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
+                          style={{ backgroundColor: volumeBg(g.fta, attemptRanges.fta) }}
+                        >
+                          {g.fta}
+                        </td>
+                      </>
+                    ) : (
                       <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
-                      <td
-                        className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
-                        style={{ backgroundColor: volumeBg(g.fg3a, attemptRanges.fg3a) }}
-                      >
-                        {g.fg3a}
-                      </td>
-                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums">{g.ftm}</td>
-                      <td
-                        className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap tabular-nums"
-                        style={{ backgroundColor: volumeBg(g.fta, attemptRanges.fta) }}
-                      >
-                        {g.fta}
-                      </td>
-                    </>
-                  ) : (
-                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${fg3Line} tabular-nums`}>{g.fg3m}</td>
+                    )}
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${rebLine} tabular-nums`}>
+                      {isFullGame ? fmtPT(g.reb, g.rebChances) : g.reb}
+                    </td>
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${astLine} tabular-nums`}>
+                      {isFullGame ? fmtPT(g.ast, g.potentialAst) : g.ast}
+                    </td>
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${praLine} tabular-nums`}>
+                      {g.pts + g.reb + g.ast}
+                    </td>
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${prLine} tabular-nums`}>
+                      {g.pts + g.reb}
+                    </td>
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${paLine} tabular-nums`}>
+                      {g.pts + g.ast}
+                    </td>
+                    <td className={`px-2 py-1.5 text-right whitespace-nowrap ${raLine} tabular-nums`}>
+                      {g.reb + g.ast}
+                    </td>
+                    {showAllStats && (
+                      <>
+                        <td className={`px-2 py-1.5 text-right whitespace-nowrap ${stlLine}`}>{g.stl}</td>
+                        <td className={`px-2 py-1.5 text-right whitespace-nowrap ${blkLine}`}>{g.blk}</td>
+                        <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
+                      </>
+                    )}
+                  </tr>
+                  {isExpanded && (
+                    <GamePropExpandRow
+                      game={g}
+                      gradeMap={gradeMap}
+                      colSpan={logColCount}
+                    />
                   )}
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${rebLine} tabular-nums`}>
-                    {isFullGame ? fmtPT(g.reb, g.rebChances) : g.reb}
-                  </td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${astLine} tabular-nums`}>
-                    {isFullGame ? fmtPT(g.ast, g.potentialAst) : g.ast}
-                  </td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${praLine} tabular-nums`}>
-                    {g.pts + g.reb + g.ast}
-                  </td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${prLine} tabular-nums`}>
-                    {g.pts + g.reb}
-                  </td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${paLine} tabular-nums`}>
-                    {g.pts + g.ast}
-                  </td>
-                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${raLine} tabular-nums`}>
-                    {g.reb + g.ast}
-                  </td>
-                  {showAllStats && (
-                    <>
-                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${stlLine}`}>{g.stl}</td>
-                      <td className={`px-2 py-1.5 text-right whitespace-nowrap ${blkLine}`}>{g.blk}</td>
-                      <td className="px-2 py-1.5 text-right text-gray-300 whitespace-nowrap">{g.tov}</td>
-                    </>
-                  )}
-                </tr>
+                </>
               );
             })}
           </tbody>
