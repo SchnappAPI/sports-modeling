@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 interface PlayerAvg {
   playerId: number;
@@ -78,6 +78,7 @@ function TeamStatsTable({
   gameId,
   selectedDate,
   showAllStats,
+  playerLinkParams,
 }: {
   abbr: string;
   opponentAbbr: string;
@@ -85,9 +86,8 @@ function TeamStatsTable({
   gameId: string;
   selectedDate: string;
   showAllStats: boolean;
+  playerLinkParams: string;
 }) {
-  const searchParams = useSearchParams();
-  const tab = searchParams.get('tab') ?? 'stats';
   const [benchOpen, setBenchOpen] = useState(true);
   const [inactiveOpen, setInactiveOpen] = useState(false);
 
@@ -109,7 +109,7 @@ function TeamStatsTable({
       <tr key={p.playerId} className={['border-b border-gray-800', dimmed ? 'opacity-40' : ''].join(' ')}>
         <td className="py-1.5 pr-3">
           <Link
-            href={`/nba/player/${p.playerId}?gameId=${gameId}&tab=${tab}&opp=${opponentAbbr}&date=${selectedDate}`}
+            href={`/nba/player/${p.playerId}?${playerLinkParams}&opp=${opponentAbbr}`}
             className="text-gray-100 hover:text-blue-400 transition-colors"
           >
             {p.playerName}
@@ -120,7 +120,6 @@ function TeamStatsTable({
         <td className="py-1.5 px-2 text-right text-gray-300">{fmt(p.avgPts)}</td>
         {showAllStats ? (
           <>
-            {/* All Stats: FGM FGA 3PM 3PA FTM FTA — all separate columns */}
             <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avgFgm)}</td>
             <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avgFga)}</td>
             <td className="py-1.5 px-2 text-right text-gray-400 tabular-nums">{fmt(p.avg3pm)}</td>
@@ -227,12 +226,33 @@ function TeamStatsTable({
 }
 
 export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbbr, awayTeamAbbr, selectedDate }: Props) {
-  const [activePeriods, setActivePeriods] = useState<Set<string>>(new Set(['full']));
-  const [nGames, setNGames] = useState('20');
-  const [players, setPlayers] = useState<PlayerAvg[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [showAllStats, setShowAllStats] = useState(false);
+  const router       = useRouter();
+  const searchParams = useSearchParams();
+
+  // Read period filter from URL on mount so navigating back restores state.
+  // URL param: periods=3Q,4Q  (absent or empty = full game)
+  const periodsFromUrl = searchParams.get('periods') ?? '';
+  const initialPeriods: Set<string> = periodsFromUrl
+    ? new Set(periodsFromUrl.split(',').filter(Boolean))
+    : new Set(['full']);
+
+  const [activePeriods, setActivePeriods] = useState<Set<string>>(initialPeriods);
+  const [nGames, setNGames]               = useState('20');
+  const [players, setPlayers]             = useState<PlayerAvg[]>([]);
+  const [loading, setLoading]             = useState(true);
+  const [error, setError]                 = useState<string | null>(null);
+  const [showAllStats, setShowAllStats]   = useState(false);
+
+  // Write period changes back to URL so back-navigation restores them.
+  useEffect(() => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (activePeriods.has('full') || activePeriods.size === 0) {
+      params.delete('periods');
+    } else {
+      params.set('periods', Array.from(activePeriods).join(','));
+    }
+    router.replace(`/nba?${params.toString()}`, { scroll: false });
+  }, [activePeriods]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function togglePeriod(value: string) {
     setActivePeriods((prev) => {
@@ -270,6 +290,15 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
   }, [homeTeamId, awayTeamId, nGames, activePeriods, gameId, homeTeamAbbr, awayTeamAbbr]);
 
   useEffect(() => { fetchStats(); }, [fetchStats]);
+
+  // Build the base params to pass to player links so periods survive navigation.
+  const periodsStr = activePeriods.has('full') ? '' : Array.from(activePeriods).join(',');
+  const playerLinkParams = new URLSearchParams({
+    gameId,
+    tab: 'stats',
+    date: selectedDate,
+    ...(periodsStr ? { periods: periodsStr } : {}),
+  }).toString();
 
   const homePlayers = players.filter((p) => p.teamAbbr === homeTeamAbbr);
   const awayPlayers = players.filter((p) => p.teamAbbr === awayTeamAbbr);
@@ -317,16 +346,25 @@ export default function StatsTable({ gameId, homeTeamId, awayTeamId, homeTeamAbb
       {!loading && !error && (
         <div className="flex flex-col gap-6">
           {awayPlayers.length > 0 && (
-            <TeamStatsTable abbr={awayTeamAbbr} opponentAbbr={homeTeamAbbr} players={awayPlayers} gameId={gameId} selectedDate={selectedDate} showAllStats={showAllStats} />
+            <TeamStatsTable
+              abbr={awayTeamAbbr} opponentAbbr={homeTeamAbbr}
+              players={awayPlayers} gameId={gameId} selectedDate={selectedDate}
+              showAllStats={showAllStats} playerLinkParams={playerLinkParams}
+            />
           )}
           {homePlayers.length > 0 && (
-            <TeamStatsTable abbr={homeTeamAbbr} opponentAbbr={awayTeamAbbr} players={homePlayers} gameId={gameId} selectedDate={selectedDate} showAllStats={showAllStats} />
+            <TeamStatsTable
+              abbr={homeTeamAbbr} opponentAbbr={awayTeamAbbr}
+              players={homePlayers} gameId={gameId} selectedDate={selectedDate}
+              showAllStats={showAllStats} playerLinkParams={playerLinkParams}
+            />
           )}
           {otherAbbrs.map((abbr) => (
             <TeamStatsTable
               key={abbr} abbr={abbr} opponentAbbr=''
               players={players.filter((p) => p.teamAbbr === abbr)}
-              gameId={gameId} selectedDate={selectedDate} showAllStats={showAllStats}
+              gameId={gameId} selectedDate={selectedDate}
+              showAllStats={showAllStats} playerLinkParams={playerLinkParams}
             />
           ))}
           {players.length === 0 && <div className="text-sm text-gray-500">No stats available.</div>}
