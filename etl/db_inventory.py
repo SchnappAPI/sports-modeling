@@ -11,35 +11,47 @@ def p(label, q):
     cur.execute(q)
     for r in cur.fetchall(): print(r)
 
-p("both archives: exist?", """
-SELECT TABLE_SCHEMA, TABLE_NAME
-FROM INFORMATION_SCHEMA.TABLES
-WHERE (TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive')
-   OR (TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props_archive')
+p("NBA 2025: discovered vs loaded", """
+SELECT
+    (SELECT COUNT(*) FROM odds.discovered_events WHERE sport_key='basketball_nba' AND season_year=2025) AS discovered,
+    (SELECT COUNT(*) FROM odds.events WHERE sport_key='basketball_nba' AND season_year=2025) AS loaded,
+    (SELECT MAX(CAST(commence_time AS DATE)) FROM odds.discovered_events WHERE sport_key='basketball_nba' AND season_year=2025) AS max_discovered,
+    (SELECT MAX(CAST(commence_time AS DATE)) FROM odds.events WHERE sport_key='basketball_nba' AND season_year=2025) AS max_loaded
 """)
 
-p("row counts", """
-SELECT 'upp' AS t, COUNT(*) FROM odds.upcoming_player_props
-UNION ALL
-SELECT 'player_props', COUNT(*) FROM odds.player_props
-UNION ALL
-SELECT 'dg', COUNT(*) FROM common.daily_grades
-UNION ALL
-SELECT 'dg_archive', COUNT(*) FROM common.daily_grades_archive
-""")
-
-p("player_props coverage by sport", """
-SELECT sport_key,
+p("NBA 2025: player_props coverage (standard only)", """
+SELECT
     MIN(CAST(egm.game_date AS DATE)) AS min_date,
     MAX(CAST(egm.game_date AS DATE)) AS max_date,
-    COUNT(DISTINCT egm.game_id) AS games
+    COUNT(DISTINCT egm.game_id) AS games_with_props
 FROM odds.player_props pp
 JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
-WHERE pp.bookmaker_key = 'fanduel'
+WHERE pp.sport_key = 'basketball_nba'
+  AND pp.bookmaker_key = 'fanduel'
   AND pp.outcome_name = 'Over'
   AND pp.market_key NOT LIKE '%alternate%'
-GROUP BY pp.sport_key
-ORDER BY pp.sport_key
+  AND egm.game_date >= '2025-10-01'
+""")
+
+p("NBA 2025: games in player_props Apr 1+ (standard)", """
+SELECT DISTINCT CAST(egm.game_date AS DATE) AS game_date, COUNT(DISTINCT pp.player_name) AS players
+FROM odds.player_props pp
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pp.sport_key = 'basketball_nba'
+  AND pp.bookmaker_key = 'fanduel'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key NOT LIKE '%alternate%'
+  AND egm.game_date >= '2026-04-01'
+GROUP BY CAST(egm.game_date AS DATE)
+ORDER BY game_date
+""")
+
+p("NBA 2025: loaded events Apr 3+", """
+SELECT TOP 20 CAST(commence_time AS DATE) AS game_date, away_team, home_team
+FROM odds.events
+WHERE sport_key = 'basketball_nba' AND season_year = 2025
+  AND commence_time >= '2026-04-03'
+ORDER BY commence_time
 """)
 
 conn.close()
