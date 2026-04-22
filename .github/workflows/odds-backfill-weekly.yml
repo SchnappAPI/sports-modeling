@@ -1,0 +1,63 @@
+name: Odds Backfill (Weekly)
+# Runs every Monday at 11:00 UTC. Discovers new events from the past week
+# then backfills their historical odds. Covers late regular season and
+# playoff games that fall outside the daily upcoming window.
+# Budget: 5000 credits covers ~12 games at ~400 credits/game.
+
+on:
+  schedule:
+    - cron: '0 11 * * 1'
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Season year. Leave blank for auto-detect."
+        required: false
+        default: ""
+      snapshots:
+        description: "Discover: max calendar dates to walk."
+        required: false
+        default: "10"
+      games:
+        description: "Backfill: max events to process."
+        required: false
+        default: "15"
+      budget:
+        description: "Max credits to spend. 0 = unlimited."
+        required: false
+        default: "0"
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+  ODDS_API_KEY:       ${{ secrets.ODDS_API_KEY }}
+
+jobs:
+  weekly-backfill:
+    runs-on: [self-hosted, schnapp-runner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Discover new events
+        run: |
+          SEASON="${{ github.event.inputs.season }}"
+          SNAPSHOTS="${{ github.event.inputs.snapshots || '10' }}"
+          FLAGS="--mode discover --sport nba --snapshots $SNAPSHOTS"
+          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
+          python etl/odds_etl.py $FLAGS
+
+      - name: Backfill odds for new events
+        run: |
+          SEASON="${{ github.event.inputs.season }}"
+          GAMES="${{ github.event.inputs.games || '15' }}"
+          BUDGET="${{ github.event.inputs.budget || '5000' }}"
+          FLAGS="--mode backfill --sport nba --games $GAMES --budget $BUDGET"
+          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
+          python etl/odds_etl.py $FLAGS
+
+      - name: Run mappings
+        run: python etl/odds_etl.py --mode mappings --sport nba
