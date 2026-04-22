@@ -492,7 +492,10 @@ interface MarketGroup {
   bestRow: TodayGradeRow | null;
 }
 
-function postedLine(pairs: LinePair[]): LinePair | undefined {
+// Pick the representative line from a set of alt line pairs.
+// Selects the pair whose Over price is closest to -110 (i.e. the most
+// fairly-priced line, which tends to be closest to the posted standard line).
+function postedAltLine(pairs: LinePair[]): LinePair | undefined {
   if (pairs.length === 0) return undefined;
   if (pairs.length === 1) return pairs[0];
 
@@ -680,9 +683,19 @@ function MarketPanel({
   summaries: GameSummary[];
   dotWindow: DotWindow;
 }) {
-  const primaryLines = group.standardLines.length > 0 ? group.standardLines : group.altLines;
-  const posted       = postedLine(primaryLines);
-  const lineValue    = posted?.lineValue ?? 0;
+  // Dot plot reference line: always the standard posted line when one exists.
+  // FanDuel posts exactly one standard line per market, so standardLines[0] is
+  // the canonical value. For alt-only markets, fall back to the alt line whose
+  // price is closest to -110 (the most fairly-priced line).
+  const dotLineValue = group.standardLines.length > 0
+    ? group.standardLines[0].lineValue
+    : (postedAltLine(group.altLines)?.lineValue ?? 0);
+
+  // Strip cell display: same logic — standard if available, best alt otherwise.
+  const displayedLine = group.standardLines.length > 0
+    ? group.standardLines[0]
+    : postedAltLine(group.altLines);
+
   const showAltSection = !group.altOnly && group.altLines.length > 0;
 
   return (
@@ -691,7 +704,7 @@ function MarketPanel({
         <StatDotPlot
           summaries={summaries}
           baseKey={group.baseKey}
-          lineValue={lineValue}
+          lineValue={dotLineValue}
           window={dotWindow}
         />
       </div>
@@ -818,9 +831,11 @@ function TodayPropsSection({
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
-            const primaryLines = group.standardLines.length > 0 ? group.standardLines : group.altLines;
-            const posted       = postedLine(primaryLines);
-            const grade        = posted?.over?.compositeGrade ?? null;
+            // Strip cell: show the standard line value, falling back to best alt.
+            const displayPair = group.standardLines.length > 0
+              ? group.standardLines[0]
+              : postedAltLine(group.altLines);
+            const grade        = displayPair?.over?.compositeGrade ?? null;
             const isActive     = group.baseKey === activeBase;
             const cellSignals  = group.bestRow
               ? getSignals({
@@ -840,9 +855,9 @@ function TodayPropsSection({
                 ].join(' ')}
               >
                 <span className="font-semibold text-gray-300 leading-none mb-0.5">{group.label}</span>
-                {posted && (
+                {displayPair && (
                   <span className="tabular-nums text-gray-500 leading-none mb-0.5">
-                    {posted.lineValue.toFixed(1)}
+                    {displayPair.lineValue.toFixed(1)}
                   </span>
                 )}
                 {grade != null ? (
@@ -1256,13 +1271,12 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   useEffect(() => { persistedPropsExpanded.current = propsExpanded; }, [propsExpanded]);
 
   // gradeMap: gameId -> marketKey -> { lineValue, outcomeName }
+  // player-grades already deduplicates to one row per (gameId, marketKey).
   const gradeMap = useMemo(() => {
     const m = new Map<string, Map<string, { lineValue: number; outcomeName: string }>>();
     for (const g of grades) {
       if (!m.has(g.gameId)) m.set(g.gameId, new Map());
-      if (!m.get(g.gameId)!.has(g.marketKey)) {
-        m.get(g.gameId)!.set(g.marketKey, { lineValue: g.lineValue, outcomeName: g.outcomeName });
-      }
+      m.get(g.gameId)!.set(g.marketKey, { lineValue: g.lineValue, outcomeName: g.outcomeName });
     }
     return m;
   }, [grades]);
@@ -1340,16 +1354,15 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   }
 
   // Returns color class for a stat vs the graded line for that game.
-  // - green:   stat > line (hit)
-  // - red:     stat <= line (miss)
-  // - neutral: no line was posted for this game/market (text-gray-400, same as
-  //            uncolored stats, so there's no false impression of a miss)
+  // green  = stat > line (hit)
+  // red    = stat <= line (miss, and a line was actually posted)
+  // gray   = no line was posted for this game/market
   function getLineCls(gameId: string, market: string, value: number): string {
     if (!showPropColors) return 'text-gray-300';
     const gameMap = gradeMap.get(gameId);
-    if (!gameMap) return 'text-gray-300'; // no grades at all for this game
+    if (!gameMap) return 'text-gray-300';
     const entry = gameMap.get(market);
-    if (entry == null) return 'text-gray-300'; // no line for this market
+    if (entry == null) return 'text-gray-300';
     return value > entry.lineValue ? 'text-green-400' : 'text-red-400';
   }
 
@@ -1439,7 +1452,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     { value: 'bench',   label: 'Bench' },
   ];
 
-  // Total column count for the game log table (used for colSpan in expand row).
   const logColCount = showAllStats ? 18 : 12;
 
   return (
@@ -1699,7 +1711,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const rowBorderCls = g.started === true
                 ? 'border-b border-gray-800 border-l-2 border-l-blue-800'
                 : 'border-b border-gray-800';
-
               const rowBgCls = isExpanded ? 'bg-gray-900/40' : '';
 
               return (
