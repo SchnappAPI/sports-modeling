@@ -22,6 +22,10 @@ Firewall: allows all IPs (0.0.0.0 to 255.255.255.255) plus Azure Services. Requi
 
 Keep-alive: Uptime Robot pings `https://schnapp.bet/api/ping` every 30 minutes to prevent auto-pause.
 
+## DB queries from Claude sessions
+
+MSSQL MCP is not available on the corporate machine (ThreatLocker blocks it). Do not attempt to use it. For ad-hoc DB queries during a session, write a Python script to `/tmp/` via `shell_exec` and execute it with `~/venv/bin/python`. Connection string: server `sports-modeling-server.database.windows.net,1433`, database `sports-modeling`, uid `sqladmin`, password in VM systemd env as `AZURE_SQL_PASSWORD`. Use pyodbc directly for diagnostic queries.
+
 ## Azure Static Web Apps
 
 Resource: `sports-modeling-web`
@@ -65,6 +69,8 @@ Tools:
 - `workflow_trigger`, `workflow_status` (uses `GH_PAT` from VM env)
 - `shell_exec`, `read_file` (require `token` parameter matching `MCP_AUTH_TOKEN` env var)
 
+Token: `da1c12150e2f7b784d423f9e1865bf78503fcc5d34f5d710446845d898b54f48`
+
 Connected in claude.ai as the "Schnapp Ops" connector.
 
 If every `shell_exec` call returns no output, the Cloudflare tunnel is down. Recovery: SSH to VM, then `sudo systemctl restart cloudflared` and `sudo systemctl restart schnapp-mcp`. After any change to `mcp/server.py`, trigger `install-mcp.yml` to redeploy (typically 18 to 30 seconds).
@@ -85,9 +91,10 @@ Auth: every request requires the `X-Runner-Key` header matching `RUNNER_API_KEY`
 ## Other MCPs (per-environment availability)
 
 - **GitHub MCP**: scope locked to `SchnappAPI/sports-modeling`, branch `main`. Available in every Claude session.
-- **MSSQL MCP** (`mssql-mcp:ExecuteSql`): VM only. ThreatLocker blocks it on the corporate machine.
-- **Power BI MCP** (`powerbi-modeling-mcp`): used for legacy PBI work. Auto-connect to the local instance whose `parentWindowTitle` is `sports-model`.
-- **Filesystem MCP**: Windows machine paths under `C:\Users\1stLake\OneDrive - Schnapp\` and adjacent allowed directories. Used for accessing local data files like the legacy PBI exports.
+- **Power BI MCP** (`powerbi-modeling-mcp`): used for PBI work. Auto-connect to the local instance whose `parentWindowTitle` is `sports-model`.
+- **Filesystem MCP**: Windows machine paths under `C:\Users\1stLake\OneDrive - Schnapp\` and adjacent allowed directories. Used for accessing local data files.
+- **Desktop Commander**: available on corporate machine. Used for file operations and config editing.
+- **windows-node-mcp**: available on corporate machine.
 
 ## External APIs
 
