@@ -12,11 +12,10 @@ import { getPool } from '@/lib/db';
 // identifying the actual posted line. player_props contains exactly what FanDuel
 // posted, so it is unambiguous.
 //
-// One row per (gameId, marketKey): standard (non-alternate) Over lines only.
-// When player_props has no matching row for a graded game (e.g. pre-backfill
-// history), falls back to the daily_grades row with the lowest line_value for
-// that game/market, since the standard line is typically the lowest graded line
-// (bracket lines were extrapolated upward from the posted line).
+// Returns one row per (gameId, marketKey): standard (non-alternate) Over lines
+// only. When no player_props row exists for a graded game, no row is returned
+// for that market — the game log shows neutral gray rather than a potentially
+// wrong value.
 export async function GET(req: NextRequest) {
   const playerIdRaw = req.nextUrl.searchParams.get('playerId');
   if (!playerIdRaw) {
@@ -32,10 +31,7 @@ export async function GET(req: NextRequest) {
       .request()
       .input('playerId', mssql.Int, playerId)
       .query(
-        `-- Primary: join daily_grades to odds.player_props to get the actual
-         -- posted line. player_props has one canonical line per event/market
-         -- so this is the correct reference for game log coloring.
-         WITH graded_games AS (
+        `WITH graded_games AS (
            SELECT DISTINCT
              egm.game_id   AS gameId,
              dg.event_id,
@@ -49,9 +45,9 @@ export async function GET(req: NextRequest) {
            WHERE dg.player_id     = @playerId
              AND dg.bookmaker_key = 'fanduel'
              AND dg.market_key NOT LIKE '%_alternate'
-         ),
-         -- Look up the actual posted line from odds.player_props
-         posted AS (
+         )
+         SELECT gameId, marketKey, lineValue, outcomeName
+         FROM (
            SELECT
              gg.gameId,
              gg.marketKey,
@@ -63,39 +59,14 @@ export async function GET(req: NextRequest) {
              ) AS rn
            FROM graded_games gg
            JOIN odds.player_props pp
-             ON pp.event_id    = gg.event_id
-            AND pp.market_key  = gg.marketKey
-            AND pp.player_name = gg.odds_player_name
+             ON pp.event_id      = gg.event_id
+            AND pp.market_key    = gg.marketKey
+            AND pp.player_name   = gg.odds_player_name
             AND pp.bookmaker_key = 'fanduel'
             AND pp.outcome_name  = 'Over'
             AND pp.outcome_point IS NOT NULL
-         ),
-         -- Fallback: when no player_props row exists, use the lowest graded
-         -- line from daily_grades (bracket lines were extrapolated upward, so
-         -- the lowest is closest to the actual posted line).
-         fallback AS (
-           SELECT
-             egm.game_id   AS gameId,
-             dg.market_key AS marketKey,
-             MIN(dg.line_value) AS lineValue,
-             'Over'             AS outcomeName
-           FROM common.daily_grades dg
-           JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
-           WHERE dg.player_id     = @playerId
-             AND dg.bookmaker_key = 'fanduel'
-             AND dg.outcome_name  = 'Over'
-             AND dg.market_key NOT LIKE '%_alternate'
-           GROUP BY egm.game_id, dg.market_key
-         )
-         SELECT
-           COALESCE(p.gameId,    f.gameId)    AS gameId,
-           COALESCE(p.marketKey, f.marketKey) AS marketKey,
-           COALESCE(p.lineValue, f.lineValue) AS lineValue,
-           'Over'                             AS outcomeName
-         FROM fallback f
-         LEFT JOIN (SELECT * FROM posted WHERE rn = 1) p
-           ON p.gameId    = f.gameId
-          AND p.marketKey = f.marketKey
+         ) ranked
+         WHERE rn = 1
          ORDER BY gameId, marketKey`
       );
     return NextResponse.json({ grades: result.recordset });
