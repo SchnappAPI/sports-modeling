@@ -683,18 +683,9 @@ function MarketPanel({
   summaries: GameSummary[];
   dotWindow: DotWindow;
 }) {
-  // Dot plot reference line: always the standard posted line when one exists.
-  // FanDuel posts exactly one standard line per market, so standardLines[0] is
-  // the canonical value. For alt-only markets, fall back to the alt line whose
-  // price is closest to -110 (the most fairly-priced line).
   const dotLineValue = group.standardLines.length > 0
     ? group.standardLines[0].lineValue
     : (postedAltLine(group.altLines)?.lineValue ?? 0);
-
-  // Strip cell display: same logic — standard if available, best alt otherwise.
-  const displayedLine = group.standardLines.length > 0
-    ? group.standardLines[0]
-    : postedAltLine(group.altLines);
 
   const showAltSection = !group.altOnly && group.altLines.length > 0;
 
@@ -831,7 +822,6 @@ function TodayPropsSection({
       <div className="overflow-x-auto">
         <div className="flex w-full divide-x divide-gray-800">
           {groups.map((group) => {
-            // Strip cell: show the standard line value, falling back to best alt.
             const displayPair = group.standardLines.length > 0
               ? group.standardLines[0]
               : postedAltLine(group.altLines);
@@ -919,12 +909,14 @@ function GameTeamSelector({
   currentPlayerId,
   date,
   tab,
+  periods,
 }: {
   games: TodayGame[];
   activeGameId: string | null;
   currentPlayerId: string;
   date: string;
   tab: string;
+  periods?: string;
 }) {
   const router = useRouter();
   const [loadingTeam, setLoadingTeam] = useState<number | null>(null);
@@ -933,11 +925,12 @@ function GameTeamSelector({
 
   const activeGame = games.find((g) => g.gameId === activeGameId) ?? games[0];
 
-  function buildParams(gameId: string, playerId: string | number): string {
+  function buildParams(gameId: string): string {
     const p = new URLSearchParams();
     p.set('gameId', gameId);
     p.set('tab', tab);
     p.set('date', date);
+    if (periods) p.set('periods', periods);
     return p.toString();
   }
 
@@ -948,7 +941,7 @@ function GameTeamSelector({
       const data = await res.json();
       const players: { playerId: number; playerName: string }[] = data.players ?? [];
       if (players.length > 0) {
-        router.push(`/nba/player/${players[0].playerId}?${buildParams(gameId, players[0].playerId)}`);
+        router.push(`/nba/player/${players[0].playerId}?${buildParams(gameId)}`);
       }
     } catch {
       // ignore
@@ -964,7 +957,7 @@ function GameTeamSelector({
         onChange={(e) => {
           const g = games.find((x) => x.gameId === e.target.value);
           if (!g) return;
-          router.push(`/nba/player/${currentPlayerId}?${buildParams(g.gameId, currentPlayerId)}`);
+          router.push(`/nba/player/${currentPlayerId}?${buildParams(g.gameId)}`);
         }}
         className="bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1 outline-none cursor-pointer"
       >
@@ -1058,9 +1051,10 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   const router       = useRouter();
   const searchParams = useSearchParams();
 
-  const backGameId = searchParams.get('gameId');
-  const backDate   = searchParams.get('date');
-  const oppParam   = searchParams.get('opp');
+  const backGameId  = searchParams.get('gameId');
+  const backDate    = searchParams.get('date');
+  const oppParam    = searchParams.get('opp');
+  const periodsParam = searchParams.get('periods') ?? undefined;
 
   const gradeDate = backDate ?? todayLocal();
 
@@ -1271,7 +1265,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
   useEffect(() => { persistedPropsExpanded.current = propsExpanded; }, [propsExpanded]);
 
   // gradeMap: gameId -> marketKey -> { lineValue, outcomeName }
-  // player-grades already deduplicates to one row per (gameId, marketKey).
   const gradeMap = useMemo(() => {
     const m = new Map<string, Map<string, { lineValue: number; outcomeName: string }>>();
     for (const g of grades) {
@@ -1353,10 +1346,6 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
     });
   }
 
-  // Returns color class for a stat vs the graded line for that game.
-  // green  = stat > line (hit)
-  // red    = stat <= line (miss, and a line was actually posted)
-  // gray   = no line was posted for this game/market
   function getLineCls(gameId: string, market: string, value: number): string {
     if (!showPropColors) return 'text-gray-300';
     const gameMap = gradeMap.get(gameId);
@@ -1511,7 +1500,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
           activeGameId={backGameId}
           currentPlayerId={playerId}
           date={gradeDate}
-          tab="boxscore"
+          tab="stats"
+          periods={periodsParam}
         />
 
         <span className="text-xs text-gray-600 flex-none">
