@@ -163,6 +163,20 @@ MARKET_TO_ACTUAL_COL = {
     "player_rebounds_assists_alternate":        "ra",
 }
 
+# Explicit column list for INSERT INTO common.daily_grades_archive.
+# Must match the archive table's column definition order exactly.
+# Never use SELECT dg.* here: daily_grades and daily_grades_archive may have
+# accumulated ALTER TABLE ADD columns at different points in time, so their
+# physical ordinal positions can diverge even when both have the same columns.
+_ARCHIVE_COLS = (
+    "grade_id, grade_date, event_id, game_id, player_id, player_name, "
+    "market_key, bookmaker_key, line_value, outcome_name, over_price, "
+    "hit_rate_60, hit_rate_20, sample_size_60, sample_size_20, "
+    "weighted_hit_rate, grade, trend_grade, momentum_grade, pattern_grade, "
+    "matchup_grade, regression_grade, composite_grade, hit_rate_opp, "
+    "sample_size_opp, outcome, created_at"
+)
+
 
 def get_engine(max_retries=3, retry_wait=60):
     conn_str = (
@@ -962,15 +976,20 @@ WHEN NOT MATCHED THEN INSERT(
     s.composite_grade,s.hit_rate_opp,s.sample_size_opp
 );"""))
 
-        # Archive older snapshots for any group touched by this run, then delete them
-        # from daily_grades. Each CTE-based statement must be its own execute() call
-        # because SQL Server via pyodbc treats each call as a separate batch, and a
-        # WITH clause must be the first statement in its batch.
+        # Archive older snapshots for any group touched by this run, then prune them
+        # from daily_grades. Two separate execute() calls are required because SQL Server
+        # via pyodbc treats each call as a single batch, and a WITH clause must be the
+        # first statement in its batch.
+        #
+        # The INSERT uses an explicit column list (_ARCHIVE_COLS) rather than SELECT dg.*
+        # because daily_grades and daily_grades_archive may have accumulated ALTER TABLE ADD
+        # columns at different points in time, causing their physical ordinal positions to
+        # diverge. An explicit list is immune to that.
         if conn.execute(text(
             "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
             "WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive'"
         )).scalar():
-            conn.execute(text("""
+            conn.execute(text(f"""
 WITH affected AS (
     SELECT DISTINCT grade_date, event_id, player_id, market_key,
                     bookmaker_key, line_value, outcome_name
@@ -991,8 +1010,8 @@ ranked AS (
        AND a.bookmaker_key=dg.bookmaker_key AND a.line_value=dg.line_value
        AND a.outcome_name=dg.outcome_name
 )
-INSERT INTO common.daily_grades_archive
-SELECT dg.*, SYSUTCDATETIME() AS archived_at
+INSERT INTO common.daily_grades_archive ({_ARCHIVE_COLS}, archived_at)
+SELECT {_ARCHIVE_COLS}, SYSUTCDATETIME()
   FROM common.daily_grades dg
   JOIN ranked r ON r.grade_id = dg.grade_id
  WHERE r.rn > 1;
