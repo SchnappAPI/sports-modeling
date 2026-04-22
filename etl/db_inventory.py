@@ -6,21 +6,40 @@ conn = pyodbc.connect(
     "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
 )
 cur = conn.cursor()
+def p(label, q):
+    print(f"\n=== {label} ===")
+    cur.execute(q)
+    for r in cur.fetchall(): print(r)
 
-# Delete the NBA 2025 discover cursor so the next discover run starts from
-# today and walks backward through Apr 4-22 (the gap).
-cur.execute("""
-    DELETE FROM odds.discover_cursors
-    WHERE sport_key = 'basketball_nba' AND season_year = 2025
+p("both archives: exist?", """
+SELECT TABLE_SCHEMA, TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE (TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive')
+   OR (TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props_archive')
 """)
-print(f"Deleted {cur.rowcount} cursor row(s).")
 
-conn.commit()
+p("row counts", """
+SELECT 'upp' AS t, COUNT(*) FROM odds.upcoming_player_props
+UNION ALL
+SELECT 'player_props', COUNT(*) FROM odds.player_props
+UNION ALL
+SELECT 'dg', COUNT(*) FROM common.daily_grades
+UNION ALL
+SELECT 'dg_archive', COUNT(*) FROM common.daily_grades_archive
+""")
 
-# Confirm
-cur.execute("SELECT sport_key, season_year, oldest_snapshot_ts FROM odds.discover_cursors WHERE sport_key='basketball_nba'")
-for r in cur.fetchall():
-    print(r)
+p("player_props coverage by sport", """
+SELECT sport_key,
+    MIN(CAST(egm.game_date AS DATE)) AS min_date,
+    MAX(CAST(egm.game_date AS DATE)) AS max_date,
+    COUNT(DISTINCT egm.game_id) AS games
+FROM odds.player_props pp
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pp.bookmaker_key = 'fanduel'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key NOT LIKE '%alternate%'
+GROUP BY pp.sport_key
+ORDER BY pp.sport_key
+""")
 
 conn.close()
-print("Done.")
