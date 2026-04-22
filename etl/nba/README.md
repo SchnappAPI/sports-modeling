@@ -56,7 +56,7 @@ Order of operations across workflows:
 
 - `upcoming` - grade today's standard + alternate lines, Over and Under
 - `intraday` - re-grade only player-market pairs whose posted line has moved since last grade (used by `refresh-data.yml`)
-- `backfill` - grade historical dates in batches; re-dispatches itself until `nothing to do`
+- `backfill` - grade historical dates in batches; re-dispatches itself until `nothing to do`. Accepts `--force` to remove the `NOT EXISTS` skip filter so already-graded dates re-grade in place via the MERGE UPDATE path. Used when a new grade column is added and existing rows must be refilled (ADR-0017 opportunity backfill, ADR-20260422-1)
 - `outcomes` - pure SQL `UPDATE` to set `outcome` = `'Won'` / `'Lost'` on resolved rows
 
 `_common_grade_data` returns a 7-tuple: `(history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns, opp_df)`. `patterns` is the personal pattern table keyed by `(player_id, market_key, line_value)`; `opp_df` is the per-game opportunity frame used by the opportunity grades. Never revert to a 5-tuple or 6-tuple form.
@@ -184,6 +184,7 @@ Do not revert these without a superseding ADR.
 - `_common_grade_data` returns a 7-tuple; the seventh element is `opp_df`. Do not revert to 6-tuple.
 - `MARKET_OPP_COMPONENTS` is the single source of truth for which components contribute to which market's opportunity metric. Modify only alongside a CHANGELOG note.
 - Opportunity grading uses `groupby().transform()` (pandas 3.x safe); never use `groupby(group_keys=False).apply()`, which drops the grouping column in pandas 3.x.
+- `grade_props.py --mode backfill --force` re-grades already-graded dates via MERGE UPDATE. The archive trigger in `upsert_grades` preserves old row versions. Use only when a new component requires refilling historical rows; omit `--force` for normal nightly backfill of newly-resolved dates.
 
 Active NBA workflows:
 

@@ -28,7 +28,7 @@ Newest entry goes at the top.
 
 2. If an invariant was added or changed, use `str_replace` on the INVARIANTS section of the relevant component README. Do not rewrite the whole file.
 
-3. If a non-obvious decision was made, append to `/docs/DECISIONS.md` as a new ADR with the next sequential number. ADRs are append-only and never rewritten.
+3. If a non-obvious decision was made, append to `/docs/DECISIONS.md` as a new ADR. New ADRs use date-based identifiers: `ADR-YYYYMMDD-N` where `N` starts at `1` and increments for multiple ADRs on the same day. Grep the file for `^## ADR-YYYYMMDD-` with today's date to find the next unused counter. ADRs 0001-0019 use the legacy sequential scheme and stay as-is. ADRs are append-only and never rewritten; see `docs/DECISIONS.md` numbering-scheme note for full context.
 
 4. Execute any other owed updates per the mid-session signals table in `/docs/skills/session-protocol.md` (infrastructure changes, schema changes, roadmap shifts, connection changes).
 
