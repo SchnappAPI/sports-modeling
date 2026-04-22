@@ -3,11 +3,12 @@ import mssql from 'mssql';
 import { getPool } from '@/lib/db';
 
 // Returns the canonical FanDuel posted line per game per market for a player.
-// Used by the player game log to colour-code stat values vs prop lines.
+// Used by the player game log to colour-code stat values vs prop lines and to
+// populate the per-game prop expand panel.
 //
-// Only standard (non-alternate) market rows are returned. There should be
-// exactly one standard row per player/game/market. Alternate market rows are
-// excluded because they are not the line being compared against in the game log.
+// Only standard (non-alternate) Over rows are returned. One row per
+// player/game/market. Alternate rows are excluded because the standard line is
+// the canonical reference for both coloring and the expand panel.
 export async function GET(req: NextRequest) {
   const playerIdRaw = req.nextUrl.searchParams.get('playerId');
   if (!playerIdRaw) {
@@ -24,13 +25,15 @@ export async function GET(req: NextRequest) {
       .input('playerId', mssql.Int, playerId)
       .query(
         `SELECT
-           egm.game_id   AS gameId,
-           dg.market_key AS marketKey,
-           dg.line_value AS lineValue
+           egm.game_id    AS gameId,
+           dg.market_key  AS marketKey,
+           dg.line_value  AS lineValue,
+           dg.outcome_name AS outcomeName
          FROM common.daily_grades dg
          JOIN odds.event_game_map egm ON egm.event_id = dg.event_id
          WHERE dg.player_id     = @playerId
            AND dg.bookmaker_key = 'fanduel'
+           AND dg.outcome_name  = 'Over'
            AND dg.market_key NOT LIKE '%_alternate'
          ORDER BY egm.game_id, dg.market_key`
       );
