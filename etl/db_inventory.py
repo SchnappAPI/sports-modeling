@@ -11,43 +11,35 @@ def p(label, q):
     cur.execute(q)
     for r in cur.fetchall(): print(r)
 
-p("discover_cursors", """
-SELECT sport_key, season_year, oldest_snapshot_ts, snapshots_walked, events_found, last_walked_at
-FROM odds.discover_cursors
-ORDER BY sport_key, season_year
+p("both archives: exist?", """
+SELECT TABLE_SCHEMA, TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE (TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades_archive')
+   OR (TABLE_SCHEMA='odds' AND TABLE_NAME='upcoming_player_props_archive')
 """)
 
-p("discovered_events date range by sport/season", """
-SELECT sport_key, season_year,
-    MIN(CAST(commence_time AS DATE)) AS min_date,
-    MAX(CAST(commence_time AS DATE)) AS max_date,
-    COUNT(*) AS total_events
-FROM odds.discovered_events
-GROUP BY sport_key, season_year
-ORDER BY sport_key, season_year
+p("row counts", """
+SELECT 'upp' AS t, COUNT(*) FROM odds.upcoming_player_props
+UNION ALL
+SELECT 'player_props', COUNT(*) FROM odds.player_props
+UNION ALL
+SELECT 'dg', COUNT(*) FROM common.daily_grades
+UNION ALL
+SELECT 'dg_archive', COUNT(*) FROM common.daily_grades_archive
 """)
 
-p("events loaded vs discovered for NBA 2024", """
-SELECT
-    (SELECT COUNT(*) FROM odds.discovered_events WHERE sport_key='basketball_nba' AND season_year=2024) AS discovered,
-    (SELECT COUNT(*) FROM odds.events WHERE sport_key='basketball_nba' AND season_year=2024) AS loaded,
-    (SELECT MAX(CAST(commence_time AS DATE)) FROM odds.events WHERE sport_key='basketball_nba' AND season_year=2024) AS max_loaded_date
-""")
-
-p("discovered NBA 2024 events NOT yet loaded (oldest 20)", """
-SELECT TOP 20 de.event_id, CAST(de.commence_time AS DATE) AS game_date, de.away_team, de.home_team
-FROM odds.discovered_events de
-WHERE de.sport_key = 'basketball_nba' AND de.season_year = 2024
-  AND NOT EXISTS (SELECT 1 FROM odds.events e WHERE e.event_id = de.event_id)
-ORDER BY de.commence_time ASC
-""")
-
-p("discovered NBA 2024 events NOT yet loaded (newest 20)", """
-SELECT TOP 20 de.event_id, CAST(de.commence_time AS DATE) AS game_date, de.away_team, de.home_team
-FROM odds.discovered_events de
-WHERE de.sport_key = 'basketball_nba' AND de.season_year = 2024
-  AND NOT EXISTS (SELECT 1 FROM odds.events e WHERE e.event_id = de.event_id)
-ORDER BY de.commence_time DESC
+p("player_props coverage by sport", """
+SELECT sport_key,
+    MIN(CAST(egm.game_date AS DATE)) AS min_date,
+    MAX(CAST(egm.game_date AS DATE)) AS max_date,
+    COUNT(DISTINCT egm.game_id) AS games
+FROM odds.player_props pp
+JOIN odds.event_game_map egm ON egm.event_id = pp.event_id
+WHERE pp.bookmaker_key = 'fanduel'
+  AND pp.outcome_name = 'Over'
+  AND pp.market_key NOT LIKE '%alternate%'
+GROUP BY pp.sport_key
+ORDER BY pp.sport_key
 """)
 
 conn.close()
