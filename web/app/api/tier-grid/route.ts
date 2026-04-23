@@ -151,7 +151,7 @@ export async function GET(req: NextRequest) {
         eventId: string | null;
       }>(`
         SELECT
-          CAST(s.game_date AS DATE) AS gameDate,
+          CONVERT(VARCHAR(10), s.game_date, 23) AS gameDate,
           s.home_team_id             AS homeTeamId,
           s.away_team_id             AS awayTeamId,
           ht.team_tricode            AS homeAbbr,
@@ -265,7 +265,7 @@ export async function GET(req: NextRequest) {
             SELECT
               pbs.player_id                         AS playerId,
               pbs.game_id                           AS gameId,
-              CAST(s.game_date AS DATE)             AS gameDate,
+              CONVERT(VARCHAR(10), s.game_date, 23)   AS gameDate,
               CASE
                 WHEN pbs.team_id = s.home_team_id THEN at2.team_tricode
                 ELSE ht2.team_tricode
