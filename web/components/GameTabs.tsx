@@ -7,6 +7,7 @@ import StatsTable from './StatsTable';
 import BoxScoreTable from './BoxScoreTable';
 import LiveBoxScore from './LiveBoxScore';
 import MatchupGrid from './MatchupGrid';
+import TrendsGrid from './TrendsGrid';
 import PropMatrix, { type MatrixRow } from './PropMatrix';
 
 interface Props {
@@ -19,18 +20,19 @@ interface Props {
   gameStatus: number | null;
 }
 
-type Tab = 'roster' | 'stats' | 'boxscore' | 'live' | 'matchups' | 'props';
+type Tab = 'roster' | 'stats' | 'boxscore' | 'live' | 'matchups' | 'props' | 'trends';
 
 function getTabs(isLive: boolean): Tab[] {
   return isLive
-    ? ['live', 'roster', 'matchups', 'props', 'stats', 'boxscore']
-    : ['roster', 'matchups', 'props', 'stats', 'boxscore'];
+    ? ['live', 'roster', 'matchups', 'trends', 'props', 'stats', 'boxscore']
+    : ['roster', 'matchups', 'trends', 'props', 'stats', 'boxscore'];
 }
 
 const TAB_LABELS: Record<Tab, string> = {
   live:     'Live',
   roster:   'Roster',
   matchups: 'Matchups',
+  trends:   'Trends',
   props:    'Props',
   stats:    'Stats',
   boxscore: 'Box Score',
@@ -110,6 +112,14 @@ export default function GameTabs({
       )}
       {activeTab === 'matchups' && (
         <MatchupGrid
+          gameId={gameId}
+          homeTeamAbbr={homeTeamAbbr}
+          awayTeamAbbr={awayTeamAbbr}
+          selectedDate={selectedDate}
+        />
+      )}
+      {activeTab === 'trends' && (
+        <TrendsGrid
           gameId={gameId}
           homeTeamAbbr={homeTeamAbbr}
           awayTeamAbbr={awayTeamAbbr}

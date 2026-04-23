@@ -16,10 +16,11 @@ Components (standalone `.tsx` files):
 - `RosterTable.tsx` - per-game roster view including starter/bench split and Confirmed badge
 - `BoxScoreTable.tsx` - per-game player box score with period filter
 - `MatchupGrid.tsx` - two defense panels side by side on the game Matchups tab
+- `TrendsGrid.tsx` - per-game tier-line grid on the Trends tab (see ADR-20260423-1 and `/api/tier-grid`)
 - `MatchupDefense.tsx` - VS Defense panel on the player page
 - `LiveBoxScore.tsx` - live score header + starter/bench split, refreshes every 30s
 - `GameStrip.tsx` - game list with live/final scores or spread-and-total for upcoming
-- `GameTabs.tsx` - tab container for the game page (includes Matchups tab via `MatchupGrid`)
+- `GameTabs.tsx` - tab container for the game page (includes Matchups via `MatchupGrid`, Trends via `TrendsGrid`)
 - `PropMatrix.tsx` - At-a-Glance matrix view
 - `HelpPanel.tsx` - `?` button content in the At-a-Glance header
 - `RefreshDataButton.tsx` - admin-only four-step refresh trigger. Requires `ADMIN_REFRESH_CODE`
