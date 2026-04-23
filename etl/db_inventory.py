@@ -12,54 +12,33 @@ def out(s=""):
     print(s)
     lines.append(s)
 
-out("=== Query 1: per-date NULL counts (game_date >= 2025-10-21) ===")
+out("=== common.daily_grades columns ===")
 cur.execute("""
-SELECT game_date,
-       COUNT(*) AS total_rows,
-       SUM(CASE WHEN opportunity_short_grade IS NULL THEN 1 ELSE 0 END) AS null_opp_short,
-       SUM(CASE WHEN opportunity_expected_grade IS NULL THEN 1 ELSE 0 END) AS null_opp_expected,
-       SUM(CASE WHEN composite_grade IS NULL THEN 1 ELSE 0 END) AS null_composite
-FROM common.daily_grades
-WHERE game_date >= '2025-10-21'
-GROUP BY game_date
-ORDER BY game_date;
+SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades'
+ORDER BY ORDINAL_POSITION;
 """)
-rows = cur.fetchall()
-out(f"{'game_date':<12} {'total':>8} {'null_opp_short':>16} {'null_opp_exp':>14} {'null_comp':>11}")
-for r in rows:
-    out(f"{str(r[0]):<12} {r[1]:>8} {r[2]:>16} {r[3]:>14} {r[4]:>11}")
-out(f"TOTAL DATES: {len(rows)}")
+for r in cur.fetchall():
+    out(f"  {r[0]:<40} {r[1]:<20} {r[2]}")
 
 out("")
-out("=== Query 2: dates with null opp_expected but populated composite ===")
+out("=== candidate date columns: min / max ===")
 cur.execute("""
-SELECT COUNT(DISTINCT game_date) AS dates_with_null_opp_but_populated_composite
-FROM common.daily_grades
-WHERE opportunity_expected_grade IS NULL
-  AND composite_grade IS NOT NULL
-  AND game_date >= '2025-10-21';
+SELECT COLUMN_NAME
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA='common' AND TABLE_NAME='daily_grades'
+  AND (DATA_TYPE IN ('date','datetime','datetime2','smalldatetime')
+       OR COLUMN_NAME LIKE '%date%' OR COLUMN_NAME LIKE '%day%');
 """)
-result = cur.fetchone()[0]
-out(f"dates_with_null_opp_but_populated_composite: {result}")
-
-out("")
-out("=== Query 3: overall row-level null_opp_exp but populated composite count ===")
-cur.execute("""
-SELECT
-  SUM(CASE WHEN opportunity_expected_grade IS NULL AND composite_grade IS NOT NULL THEN 1 ELSE 0 END) AS rows_null_opp_but_populated_comp,
-  SUM(CASE WHEN opportunity_expected_grade IS NOT NULL THEN 1 ELSE 0 END) AS rows_opp_populated,
-  SUM(CASE WHEN opportunity_expected_grade IS NULL THEN 1 ELSE 0 END) AS rows_opp_null,
-  COUNT(*) AS total_rows
-FROM common.daily_grades
-WHERE game_date >= '2025-10-21';
-""")
-r = cur.fetchone()
-out(f"rows_null_opp_but_populated_comp: {r[0]}")
-out(f"rows_opp_populated:               {r[1]}")
-out(f"rows_opp_null:                    {r[2]}")
-out(f"total_rows:                       {r[3]}")
+for r in cur.fetchall():
+    col = r[0]
+    cur2 = conn.cursor()
+    cur2.execute(f"SELECT MIN([{col}]), MAX([{col}]), COUNT(DISTINCT [{col}]) FROM common.daily_grades;")
+    mn, mx, nd = cur2.fetchone()
+    out(f"  {col}: min={mn} max={mx} distinct={nd}")
 
 conn.close()
 
-with open("/tmp/step1_audit_output.txt", "w") as f:
+with open("/tmp/schema_probe_output.txt", "w") as f:
     f.write("\n".join(lines) + "\n")
