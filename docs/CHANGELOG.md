@@ -83,3 +83,5 @@ Historical entries from before the documentation restructure are preserved at `/
 2026-04-20 [shared][docs] Completed /docs/ Step 2: added PRODUCT_BLUEPRINT, CONNECTIONS, GLOSSARY, ROADMAP. Central /docs/ folder is now complete; component README scaffolding starts in Step 3.
 
 2026-04-20 [shared][docs] Created /docs/ foundation: README router, SESSION_PROTOCOL, CHANGELOG (this file), DECISIONS with ADRs 0001-0004. Legacy PROJECT_REFERENCE.md and root CHANGELOG.md remain in place during migration. See /docs/DECISIONS.md ADR-0001.
+
+2026-04-23 [infra][database] Paused Uptime Robot monitor `schnapp-bet-ping` (was pinging https://schnapp.bet/api/ping every 30m). Monitor was preventing Azure SQL Serverless from ever reaching its auto-pause idle threshold, causing the DB to run 24/7 and bill at continuous compute rates (~$181 in April). With the monitor paused, the DB will auto-pause after 60 minutes of idle. Cold start latency (20-60s) is the accepted tradeoff. Resume the monitor if a paying user tier requires warm DB response times.
