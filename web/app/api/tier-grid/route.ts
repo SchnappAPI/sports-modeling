@@ -1,4 +1,3 @@
-// retrigger: 2026-04-23T19:38:51.558371Z
 import { NextRequest, NextResponse } from 'next/server';
 import mssql from 'mssql';
 import { getPool } from '@/lib/db';
@@ -217,6 +216,33 @@ export async function GET(req: NextRequest) {
         WHERE dl.game_id = @gameId
       `);
 
+    // 3b. Fallback player-team lookup for players with a tier row but no lineup row.
+    //     Common on playoff games before Stage 2 boxscorepreviewv3 populates.
+    //     nba.players has current-season team_id which we join to nba.teams for
+    //     the tricode. Skipped if no tier rows exist (rare).
+    const tierPlayerIds = tierRes.recordset.map(r => r.playerId);
+    let fallbackTeams: Array<{ playerId: number; teamTricode: string; position: string | null }> = [];
+    if (tierPlayerIds.length > 0) {
+      const idList = tierPlayerIds.map(n => String(n)).join(',');
+      const r = await pool.request().query<{
+        playerId: number;
+        teamTricode: string;
+        position: string | null;
+      }>(`
+        SELECT p.player_id   AS playerId,
+               t.team_tricode AS teamTricode,
+               p.position     AS position
+        FROM nba.players p
+        JOIN nba.teams t ON t.team_id = p.team_id
+        WHERE p.player_id IN (${idList})
+      `);
+      fallbackTeams = r.recordset;
+    }
+    const fallbackByPlayer = new Map<number, { teamTricode: string; position: string | null }>();
+    for (const row of fallbackTeams) {
+      fallbackByPlayer.set(row.playerId, { teamTricode: row.teamTricode, position: row.position });
+    }
+
     // 4. Standard line per (player, market) for today from odds.upcoming_player_props.
     //    Use the most recent snap_ts per player.
     let standardRows: StandardLineRow[] = [];
@@ -331,16 +357,17 @@ export async function GET(req: NextRequest) {
       const lineup = lineupByPlayer.get(pid);
       const tier = tierByPlayer.get(pid);
       const standard = standardByPlayer.get(pid);
+      const fallback = fallbackByPlayer.get(pid);
       const gameLog = logsByPlayer.get(pid) ?? [];
       // Prefer tier player_name (always present when tier row exists); fall
-      // back to lineup (may be missing diacritics handled differently). Tie
-      // goes to lineup because it matches display usage elsewhere.
+      // back to lineup (may differ on diacritics). Default so the UI never
+      // shows an empty cell.
       const playerName = lineup?.playerName ?? tier?.playerName ?? 'Unknown';
       return {
         playerId:       pid,
         playerName,
-        teamTricode:    lineup?.teamTricode ?? null,
-        position:       lineup?.position ?? null,
+        teamTricode:    lineup?.teamTricode ?? fallback?.teamTricode ?? null,
+        position:       lineup?.position ?? fallback?.position ?? null,
         lineupStatus:   lineup?.lineupStatus ?? null,
         starterStatus:  lineup?.starterStatus ?? null,
         compositeGrade: tier?.compositeGrade ?? null,
