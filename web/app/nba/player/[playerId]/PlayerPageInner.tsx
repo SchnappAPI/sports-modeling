@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import MatchupDefense from '@/components/MatchupDefense';
@@ -1704,9 +1704,8 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
               const rowBgCls = isExpanded ? 'bg-gray-900/40' : '';
 
               return (
-                <>
+                <React.Fragment key={g.gameId}>
                   <tr
-                    key={g.gameId}
                     className={`${rowBorderCls} ${rowBgCls} cursor-pointer hover:bg-gray-900/30 transition-colors`}
                     onClick={() => setExpandedGameId(isExpanded ? null : g.gameId)}
                   >
@@ -1790,7 +1789,7 @@ export default function PlayerPageInner({ playerId }: { playerId: string }) {
                       colSpan={logColCount}
                     />
                   )}
-                </>
+                </React.Fragment>
               );
             })}
           </tbody>
