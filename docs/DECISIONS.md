@@ -459,3 +459,32 @@ Date: 2026-04-22
 - No workflow or code change is made by this ADR. It is documentation of an operational fact.
 
 **Supersedes.** Nothing at the repo level. Effectively retires a user-memory-only instruction that had no codified presence in `/docs/` or in any component README.
+
+---
+
+## ADR-20260423-1 [nba][grading] Composite formula reweighted to momentum/hr60/pattern; other components stored as context only
+
+Date: 2026-04-23
+
+**Context.** The existing composite grade averaged all non-null components with equal weight: hit rate, trend, momentum, pattern, matchup, regression, and (from ADR-0017) four opportunity grades. Grade-outcome correlation analysis on 1.04M resolved rows found that only two components have meaningful predictive lift: momentum_grade (28-point Won-vs-Lost gap) and hit_rate_60 (25-point gap). Pattern_grade has a 3-point gap and is retained as a tiebreaker and context signal. All other components — matchup (1.1 gap), regression (slightly negative), trend (effectively zero vs the standard line), all six opportunity grades (0.1 or less) — diluted the composite by pulling it toward 50 and caused the grade 90-100 bucket to collapse (hitting at only 46.4% under the old equal-weight formula, worse than grade 70-80).
+
+**Decision.** Rewrite `compute_composite` signature to three arguments: `compute_composite(momentum, hit_rate_60, pattern)`. New weights: 40% momentum + 40% (hit_rate_60 * 100) + 20% pattern. Renormalize when any component is NULL so partial availability still produces a valid 0-100 value. All removed components (matchup, regression, trend, all six opportunity grades) remain computed and written to `common.daily_grades` as context columns — they are useful for display and future analysis but must not re-enter the composite mean without fresh calibration evidence.
+
+**Calibration evidence.** Ran scipy gaussian_kde calibration on 94,029 records. Shift amplitude of -0.019 produces log-loss improvement of 0.000012 over zero shift — negligible. The correct mechanism for incorporating confidence is grade-weighted lookback window selection for KDE tier computation (see tier lines below), not location-shifting the distribution.
+
+New composite grade vs actual hit rate with the reweighted formula (monotonic, no collapse):
+- Grade 0-10: 20.8%, grade 40-50: 46.0%, grade 60-70: 60.9%, grade 80-90: 74.8%, grade 90-100: 82.4%
+
+**Tier lines.** Added `compute_kde_tier_lines` and `common.player_tier_lines` table. KDE fitted on grade-weighted game log window (15 games composite>=80, 30 games 50-79, full season <50; normal dist fallback when n<10). Reflection boundary at 0 prevents negative-stat probability mass. Tier cutoffs: safe>=80%, value>=58%, high_risk>=28% with +150 or better market price, lotto>=7% with +400 or better and composite>=50. Blowout dampening applied at 50% of historical pts delta when spread>=10.5 for pts/combo markets.
+
+**Why not equal-weight all non-null components.** The former equal-weight approach implicitly assumed each component carries equal signal. Calibration falsified this: matchup, regression, and trend variance across players closely follows random noise at the 0-1 gap range. Including them adds asymmetric downward pressure (they pull everything toward 50) for zero lift. When those components are near 50 (neutral) they are harmless; when a player has an extreme value on a noisy component it introduces a false signal.
+
+**Consequences.**
+
+- `compute_composite` in `grade_props.py` now takes exactly three arguments. Any caller that passes the old 10-argument signature will get a TypeError. The backfill run re-grades all 174 historical dates to populate `composite_grade` under the new formula.
+- `common.player_tier_lines` is a new table (one row per player-market-game-date). Web consumers should read this table for tier line display rather than computing tiers client-side.
+- The six opportunity grades and matchup/regression/trend columns remain on `common.daily_grades`. They are available for future exploration but are not in the composite. Adding any of them back to the composite requires calibration evidence showing positive lift.
+- Blowout dampening is applied at 50% of the historical player delta, not 100%, to avoid over-penalizing a single game context. The 50% factor should be revisited once enough blowout-game outcomes have been resolved under the new tier framework.
+- `fetch_player_blowout_profiles` requires `nba.games` to have `home_score`, `away_score`, `home_team_tricode`, `away_team_tricode` columns. These come from the CDN box score writer; their presence should be verified before any environment migration.
+
+**Supersedes.** The equal-weight composite from ADR-0005 is superseded for composite_grade computation. ADR-0005's UNIQUE key and schema definitions remain in force.

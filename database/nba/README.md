@@ -81,6 +81,25 @@ Rules:
 - Reference point: 27,765 rows on 2026-04-10
 - Any aggregate of `is_*` columns must use `SUM(CAST(col AS INT))`
 
+### `common.player_tier_lines` (added 2026-04-23)
+
+PK `tier_id` IDENTITY. UNIQUE on `(grade_date, game_id, player_id, market_key)`. One row per player-market-game-date.
+
+Columns: `composite_grade`, `kde_window INT` (15/30/82 = lookback games used), `blowout_dampened BIT`, `safe_line / safe_prob`, `value_line / value_prob`, `highrisk_line / highrisk_prob / highrisk_price`, `lotto_line / lotto_prob / lotto_price`, `created_at`.
+
+Tier definitions (calibrated 2026-04-23):
+
+- **Safe**: P(stat > line) >= 0.80 from KDE on grade-weighted game log
+- **Value**: P >= 0.58, line above safe_line
+- **High Risk**: P >= 0.28, market price >= +150 available
+- **Lotto**: P >= 0.07, market price >= +400 available, composite_grade >= 50
+
+KDE window: composite >= 80 uses last 15 games (player peaking), 50-79 uses last 30 games, < 50 uses full season. Normal dist fallback when n < 10. Reflection boundary at 0 prevents negative-stat probability mass.
+
+Written by `grade_props.py` via `upsert_tier_lines` during all grading modes (upcoming, intraday, backfill). Over rows only. NULL tier values mean no qualifying market price exists at that threshold for this player-market.
+
+Reference point: populated for all 174 historical dates by backfill run 2026-04-23.
+
 ### Other `common` tables
 
 - `common.user_codes`, `common.user_activations`, `common.demo_config` - passcode auth and demo mode (demo codes fix to 2026-03-30; live codes unrestricted)
