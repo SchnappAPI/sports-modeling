@@ -12,6 +12,7 @@ Deliberately brief. Detailed task tracking lives in component READMEs under "Ope
 
 ## Next up
 
+- **NBA Trends Grid**. New third tab on `/nba/game/[gameId]` alongside Box Score and Matchups. Surfaces `common.player_tier_lines` (populated by ADR-20260423-1 grading rewrite) as a per-game grid showing each player's Safe / Value / High Risk / Lotto line values for the selected market, plus their per-game stat history with hit/miss indicators against the currently-posted FanDuel line. Row groups by team and lineup status (Starters, Bench, Inactive). Stat and game-window toggles. Period toggle (Q1, Q2, etc.) affects hit/miss on game columns only; tier line values stay full-game. API route `/api/tier-grid` first, then `TierGrid.tsx`, then wire into game page tab switcher. See `web/nba/README.md` once built.
 - **MLB Player Analysis page**. Fourth ADR-0003 page. Partially data-unblocked (at-bat access and career BvP access both live) but the core trend/pattern visuals need `player_trend_stats` first, so this is blocked on ETL. Could start the page shell without those visuals if the priority shifts.
 - **MLB `player_trend_stats` materialization**. Highest-value remaining derived entity; unblocks Player Analysis. Likely staged-MERGE pattern like career-BvP since rolling windows recompute as new games land.
 - **NFL web surface**. ETL is live but no web layer exists yet. Parallel design session like the MLB visual catalog: identify what visuals matter, what stats feed them, what the pre-aggregation layer needs to produce. See `web/nfl/README.md`.
