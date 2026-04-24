@@ -1,0 +1,36 @@
+name: Rebuild tier_lines last 30 days
+on:
+  workflow_dispatch:
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+jobs:
+  step1-delete:
+    runs-on: [self-hosted, schnapp-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+      - name: Delete tier_lines in last 30 days
+        run: |
+          python << 'PYEOF'
+          from etl.db import get_engine
+          from sqlalchemy import text
+          eng = get_engine()
+          with eng.begin() as conn:
+              before = conn.execute(text("""
+                  SELECT COUNT(*) FROM common.player_tier_lines
+                  WHERE grade_date >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
+              """)).scalar()
+              print(f"tier_lines rows in last 30d before delete: {before}")
+              conn.execute(text("""
+                  DELETE FROM common.player_tier_lines
+                  WHERE grade_date >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
+              """))
+              after = conn.execute(text("""
+                  SELECT COUNT(*) FROM common.player_tier_lines
+                  WHERE grade_date >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
+              """)).scalar()
+              print(f"rows after delete: {after}")
+          PYEOF
