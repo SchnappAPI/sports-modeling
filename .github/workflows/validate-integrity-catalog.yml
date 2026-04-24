@@ -64,6 +64,7 @@ jobs:
                   missing = sorted(c for c in referenced if c.lower() not in actual)
                   if missing:
                       problems.append(f'{table_name}: referenced columns not in DB: {missing}')
+                      problems.append(f'{table_name}: actual columns: {sorted(actual)}')
 
           # ----- RELATIONAL_CHECKS: SQL syntax via SET PARSEONLY ON -----
           with engine.connect() as conn:
