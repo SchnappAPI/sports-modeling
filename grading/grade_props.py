@@ -468,6 +468,10 @@ CREATE TABLE common.player_tier_lines(
     lotto_line        DECIMAL(6,1)  NULL,
     lotto_prob        FLOAT         NULL,
     lotto_price       INT           NULL,
+    safe_ev           FLOAT         NULL,
+    value_ev          FLOAT         NULL,
+    highrisk_ev       FLOAT         NULL,
+    lotto_ev          FLOAT         NULL,
     created_at        DATETIME2     NOT NULL DEFAULT GETUTCDATE(),
     CONSTRAINT pk_player_tier_lines PRIMARY KEY (tier_id),
     CONSTRAINT uq_player_tier_lines UNIQUE (
@@ -475,6 +479,14 @@ CREATE TABLE common.player_tier_lines(
     )
 )
 """))
+
+        # Additive: ensure *_ev columns exist on pre-existing tables.
+        for _col in ("safe_ev", "value_ev", "highrisk_ev", "lotto_ev"):
+            conn.execute(text(
+                f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_SCHEMA='common' AND TABLE_NAME='player_tier_lines' AND COLUMN_NAME='{_col}') "
+                f"ALTER TABLE common.player_tier_lines ADD {_col} FLOAT NULL"
+            ))
 
     log.info("Schema verified.")
 
@@ -549,10 +561,10 @@ def compute_kde_tier_lines(
       - Applies isotonic calibrator to tier probabilities.
     """
     result = {
-        "safe_line": None, "safe_prob": None, "safe_price": None,
-        "value_line": None, "value_prob": None, "value_price": None,
-        "highrisk_line": None, "highrisk_prob": None, "highrisk_price": None,
-        "lotto_line": None, "lotto_prob": None, "lotto_price": None,
+        "safe_line": None, "safe_prob": None, "safe_price": None, "safe_ev": None,
+        "value_line": None, "value_prob": None, "value_price": None, "value_ev": None,
+        "highrisk_line": None, "highrisk_prob": None, "highrisk_price": None, "highrisk_ev": None,
+        "lotto_line": None, "lotto_prob": None, "lotto_price": None, "lotto_ev": None,
         "safe_hits_all": None, "safe_games_all": None, "safe_hits_20": None, "safe_games_20": None,
         "value_hits_all": None, "value_games_all": None, "value_hits_20": None, "value_games_20": None,
         "highrisk_hits_all": None, "highrisk_games_all": None, "highrisk_hits_20": None, "highrisk_games_20": None,
@@ -627,6 +639,22 @@ def compute_kde_tier_lines(
                 return round(float(p), 4)
         return round(float(p), 4)
 
+    # Per-dollar EV from calibrated tier prob and American odds price.
+    # +X: EV = P*(X/100) - (1-P);  -X: EV = P*(100/abs(X)) - (1-P).
+    def _ev(prob, price):
+        if prob is None or price is None:
+            return None
+        try:
+            p_ = float(prob)
+            x_ = int(price)
+        except (TypeError, ValueError):
+            return None
+        if x_ == 0:
+            return None
+        if x_ > 0:
+            return round(p_ * (x_ / 100.0) - (1.0 - p_), 4)
+        return round(p_ * (100.0 / abs(x_)) - (1.0 - p_), 4)
+
     # Hit stats for the picked line, computed from full stat_values (not windowed)
     all_arr = np.asarray(stat_values, dtype=float)
     all_arr = all_arr[~np.isnan(all_arr)]
@@ -647,6 +675,7 @@ def compute_kde_tier_lines(
         result["safe_line"] = line
         result["safe_prob"] = _cal(prob)
         result["safe_price"] = price_lookup.get(line)
+        result["safe_ev"] = _ev(result["safe_prob"], result["safe_price"])
         h = _hits(line)
         result["safe_hits_all"]  = h["hits_all"]
         result["safe_games_all"] = h["games_all"]
@@ -662,6 +691,7 @@ def compute_kde_tier_lines(
         result["value_line"] = line
         result["value_prob"] = _cal(prob)
         result["value_price"] = price_lookup.get(line)
+        result["value_ev"] = _ev(result["value_prob"], result["value_price"])
         h = _hits(line)
         result["value_hits_all"]  = h["hits_all"]
         result["value_games_all"] = h["games_all"]
@@ -687,6 +717,7 @@ def compute_kde_tier_lines(
             result["highrisk_line"]  = line
             result["highrisk_prob"]  = _cal(prob)
             result["highrisk_price"] = closest_price
+            result["highrisk_ev"]    = _ev(result["highrisk_prob"], result["highrisk_price"])
             h = _hits(line)
             result["highrisk_hits_all"]  = h["hits_all"]
             result["highrisk_games_all"] = h["games_all"]
@@ -714,6 +745,7 @@ def compute_kde_tier_lines(
                 result["lotto_line"]  = line
                 result["lotto_prob"]  = _cal(prob)
                 result["lotto_price"] = closest_price
+                result["lotto_ev"]    = _ev(result["lotto_prob"], result["lotto_price"])
                 h = _hits(line)
                 result["lotto_hits_all"]  = h["hits_all"]
                 result["lotto_games_all"] = h["games_all"]
@@ -843,13 +875,13 @@ def upsert_tier_lines(engine, rows: list) -> int:
     ALL_COLS = [
         "grade_date", "game_id", "player_id", "player_name", "market_key",
         "composite_grade", "kde_window", "blowout_dampened",
-        "safe_line", "safe_prob", "safe_price",
+        "safe_line", "safe_prob", "safe_price", "safe_ev",
         "safe_hits_all", "safe_games_all", "safe_hits_20", "safe_games_20",
-        "value_line", "value_prob", "value_price",
+        "value_line", "value_prob", "value_price", "value_ev",
         "value_hits_all", "value_games_all", "value_hits_20", "value_games_20",
-        "highrisk_line", "highrisk_prob", "highrisk_price",
+        "highrisk_line", "highrisk_prob", "highrisk_price", "highrisk_ev",
         "highrisk_hits_all", "highrisk_games_all", "highrisk_hits_20", "highrisk_games_20",
-        "lotto_line", "lotto_prob", "lotto_price",
+        "lotto_line", "lotto_prob", "lotto_price", "lotto_ev",
         "lotto_hits_all", "lotto_games_all", "lotto_hits_20", "lotto_games_20",
         "recent_minutes_20", "recent_opportunity", "historical_opportunity",
     ]
@@ -857,13 +889,13 @@ def upsert_tier_lines(engine, rows: list) -> int:
     create_cols_sql = """
         grade_date DATE, game_id VARCHAR(15), player_id BIGINT, player_name NVARCHAR(100),
         market_key VARCHAR(100), composite_grade FLOAT, kde_window INT, blowout_dampened BIT,
-        safe_line DECIMAL(6,1), safe_prob FLOAT, safe_price INT,
+        safe_line DECIMAL(6,1), safe_prob FLOAT, safe_price INT, safe_ev FLOAT,
         safe_hits_all INT, safe_games_all INT, safe_hits_20 INT, safe_games_20 INT,
-        value_line DECIMAL(6,1), value_prob FLOAT, value_price INT,
+        value_line DECIMAL(6,1), value_prob FLOAT, value_price INT, value_ev FLOAT,
         value_hits_all INT, value_games_all INT, value_hits_20 INT, value_games_20 INT,
-        highrisk_line DECIMAL(6,1), highrisk_prob FLOAT, highrisk_price INT,
+        highrisk_line DECIMAL(6,1), highrisk_prob FLOAT, highrisk_price INT, highrisk_ev FLOAT,
         highrisk_hits_all INT, highrisk_games_all INT, highrisk_hits_20 INT, highrisk_games_20 INT,
-        lotto_line DECIMAL(6,1), lotto_prob FLOAT, lotto_price INT,
+        lotto_line DECIMAL(6,1), lotto_prob FLOAT, lotto_price INT, lotto_ev FLOAT,
         lotto_hits_all INT, lotto_games_all INT, lotto_hits_20 INT, lotto_games_20 INT,
         recent_minutes_20 FLOAT, recent_opportunity FLOAT, historical_opportunity FLOAT
     """
@@ -1861,7 +1893,7 @@ def grade_props_for_date(
             from calibrate_grades import fit_calibrator, publish_calibration_buckets
         except ImportError:
             from grading.calibrate_grades import fit_calibrator, publish_calibration_buckets
-        _cal, _buckets = fit_calibrator(engine)
+        _cal, _buckets = fit_calibrator(engine, as_of_date=grade_date_str)
         _tier_calibrator = _cal
         if _buckets is not None and len(_buckets) > 0:
             try:
@@ -2064,6 +2096,7 @@ def grade_props_for_date(
                     "safe_line":        tier["safe_line"],
                     "safe_prob":        tier["safe_prob"],
                     "safe_price":       tier["safe_price"],
+                    "safe_ev":          tier["safe_ev"],
                     "safe_hits_all":    tier["safe_hits_all"],
                     "safe_games_all":   tier["safe_games_all"],
                     "safe_hits_20":     tier["safe_hits_20"],
@@ -2071,6 +2104,7 @@ def grade_props_for_date(
                     "value_line":       tier["value_line"],
                     "value_prob":       tier["value_prob"],
                     "value_price":      tier["value_price"],
+                    "value_ev":         tier["value_ev"],
                     "value_hits_all":   tier["value_hits_all"],
                     "value_games_all":  tier["value_games_all"],
                     "value_hits_20":    tier["value_hits_20"],
@@ -2078,6 +2112,7 @@ def grade_props_for_date(
                     "highrisk_line":    tier["highrisk_line"],
                     "highrisk_prob":    tier["highrisk_prob"],
                     "highrisk_price":   tier["highrisk_price"],
+                    "highrisk_ev":      tier["highrisk_ev"],
                     "highrisk_hits_all":  tier["highrisk_hits_all"],
                     "highrisk_games_all": tier["highrisk_games_all"],
                     "highrisk_hits_20":   tier["highrisk_hits_20"],
@@ -2085,6 +2120,7 @@ def grade_props_for_date(
                     "lotto_line":       tier["lotto_line"],
                     "lotto_prob":       tier["lotto_prob"],
                     "lotto_price":      tier["lotto_price"],
+                    "lotto_ev":         tier["lotto_ev"],
                     "lotto_hits_all":   tier["lotto_hits_all"],
                     "lotto_games_all":  tier["lotto_games_all"],
                     "lotto_hits_20":    tier["lotto_hits_20"],

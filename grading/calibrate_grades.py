@@ -5,10 +5,12 @@ Per ADR-20260424-5 control 4: replace raw KDE probabilities with empirically-
 calibrated probabilities derived from historical grade -> outcome data.
 
 Entry points:
-    fit_calibrator(engine) -> (callable, DataFrame)
+    fit_calibrator(engine, as_of_date=None) -> (callable, DataFrame)
         Returns (prob -> calibrated_prob) callable and a bucket inspection
         DataFrame. Uses pool-adjacent-violators (PAV) for isotonic regression,
-        no sklearn dependency.
+        no sklearn dependency. When as_of_date is provided, only resolved
+        tier_lines/grades from grade_date < as_of_date are used (walk-forward,
+        no leakage).
 
     publish_calibration_buckets(engine, bucket_stats)
         Writes common.grade_calibration for human inspection. Idempotent.
@@ -25,8 +27,8 @@ from sqlalchemy import text
 IDENTITY: Callable[[float], float] = lambda p: p
 
 
-def fit_calibrator(engine, min_bucket_size: int = 20, bucket_width: float = 0.05
-                   ) -> Tuple[Callable[[float], float], pd.DataFrame]:
+def fit_calibrator(engine, min_bucket_size: int = 20, bucket_width: float = 0.05,
+                   as_of_date=None) -> Tuple[Callable[[float], float], pd.DataFrame]:
     """Fit an isotonic calibrator on historical tier_prob -> outcome pairs.
 
     Joins every tier prob in common.player_tier_lines with the corresponding
@@ -34,8 +36,19 @@ def fit_calibrator(engine, min_bucket_size: int = 20, bucket_width: float = 0.05
     buckets of width bucket_width, computes empirical hit rate per bucket,
     enforces non-decreasing monotonicity via PAV, interpolates between bucket
     midpoints at inference time.
+
+    When as_of_date is supplied, only rows with grade_date strictly before
+    as_of_date are considered. This prevents leakage during walk-forward
+    backfill: each grade_date sees only the calibration evidence available
+    on or before the prior day.
     """
-    query = text("""
+    as_of_filter = ""
+    params = {}
+    if as_of_date is not None:
+        as_of_filter = " AND tp.grade_date < :as_of_date AND dg.grade_date < :as_of_date"
+        params["as_of_date"] = as_of_date
+
+    query = text(f"""
         SELECT tp.raw_prob, tp.line,
                CASE WHEN dg.outcome = 'Won' THEN 1.0 ELSE 0.0 END AS hit
         FROM (
@@ -62,10 +75,10 @@ def fit_calibrator(engine, min_bucket_size: int = 20, bucket_width: float = 0.05
            AND dg.market_key = tp.market_key
            AND dg.line_value = tp.line
            AND dg.outcome_name = 'Over'
-        WHERE dg.outcome IN ('Won', 'Lost')
+        WHERE dg.outcome IN ('Won', 'Lost'){as_of_filter}
     """)
 
-    df = pd.read_sql(query, engine)
+    df = pd.read_sql(query, engine, params=params)
     if len(df) < 100:
         return IDENTITY, pd.DataFrame(columns=["bucket_min", "bucket_max", "n", "empirical_hit_rate", "isotonic_hit_rate"])
 
