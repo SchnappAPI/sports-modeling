@@ -1857,7 +1857,10 @@ def grade_props_for_date(
     # ADR-20260424-5: initialize calibrator (fit once per run) and opportunity groupings.
     _tier_calibrator = None
     try:
-        from grading.calibrate_grades import fit_calibrator, publish_calibration_buckets
+        try:
+            from calibrate_grades import fit_calibrator, publish_calibration_buckets
+        except ImportError:
+            from grading.calibrate_grades import fit_calibrator, publish_calibration_buckets
         _cal, _buckets = fit_calibrator(engine)
         _tier_calibrator = _cal
         if _buckets is not None and len(_buckets) > 0:
