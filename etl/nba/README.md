@@ -54,28 +54,30 @@ Order of operations across workflows:
 
 `grade_props.py` has four modes:
 
-- `upcoming` - grade today's standard + alternate lines, Over and Under
-- `intraday` - re-grade only player-market pairs whose posted line has moved since last grade (used by `refresh-data.yml`)
-- `backfill` - grade historical dates in batches; re-dispatches itself until `nothing to do`. Accepts `--force` to remove the `NOT EXISTS` skip filter so already-graded dates re-grade in place via the MERGE UPDATE path. Used when a new grade column is added and existing rows must be refilled (ADR-0017 opportunity backfill, ADR-20260422-1)
+- `upcoming` - grade today's standard + alternate lines, Over and Under. Also writes `common.player_tier_lines` for today's player-markets via `upsert_tier_lines`.
+- `intraday` - re-grade only player-market pairs whose posted line has moved since last grade (used by `refresh-data.yml`). Also refreshes affected tier rows.
+- `backfill` - grade historical dates in batches; re-dispatches itself until `nothing to do`. Accepts `--force` to remove the `NOT EXISTS` skip filter so already-graded dates re-grade in place via the MERGE UPDATE path. Used when a new grade column is added and existing rows must be refilled (ADR-0017 opportunity backfill, ADR-20260422-1). Also rewrites tier rows for the re-graded dates.
 - `outcomes` - pure SQL `UPDATE` to set `outcome` = `'Won'` / `'Lost'` on resolved rows
 
 `_common_grade_data` returns a 7-tuple: `(history_df, season_df, opp_info, matchup_cache, opp_history_df, patterns, opp_df)`. `patterns` is the personal pattern table keyed by `(player_id, market_key, line_value)`; `opp_df` is the per-game opportunity frame used by the opportunity grades. Never revert to a 5-tuple or 6-tuple form.
+
+`grade_props_for_date` returns a `(grade_rows, tier_rows)` tuple. `run_upcoming`, `run_intraday`, and `run_backfill` all call `upsert_grades` and `upsert_tier_lines` in sequence.
 
 ### Grade components (actual code, not description)
 
 All scores are 0-100 floats. Constants live at the top of `grade_props.py`:
 
 - `weighted_hit_rate`: `0.60 * hit_rate_20 + 0.40 * hit_rate_60` when `sample_size_20 >= MIN_SAMPLE (5)`, else `hit_rate_60` only. Stored as a probability; `grade` column is this times 100 rounded
-- `trend_grade`: `50 + (mean(last 10) - mean(last 30)) / mean(last 30) * 150`, clamped to [0, 100]. Requires at least `TREND_MIN = 3` obs
-- `momentum_grade`: reads the player's personal lag-1 transition probability from `common.player_line_patterns` and scales to 0-100. Uses `p_hit_after_hit` when the player is on a hit streak, `p_hit_after_miss` on a miss streak. Falls back to `hit_rate_60 * 100 + streak * 2` on a hit streak or `hit_rate_60 * 100` on a miss streak when no personal pattern exists. Score interpretation: 80 means an 80% personal probability of the next game hitting
-- `pattern_grade`: `pattern_strength * 300`, clamped to [0, 100], plus a sample-size bonus up to 20 points (scaling with `n` above 10). Measures how predictable the player's pattern is, not a reversal rate
-- `matchup_grade`: `(30 - defense_rank + 1) / 30 * 100`. Defense rank by position group (G/F/C) vs today's opponent. Rank 1 = most allowed = highest score
-- `regression_grade`: z-score of `last 10` vs full-season mean, transformed to `50 - z * 25` and clamped to [0, 100]
-- `composite_grade`: equal-weighted mean of all non-NULL components, with `weighted_hit_rate` multiplied by 100 first so it lives on the same 0-100 scale. Opportunity grades (below) enter the mean when populated; opportunity volume/expected stay out (they are parallel diagnostic columns)
+- `trend_grade`: `50 + (mean(last 10) - mean(last 30)) / mean(last 30) * 150`, clamped to [0, 100]. Requires at least `TREND_MIN = 3` obs. Stored as context only; NOT in composite.
+- `momentum_grade`: reads the player's personal lag-1 transition probability from `common.player_line_patterns` and scales to 0-100. Uses `p_hit_after_hit` when the player is on a hit streak, `p_hit_after_miss` on a miss streak. Falls back to `hit_rate_60 * 100 + streak * 2` on a hit streak or `hit_rate_60 * 100` on a miss streak when no personal pattern exists. Score interpretation: 80 means an 80% personal probability of the next game hitting. **In composite at 40% weight.**
+- `pattern_grade`: `pattern_strength * 300`, clamped to [0, 100], plus a sample-size bonus up to 20 points (scaling with `n` above 10). Measures how predictable the player's pattern is, not a reversal rate. **In composite at 20% weight.**
+- `matchup_grade`: `(30 - defense_rank + 1) / 30 * 100`. Defense rank by position group (G/F/C) vs today's opponent. Rank 1 = most allowed = highest score. Stored as context only; NOT in composite.
+- `regression_grade`: z-score of `last 10` vs full-season mean, transformed to `50 - z * 25` and clamped to [0, 100]. Stored as context only; NOT in composite.
+- `composite_grade` (ADR-20260423-1, **40/40/20 formula**): weighted mean = `0.40 * momentum_grade + 0.40 * (hit_rate_60 * 100) + 0.20 * pattern_grade`. Only non-NULL components contribute, weights are renormalized if any are NULL. Returns None if all three are NULL. **The old equal-weight composite of all components is gone.** Calibration found that `matchup_grade`, `regression_grade`, `trend_grade`, and all six opportunity grades (below) have near-zero predictive lift (Won-vs-Lost mean gaps of 0.1-1.1 points vs 25-28 points for momentum and hr60), so they are stored as context columns but removed from the composite mean. For Under rows, the three in-composite components invert via `100 - value` before the weighted sum.
 
-#### Opportunity grades (added 2026-04-22, ADR-0017)
+#### Opportunity grades (added 2026-04-22, ADR-0017; removed from composite ADR-20260423-1)
 
-Six per-(player, market) components derived from per-game attempt and tracking data, not made-stat outcomes. All 0-100, 50 = neutral; Under rows invert via `100 - value`.
+Six per-(player, market) components derived from per-game attempt and tracking data, not made-stat outcomes. All 0-100, 50 = neutral; Under rows invert via `100 - value`. **Stored as context columns only; not folded into `composite_grade`.** They still appear in `common.daily_grades` for display and future diagnostic use.
 
 - `opportunity_short_grade`: short-vs-long trend on the player per-game opportunity value. Scaling matches `trend_grade`: `50 + (mean(last 10) - mean(last 30)) / mean(last 30) * 150`, clamped
 - `opportunity_long_grade`: long-vs-season trend on the same metric: `50 + (mean(last 30) - season_mean) / season_mean * 150`, clamped
@@ -96,11 +98,45 @@ Per-market opportunity definitions (`MARKET_OPP_COMPONENTS`):
 
 `r2`, `r3`, `rft` are per-player trailing shooting percentages: shift-1 rolling(10, min_periods=3) mean of per-game pcts with expanding-season fallback. Shift-1 prevents look-ahead bias; game G's percentages use games 1..G-1 only.
 
-Blocks and steals markets have no opportunity grades (no per-player attempt rate). Those rows keep the six columns NULL and skip them in the composite.
+Blocks and steals markets have no opportunity grades (no per-player attempt rate). Those rows keep the six columns NULL.
 
 Backfill dates before `player_passing_stats` and `player_rebound_chances` were populated will have NULL rebounds/assists opportunity. Combo markets (PRA/PR/PA/RA) treat missing components as 0 via `sum(min_count=1)`, so they still produce a (degraded) opportunity grade.
 
 All six components invert for Under rows (`100 - value`). Rising trend is bad for an under.
+
+### KDE tier lines (added 2026-04-23, ADR-20260423-1)
+
+`compute_kde_tier_lines` fits a kernel density estimate to the player's game log for each (player, market, game) and walks a dense candidate-line grid to find the four tier cutoffs. One row per player-market-game-date is written to `common.player_tier_lines` by `upsert_tier_lines`. See `database/nba/README.md` for the schema.
+
+KDE fitting:
+
+- `scipy.stats.gaussian_kde` with Scott bandwidth
+- Reflection boundary at 0 to prevent negative-stat probability mass (the sample is mirrored around 0 before fitting; the upper-tail integral is doubled to correct for the mirror)
+- Grade-weighted lookback via `_select_kde_window`: composite >= 80 uses last 15 games, 50-79 uses last 30, under 50 uses full season
+- Normal distribution fallback when fewer than `KDE_MIN_GAMES = 10` observations exist
+
+Tier cutoff constants (top of `grade_props.py`):
+
+- `TIER_SAFE_PROB = 0.80`: Safe is the highest candidate line where `P(stat > line) >= 0.80`. No market price requirement.
+- `TIER_VALUE_PROB = 0.58`: Value is the highest candidate line above Safe where `P >= 0.58`. No market price requirement.
+- `TIER_HIGHRISK_PROB = 0.28` + `TIER_HIGHRISK_MIN_PRICE = 150`: highest line above Value where `P >= 0.28` AND a market price of +150 or better exists within 0.5 of the candidate line. NULL when no qualifying price exists.
+- `TIER_LOTTO_PROB = 0.07` + `TIER_LOTTO_MIN_PRICE = 400` + composite >= 50: highest line above High Risk where `P >= 0.07` AND +400 or better exists within 0.5 AND the player's composite is at least 50. The composite gate prevents pure-rarity long-shots from surfacing without any signal.
+
+Blowout dampening (points and combo markets only):
+
+- `fetch_game_spreads` / `fetch_upcoming_game_spreads` read pre-game spreads from `odds.game_lines` and `odds.upcoming_game_lines`
+- `fetch_player_blowout_profiles` precomputes each player's historical points delta in blowout losses vs close games from `nba.player_box_score_stats` + `nba.games`
+- When the pre-game spread is >= 10.5 and the player is on the projected losing team, half of the blowout-loss delta is subtracted from every value in the KDE input sample before fitting. The resulting tier lines come out lower. `blowout_dampened = 1` is written to the tier row.
+- Backtest confirms the adjustment improves calibration: dampened rows hit Safe at 91.4% vs 88.7% not-dampened, Value at 68.0% vs 62.9% (ADR-20260423-1)
+
+Calibration (backtest against 176K actual outcomes, 2025-10-27 to 2026-04-22):
+
+- Safe: 85.9% actual vs 80% design. Well-calibrated.
+- Value: 61.0% actual vs 58% design. Well-calibrated.
+- High Risk: 19.8% actual vs 28% design. Overconfident; at average +348 the breakeven is 27.8%, so the tier is currently -EV at its prices. Use as "interesting line" indicator, not as a bet recommendation.
+- Lotto: 6.4% actual vs 7% design. Hit rate on target; model probability (12.6% average) is overconfident. Also -EV at current prices.
+- Probability miscalibration is concentrated at the extremes. The 50-90% predicted range is accurate; below 50% the model overestimates by 10-20 points; above 90% it collapses back to ~70% actual.
+- Three-point markets calibrate worse than points/rebounds/assists because of the discrete low-count distribution KDE smooths over.
 
 ### Bracket expansion and Under grading
 
@@ -179,12 +215,16 @@ Do not revert these without a superseding ADR.
 - `compute-patterns.yml` runs nightly at 07:30 UTC.
 - `grading.yml` is triggered by `workflow_run` on `odds-etl.yml` success. Do not reintroduce a fixed time buffer.
 - `refresh-data.yml` uses grading mode `intraday`, not `upcoming`, so only moved lines are re-graded.
-- Opportunity grades live on `common.daily_grades` (six columns prefixed `opportunity_`). ADR-0017. Under rows invert via `100 - value` like every other grade.
+- Opportunity grades live on `common.daily_grades` (six columns prefixed `opportunity_`). ADR-0017. Under rows invert via `100 - value` like every other grade. ADR-20260423-1 removed them from the composite mean.
 - `fetch_matchup_defense` produces 5 opportunity ranks (`rank_opp_pts`, `rank_opp_fg3a`, `rank_opp_fg3m`, `rank_reb_chances`, `rank_potential_ast`) in addition to the stat ranks. Never drop those; `precompute_opportunity_grades` reads them directly.
 - `_common_grade_data` returns a 7-tuple; the seventh element is `opp_df`. Do not revert to 6-tuple.
 - `MARKET_OPP_COMPONENTS` is the single source of truth for which components contribute to which market's opportunity metric. Modify only alongside a CHANGELOG note.
 - Opportunity grading uses `groupby().transform()` (pandas 3.x safe); never use `groupby(group_keys=False).apply()`, which drops the grouping column in pandas 3.x.
 - `grade_props.py --mode backfill --force` re-grades already-graded dates via MERGE UPDATE. The archive trigger in `upsert_grades` preserves old row versions. Use only when a new component requires refilling historical rows; omit `--force` for normal nightly backfill of newly-resolved dates.
+- `compute_composite` takes exactly three arguments: `(momentum, hit_rate_60, pattern)`. Any caller passing the old multi-arg signature will TypeError. ADR-20260423-1.
+- `compute_kde_tier_lines` uses reflection at 0 and grade-weighted window selection. Do not change `KDE_MIN_GAMES = 10` without re-running the full-season backfill to revalidate calibration.
+- `grade_props_for_date` returns `(grade_rows, tier_rows)`. `run_upcoming`, `run_intraday`, and `run_backfill` all call `upsert_grades` then `upsert_tier_lines`. Neither may be skipped.
+- Blowout dampening only applies to points and combo markets (`player_points`, `player_points_*`, and their `_alternate` variants). Rebounds, assists, and threes are never dampened.
 
 Active NBA workflows:
 
@@ -211,4 +251,6 @@ See `/docs/CHANGELOG.md` filtered by `[nba][etl]`. Historical entries before the
 ## Open Questions
 
 - Signal backtest re-run is pending once enough resolved outcomes have accumulated under the personal-pattern grading (`etl/signal_backtest.py`, `signal-backtest.yml`).
+- High Risk and Lotto tiers are currently -EV at their market price floors. Calibration work to either raise the price floors or apply isotonic calibration to model probability output would close the gap. See tier effectiveness evaluation summary in `database/nba/README.md` and CHANGELOG 2026-04-24.
+- Three-point markets calibrate worse than points/rebounds/assists. A discrete Poisson fit may be more appropriate than KDE for low-count stats.
 - Extraction of common ingestion helpers into `etl/_shared.py` is deferred until MLB and NFL converge on the same patterns.
