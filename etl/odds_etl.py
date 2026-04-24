@@ -1528,8 +1528,12 @@ def _run_mappings_mlb(sport_key, engine):
                 JOIN mlb.teams t_away ON t_away.team_id = g.away_team_id
             """)
         ).fetchall()
-    # key: (game_date_str, home_abbr) -> game_pk
-    game_lookup = {(str(gdate), habc): gpk for gpk, gdate, habc, _aabc in mlb_games}
+    # key: (game_date_str, home_abbr, away_abbr) -> game_pk
+    # Disambiguates events whose UTC date coincidentally matches a different real
+    # game with the same home team. Does NOT resolve doubleheaders (same matchup
+    # twice on one day); those remain one-to-many and will take whichever game_pk
+    # dict insertion landed last.
+    game_lookup = {(str(gdate), habc, aabc): gpk for gpk, gdate, habc, aabc in mlb_games}
 
     name_to_abbr = {name: abbr for name, abbr in MLB_TEAM_NAME_TO_ABBR.items()}
 
@@ -1553,11 +1557,11 @@ def _run_mappings_mlb(sport_key, engine):
 
         game_id = None
         used_date = None
-        if home_abbr:
+        if home_abbr and away_abbr:
             for candidate in [utc_date, utc_prev_date]:
                 if candidate is None:
                     continue
-                game_id = game_lookup.get((str(candidate), home_abbr))
+                game_id = game_lookup.get((str(candidate), home_abbr, away_abbr))
                 if game_id:
                     used_date = candidate
                     break
@@ -1574,7 +1578,7 @@ def _run_mappings_mlb(sport_key, engine):
             "game_date":    str(used_date) if used_date else (str(utc_date) if utc_date else None),
             "home_tricode": home_abbr,
             "away_tricode": away_abbr,
-            "match_method": "date_home_tricode" if game_id else "unmatched",
+            "match_method": "date_home_away_tricode" if game_id else "unmatched",
         })
 
     upsert(engine, clean_dataframe(pd.DataFrame(egm_rows)),
@@ -1651,7 +1655,10 @@ def _run_mappings_nba(sport_key, engine):
         nba_games = conn.execute(
             text("SELECT game_id, game_date, home_team_tricode, away_team_tricode FROM nba.games")
         ).fetchall()
-    game_lookup = {(str(gdate), htc): gid for gid, gdate, htc, atc in nba_games}
+    # Key on (game_date, home_tricode, away_tricode) to disambiguate events whose
+    # UTC date coincidentally matches a different real game with the same home team.
+    # See ADR covering the 2026-04-24 event_game_map repair.
+    game_lookup = {(str(gdate), htc, atc): gid for gid, gdate, htc, atc in nba_games}
 
     with engine.connect() as conn:
         name_to_tc = {r[0]: r[1] for r in conn.execute(
@@ -1679,11 +1686,13 @@ def _run_mappings_nba(sport_key, engine):
 
         game_id = None
         used_date = None
-        if home_tc:
-            for candidate in [utc_date, utc_prev_date]:
+        # Try utc_prev_date first: most NBA games tip off ET-evening, which puts
+        # commence_time.date() one day ahead of the actual ET game date.
+        if home_tc and away_tc:
+            for candidate in [utc_prev_date, utc_date]:
                 if candidate is None:
                     continue
-                game_id = game_lookup.get((str(candidate), home_tc))
+                game_id = game_lookup.get((str(candidate), home_tc, away_tc))
                 if game_id:
                     used_date = candidate
                     break
@@ -1700,7 +1709,7 @@ def _run_mappings_nba(sport_key, engine):
             "game_date":    str(used_date) if used_date else (str(utc_date) if utc_date else None),
             "home_tricode": home_tc,
             "away_tricode": away_tc,
-            "match_method": "date_home_tricode" if game_id else "unmatched",
+            "match_method": "date_home_away_tricode" if game_id else "unmatched",
         })
 
     upsert(engine, clean_dataframe(pd.DataFrame(egm_rows)),
