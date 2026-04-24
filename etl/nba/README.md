@@ -185,7 +185,8 @@ Populated nightly by `compute-patterns.yml` at 07:30 UTC. Stores lag-1 transitio
 - **Stage 2**: `boxscorepreviewv3` for the full roster (bench + inactive). Always runs, unconditionally on Stage 1's outcome. Stage 1 starter designations override Stage 2 for overlapping players.
 - `PREVIEW_TIMEOUT = 20s`, no retry. Single attempt is sufficient; 404 on live games is expected and handled.
 - `BETWEEN_GAMES_DELAY = 0.5s`.
-- Position strings written to `nba.daily_lineups` are full (PG, SG, SF, PF, C). Consumers must use `posToGroup()` (PG/SG → G, SF/PF → F, C → C, compound values by `LEFT(1)`). Never `position[0]`.
+- Position strings written to `nba.daily_lineups` are full (PG, SG, SF, PF, C) for starters. Bench and inactive players have `position` empty — the NBA daily lineups JSON and `boxscorepreviewv3` both set position only for the five starters. Consumers that need rotation-role information (6th man, 7th man) cannot derive it from this table; see Open Questions below.
+- Consumers must use `posToGroup()` (PG/SG → G, SF/PF → F, C → C, compound values by `LEFT(1)`). Never `position[0]`.
 - Runs inside every cycle of `nba-game-day.yml` and inside `refresh-data.yml` with `--hours-ahead 6`.
 
 ### Scheduled re-grading
@@ -208,6 +209,7 @@ Do not revert these without a superseding ADR.
 - Lineup poll Stage 2 always runs.
 - Lineup poll `PREVIEW_TIMEOUT = 20s` with no retry.
 - Position grouping uses `posToGroup()`, never `position[0]` or `LEFT(position, 2)`.
+- `nba.daily_lineups.position` is populated only for starters. Bench and inactive players have `position` empty in both the NBA daily lineups JSON and `boxscorepreviewv3`. Do not infer rotation role from position emptiness; use season-level minutes from `nba.player_box_score_stats` instead.
 - `includeLinks=true` is only valid on the Odds API per-event endpoint.
 - Bookmaker is FanDuel only.
 - `stats.nba.com` calls route through the Webshare proxy. `cdn.nba.com` calls do not.
@@ -251,6 +253,9 @@ See `/docs/CHANGELOG.md` filtered by `[nba][etl]`. Historical entries before the
 ## Open Questions
 
 - Signal backtest re-run is pending once enough resolved outcomes have accumulated under the personal-pattern grading (`etl/signal_backtest.py`, `signal-backtest.yml`).
-- High Risk and Lotto tiers are currently -EV at their market price floors. Calibration work to either raise the price floors or apply isotonic calibration to model probability output would close the gap. See tier effectiveness evaluation summary in `database/nba/README.md` and CHANGELOG 2026-04-24.
-- Three-point markets calibrate worse than points/rebounds/assists. A discrete Poisson fit may be more appropriate than KDE for low-count stats.
+- Availability and projected minutes are the dominant unmodeled risks in the tier model (2026-04-24 investigation). DNPs are 4.6% of all tier rows and hit at 0%; sub-20-minute games are another 12% and hit well below design on every tier. Restricting the backtest to confirmed starters with 30+ actual minutes pushes Safe to 92.3% (vs 80% design) and Lotto to 9.1% (vs 7% design, +EV at average +1,189). Both three-point Safe miscalibration and the 90%+ probability collapse are largely downstream of this. Fix requires a pre-game availability gate plus a minutes prior into `compute_kde_tier_lines`.
+- NBA lineup backfill for completed games (see `/docs/ROADMAP.md`): rewrite `nba.daily_lineups` rows for all `game_status = 3` games from the NBA daily lineups JSON so every completed game has `lineup_status = 'Confirmed'` with authoritative Starter / Bench / Inactive roles. Prerequisite for the availability gate.
+- Rotation-role / 6th-man identification is deferred (2026-04-24). The plan when work resumes: compute each player's season-level mean minutes in games where they did not start, grouped by team, from `nba.player_box_score_stats`. Feed the result into the tier-line minutes prior. Cannot come from `nba.daily_lineups` because non-starters have no position data there (the NBA daily lineups JSON sets `position` only on the five starters). See ROADMAP "Next up".
+- High Risk and Lotto tiers are -EV at their market price floors in the current aggregate backtest. Segmentation work above suggests the calibration gap closes substantially with availability + minutes gating. Re-evaluate whether tier-probability isotonic calibration or price-floor raises are still needed after those fixes land. See tier effectiveness evaluation summary in `database/nba/README.md` and CHANGELOG 2026-04-24.
+- Three-point markets calibrate worse than points/rebounds/assists at the Safe tier specifically (-17 point gap). KDE over-smoothing a discrete low-count distribution is the likely cause; a Poisson or negative-binomial fit may be more appropriate for low-count stats. HighRisk and Lotto threes calibrate comparable to singles, so the fix can be Safe-specific if needed.
 - Extraction of common ingestion helpers into `etl/_shared.py` is deferred until MLB and NFL converge on the same patterns.
