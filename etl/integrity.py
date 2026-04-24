@@ -254,8 +254,10 @@ CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {
     },
 
     "odds.player_map": {
-        "row_key": ["source_name"],
-        "always_required": ["source_name", "player_id"],
+        # Canonical mapping between odds-feed player names and player_ids.
+        # Scoped by sport so the same name across sports doesn't collide.
+        "row_key": ["odds_player_name", "sport_key"],
+        "always_required": ["odds_player_name", "sport_key", "player_id", "matched_name", "match_method"],
         "required_when": {},
     },
 
@@ -264,14 +266,18 @@ CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {
     # =================================================================
 
     "common.teams": {
-        "row_key": ["team_id", "sport"],
-        "always_required": ["team_id", "team_tricode", "full_name", "sport"],
+        # Cross-sport team reference. sport_key distinguishes NBA/MLB/NFL.
+        # tricode is the 3-letter abbr; team_name is the full name.
+        # participant_id is the canonical id used by downstream consumers.
+        "row_key": ["team_id", "sport_key"],
+        "always_required": ["team_id", "sport_key", "tricode", "team_name", "participant_id"],
         "required_when": {},
     },
 
     "common.user_codes": {
+        # mode distinguishes live/demo codes; active is the enable flag.
         "row_key": ["code"],
-        "always_required": ["code", "is_demo"],
+        "always_required": ["code", "mode", "active"],
         "required_when": {},
     },
 
