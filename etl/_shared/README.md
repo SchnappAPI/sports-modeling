@@ -8,9 +8,14 @@ Document reusable ETL patterns that apply across sports: incremental ingestion, 
 
 ## Files
 
-No dedicated `_shared` code module exists yet. Patterns are currently duplicated across per-sport scripts (`nba_etl.py`, `mlb_etl.py`). Extraction into a shared module is a future refactor.
+Shared helpers are flat in `/etl/` per ADR-0002. Current modules:
 
-`etl/db.py` is the one existing shared helper. It provides:
+- `etl/db.py` — SQLAlchemy engines + `upsert()` via staging + MERGE
+- `etl/integrity.py` — data integrity and completeness framework (ADR-20260424-2). Provides `validate_and_filter()` as the main ETL integration point, plus quarantine/unmapped-entity/completeness-log helpers for Layers 1-3 and retroactive-scan support
+
+Per-sport scripts (`nba_etl.py`, `mlb_etl.py`, `nfl_etl.py`) still carry some duplicated patterns (engine factories, dataframe cleanup) that are candidates for extraction in Initiative B of the 2026-04-24 streamlining sequence. See `/docs/DECISIONS.md` ADR-20260424-3.
+
+`etl/db.py` provides:
 
 - `get_engine(max_retries=3, retry_wait=45)` - SQLAlchemy engine with `fast_executemany=True`. Default for normal upserts
 - `get_engine_slow(max_retries=3, retry_wait=45)` - same with `fast_executemany=False`. Used when staging tables contain long VARCHAR columns (for example MLB PBP description fields) where the fast-path pre-sizes the buffer from the first row and truncates later rows
