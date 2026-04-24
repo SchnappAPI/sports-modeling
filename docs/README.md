@@ -21,7 +21,7 @@ Web: `/web/<sport>/README.md` and `/web/_shared/README.md`.
 Infrastructure: `/infrastructure/README.md` plus runbooks in `/infrastructure/runbooks/`.
 
 ## How sport status varies
-NBA is live. MLB is mid-build: ETL and a basic web page exist, but the full 9-entity catalog from ADR-0004 and the 6-page roadmap from ADR-0003 are not complete. NFL ETL is live (2026-04-21) but no web surface exists yet. Each component README starts with a STATUS line that states current maturity in one sentence.
+NBA is live. MLB is mid-build: 3 of the 6 ADR-0003 pages are shipped (Game, VS, EV) and 2 of the 5 missing ADR-0004 derived entities are materialized (`mlb.player_at_bats`, `mlb.career_batter_vs_pitcher`). NFL ETL is live (2026-04-21) but no web surface exists yet. Each component README starts with a STATUS line that states current maturity in one sentence.
 
 ## Documentation structure
 This hierarchy replaced a legacy `PROJECT_REFERENCE.md` at the repo root on 2026-04-20. Archived at `/docs/_archive/`. See `DECISIONS.md` ADR-0001 for the structure decision and ADR-0016 for the archive decision.
