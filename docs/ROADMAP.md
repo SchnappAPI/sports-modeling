@@ -43,8 +43,9 @@ These came up during planning conversations and were explicitly not decided:
 Initiative A (data integrity framework) Phase 3 complete. Catalog reconciled: 272,703 → 29 violations, all remaining are known All-Star / non-team-sport edges. MLB odds daily cadence restored.
 
 **Active:**
-- Implement ADR-20260424-5 (tier-line justification). Q1-Q4 of ADR-4 answered; ADR-5 supersedes control 3 with the corrected historical-justification frame. Schema migration first (16 additive columns), then calibration script, then compute_kde_tier_lines rewrite, then 30-day backfill.
-- Monitor tonight's 10:00 UTC odds-etl.yml for successful MLB upcoming ingest (first run after the --sport all change).
+- ADR-20260424-5 code-complete and smoke-tested (run 24914385748 wrote 264 tier_lines cleanly). Next: force-regrade last 30 days via grading.yml backfill mode with force=true, then inspect common.grade_calibration buckets and new tier_lines columns (hits_all, hits_20, recent_opportunity, historical_opportunity) to validate.
+- Tier-line discretion work must be re-evaluated after backfill: confirm calibrator fits produce sensible buckets, confirm opportunity signals surface breakout cases (rising recent_opportunity vs historical_opportunity), confirm no regressions in volume.
+- Monitor 10:00 UTC odds-etl.yml for MLB upcoming ingest (ongoing watch since the cron --sport all change).
 
 **Next-up (in order):**
 1. Implement ADR-20260424-4 once questions A-D are answered. Estimate: one working session for compute_kde_tier_lines rewrite + calibration script + 30-day backfill.
