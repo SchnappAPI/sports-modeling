@@ -40,7 +40,15 @@ Domain vocabulary for the project. Cross-sport terms come first, then sport-spec
 
 **Signal**: A discrete tag attached to a prop indicating a notable pattern. Examples: STREAK (strong recent run), DUE (bounce-back from miss streak), HOT/COLD (player-level form).
 
-**STATUS line**: The first line of every component README, stating one of: live, in development, design phase, planned. Used by sessions to gauge maturity at a glance.
+**STATUS line**: The first line of every component README, stating one of the following values. Used by sessions to gauge maturity at a glance. Body text after the colon adds specifics.
+
+- `live` — production, actively used, current work touches it (NBA today)
+- `in development` — active work in progress, not yet considered live (MLB today)
+- `idle` — infrastructure exists and may run on a schedule, but no active development and no downstream product consumer (NFL ETL + database today)
+- `design phase` — planning and specification underway, no code yet
+- `not started` — no code and no active design
+
+Sessions should not invent new STATUS values. If none of the above fit, pick the closest and clarify in the body text.
 
 **Tier line**: One of four model-derived line values per (player, market, game) produced by `compute_kde_tier_lines`, written to `common.player_tier_lines`. Tiers are defined by the model's probability-exceed threshold, independent of what lines the market has posted. Per-tier cutoffs: Safe >= 80% probability, Value >= 58%, High Risk >= 28% with a market price of +150 or better available within 0.5 of the model's line, Lotto >= 7% with +400 or better and composite grade 50 or higher. See ADR-20260423-1.
 

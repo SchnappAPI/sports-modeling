@@ -1,6 +1,6 @@
 # MLB Database
 
-**STATUS:** 7 tables live (nightly-loaded reference, games, per-game box scores, season snapshots). 1 pitch-level table live (on-demand). 2 derived tables live (materialized in-lockstep with pitch-level: at-bat grain and career batter-vs-pitcher grain). 3 derived entities from ADR-0004 not yet implemented.
+**STATUS:** in development. 7 tables populated nightly (reference, games, per-game box scores, season snapshots). 1 pitch-level table populated on demand. 2 derived tables materialized in-lockstep with pitch-level (at-bat grain and career batter-vs-pitcher grain). 3 derived entities from ADR-0004 not yet implemented. Tables are present and queryable; the MLB product itself is still in development and not considered live.
 
 ## Purpose
 

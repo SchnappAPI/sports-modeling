@@ -141,7 +141,7 @@ All three routes that call Flask on the VM (`/api/games`, `/api/scoreboard`, `/a
 
 Timezone note: `/api/games` uses `todayCT()` (Central Time) when `?date` is omitted, to match the ETL which normalizes game dates to Central. Other routes that look up "today" may differ (e.g. `grade_props.py` uses `today_et()`).
 
-- `/api/ping` - anonymous. `SELECT 1` via `ping()`. Used by Uptime Robot for DB keep-alive
+- `/api/ping` - anonymous. `SELECT 1` via `ping()`. Originally used by Uptime Robot for DB keep-alive; Uptime Robot was paused 2026-04-23. Route retained for future re-enablement and for ad-hoc health checks
 - `/api/games?date=&sport=nba` - reads the game list from `nba.schedule` via `getGames()` for any date. For today only, overlays CDN scoreboard data (status + scores) onto games already present in the DB via `https://live.schnapp.bet/scoreboard`. CDN never drives the game list. Falls back to DB-only if Flask is unreachable
 - `/api/scoreboard` - thin passthrough to Flask `/scoreboard` via `https://live.schnapp.bet`
 - `/api/grades?date=&gameId=` - reads `dg.outcome_name`, `dg.over_price`, and `dg.outcome` directly from `common.daily_grades`. Also joins `odds.upcoming_player_props` for `link` when that column exists (FanDuel betslip deep link; NULL for historical rows)

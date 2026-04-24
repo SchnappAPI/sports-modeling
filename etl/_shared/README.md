@@ -48,7 +48,7 @@ Do not unify these. Each has been observed to fail in ways that its specific con
 
 ### Azure SQL cold start
 
-Tier is Serverless and auto-pauses. First connection after a pause can take 20-60 seconds, sometimes longer. All three `get_engine` variants above retry 3 times. Uptime Robot hitting `/api/ping` every 30 minutes keeps the DB warm during active hours.
+Tier is Serverless and auto-pauses after 60 minutes of idle. First connection after a pause can take 20-60 seconds, sometimes longer. All three `get_engine` variants above retry 3 times. Uptime Robot previously pinged `/api/ping` every 30 minutes to keep the DB warm, but was paused 2026-04-23 to allow auto-pause billing savings; ETL runs now tolerate cold start via the retry logic. Web routes that query the DB must degrade gracefully on cold start — a cold start exceeds the 15-second SWA function timeout.
 
 ### SQL Server specifics to remember
 

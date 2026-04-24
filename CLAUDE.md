@@ -27,7 +27,7 @@ Before ending a session that made changes:
 
 1. Append one entry to `/docs/CHANGELOG.md` tagged `[sport][component]`. Newest entry goes at the top.
 2. For any invariant added or changed, edit the INVARIANTS section of the relevant component README. Section edits only, never full rewrites.
-3. For any non-obvious decision, append an ADR to `/docs/DECISIONS.md` with the next sequential number. ADRs are append-only.
+3. For any non-obvious decision, append an ADR to `/docs/DECISIONS.md` using a date-based identifier: `ADR-YYYYMMDD-N` where `N` starts at 1. Grep the file for `^## ADR-YYYYMMDD-` with today's date to find the next unused counter. ADRs are append-only; ADRs 0001-0019 remain on the legacy sequential scheme.
 4. For any roadmap shift, update `/docs/ROADMAP.md`.
 5. For any schema, infrastructure, or connection change, update the matching README or runbook.
 
@@ -80,7 +80,7 @@ Two Claude surfaces touch this repo: claude.ai chat and Claude Code. They have d
 
 **Claude Code (local filesystem):** fast. Edits use `str_replace` or `edit_block` on the local file, which patches only the changed region. `git commit` and `git push` are single local operations. Multi-file commits are free. `npm run build` and `tsc --noEmit` run inline before pushing. This is the right surface for any session that edits multiple files or ends with a CHANGELOG append.
 
-**claude.ai chat (GitHub MCP):** slower for file edits. The only write primitive is the GitHub Contents API, which requires a full-file upload per change. A one-line CHANGELOG append re-uploads the entire file (currently ~19 KB, growing). Acceptable for single-file one-off work, design discussion, research, and planning. Not the default editing path.
+**claude.ai chat (GitHub MCP):** slower for file edits. The only write primitive is the GitHub Contents API, which requires a full-file upload per change. A one-line CHANGELOG append re-uploads the entire file (currently ~43 KB, growing). Acceptable for single-file one-off work, design discussion, research, and planning. Not the default editing path.
 
 **Dispatch pattern:** when a claude.ai chat session produces work that should execute on Claude Code, end the turn with a clearly-labeled "Claude Code prompt" block the user can paste into a Claude Code session. The prompt should be self-contained: files to touch, exact `str_replace` patches or new content, the CHANGELOG entry text, and the commit message. Do not commit from claude.ai in this flow. The prompt is the handoff.
 
@@ -98,7 +98,7 @@ node "C:\Users\1stLake\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-cod
 
 Worth aliasing in PowerShell profile. Do not use the bare `claude` command on this host; it hits ThreatLocker.
 
-**MacBook Pro:** full Node/git/npm stack. No Power BI MCP (Power BI Desktop is Windows-only). `claude` works directly. Always on, reachable via Remote Control and Cowork via Dispatch when away from the Windows laptop.
+**MacBook Pro (planned, not yet set up):** will replicate the Node/git/npm stack so `claude` runs directly without ThreatLocker in the way. No Power BI MCP (Power BI Desktop is Windows-only). When set up, update this section and `/docs/CONNECTIONS.md` with specific paths.
 
 **Azure VM (schnapp-runner-2):** Ubuntu 24.04, Python venv at `/home/schnapp-admin/venv/`. Not a Claude Code host. Used for self-hosted GitHub Actions runs and the Flask live service.
 

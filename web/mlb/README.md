@@ -1,6 +1,6 @@
 # MLB Web
 
-**STATUS:** partially live. `/mlb` page with date picker, game strip, and a view switcher (Game, VS, EV enabled; Proj, Player, Pitcher "coming soon"). Game view shows per-game detail (Box Score + Exit Velo tabs). VS view shows lineup-wide career batter-vs-pitcher matchup. EV view shows team-wide season-to-date exit velocity for both teams' starters. 3 of the 6 ADR-0003 pages still to build.
+**STATUS:** in development (not considered live). `/mlb` page with date picker, game strip, and a view switcher (Game, VS, EV enabled; Proj, Player, Pitcher "coming soon"). Game view shows per-game detail (Box Score + Exit Velo tabs). VS view shows lineup-wide career batter-vs-pitcher matchup. EV view shows team-wide season-to-date exit velocity for both teams' starters. 3 of the 6 ADR-0003 pages still to build.
 
 ## Purpose
 

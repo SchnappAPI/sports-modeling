@@ -488,3 +488,139 @@ New composite grade vs actual hit rate with the reweighted formula (monotonic, n
 - `fetch_player_blowout_profiles` requires `nba.games` to have `home_score`, `away_score`, `home_team_tricode`, `away_team_tricode` columns. These come from the CDN box score writer; their presence should be verified before any environment migration.
 
 **Supersedes.** The equal-weight composite from ADR-0005 is superseded for composite_grade computation. ADR-0005's UNIQUE key and schema definitions remain in force.
+
+
+---
+
+## ADR-20260424-1 [shared][docs] STATUS taxonomy extended with `idle`; `planned` dropped from component vocabulary
+
+Date: 2026-04-24
+
+**Context.** The component-README STATUS line was previously restricted by `docs/GLOSSARY.md` to `live | in development | design phase | planned`. The 2026-04-24 audit surfaced NFL ETL as a real state not covered by the vocabulary: code exists, pipeline runs on schedule (Tuesday 09:00 UTC), but no active development has happened since first run and no downstream product consumer exists. Labeling this "in development" misrepresents both NFL (no work happening) and MLB (actual active work). The word "live" similarly overstated: technically the ETL runs, but no one consumes its output.
+
+**Decision.** Extend the STATUS taxonomy with `idle` and drop `planned` from component STATUS vocabulary. Final five-state taxonomy:
+
+- `live` — production, actively used (NBA today)
+- `in development` — active work in progress, not yet considered live (MLB today)
+- `idle` — infrastructure exists and may run on a schedule, but no active development and no downstream product consumer (NFL ETL + NFL database today)
+- `design phase` — planning and specification underway, no code yet
+- `not started` — no code and no active design
+
+`planned` is retained as a roadmap concept but is no longer a valid component STATUS value. A component is either built (`live`/`in development`/`idle`) or pre-build (`design phase`/`not started`).
+
+**Consequences.**
+
+- `docs/GLOSSARY.md` amended with per-state examples so the taxonomy is self-anchoring.
+- `etl/nfl/README.md`, `database/nfl/README.md`, `etl/README.md`, `database/README.md`, `docs/ROADMAP.md` realigned to use `idle` for NFL.
+- Sessions must not invent new STATUS values. If none of the five fit, pick the closest and clarify in body text rather than coining new terms.
+
+**Supersedes.** Nothing at the repo level; extends the vocabulary in `docs/GLOSSARY.md`.
+
+---
+
+## ADR-20260424-2 [shared][etl][database] Data integrity and completeness framework: invariants at write, mapping resolver, daily retry with 3-attempt cap
+
+Date: 2026-04-24
+
+**Context.** The project has accumulated data-integrity gaps that were accepted as tolerable but never systematically tracked or resolved:
+
+- 135 NBA players in `odds.player_map` are unmapped. Previously accepted as "historically inactive, not on current rosters, not blocking grading." Not surfaced, not tracked, no path to resolution.
+- `mlb.players` is truncate-reload scoped to the current season. 20-32% of historical `batter_id`/`pitcher_id` joins on `mlb.player_at_bats` and `mlb.career_batter_vs_pitcher` resolve to NULL names. Accepted via "join at read time."
+- Sports ETL encounters upstream publication lag routinely. Nothing in the current system distinguishes "truly missing" from "hasn't appeared yet."
+- No structured place where data-integrity issues surface. Problems are discovered ad-hoc during backtests or user reports.
+
+Root causes of unexpected NULL values in a field that should have one, with the right response per cause:
+
+1. Upstream publication lag — daily retry
+2. Transient API error — already handled by `get_engine` retry (3 attempts × 45s)
+3. Entity mapping gap — mapping resolver (not retry; retrying the same failed lookup is pointless)
+4. Schema drift / new entity — daily retry (resolves after next reference-table pull)
+5. Legitimately null (domain-conditional — e.g., no batted ball data on a strikeout; no opportunity_volume_grade for a rebounds market) — never retry; accept
+6. Our parsing bug — human attention; retry masks it
+
+A single generic "retry everything NULL" is wrong for multiple of these.
+
+**Decision.** Three-layer framework. Each layer addresses a distinct failure mode.
+
+**Layer 1 — Invariants enforced at write time.** Every table that opts in declares its "must-not-be-null" critical fields in a Python dict constant `CRITICAL_FIELDS` in `etl/integrity.py` (flat per ADR-0002). Before the MERGE/INSERT step, a shared `validate_row()` helper checks each row. Violating rows do NOT land in the production table; they go to `common.ingest_quarantine` with the full row payload as JSON, the failed invariant, the source workflow, and timestamps. The ETL workflow continues per-row (fail-soft) but logs quarantine counts.
+
+Two kinds of "null is valid" need to be distinguished:
+
+- **Stat-zero vs stat-null.** A stat column (PTS, REB, AST, hit counts, etc.) is never NULL when the row exists. A player who played 4 minutes and scored nothing has PTS=0, not PTS=NULL. If a row has NULL where the schema says stat, that is a Layer-1 violation — something went wrong in parsing or upstream delivery. DNP players produce no row (they do not appear in `nba.player_box_score_stats` at all), so there is nothing to "conditionally null" for them.
+- **Domain-conditional nullability** is declared in `CRITICAL_FIELDS` as SQL-expression rules. Real examples in the current codebase: `nba.daily_grades.over_price` is NULL on bracket lines (only the center line in a bracket-expanded standard market carries the posted price); `nba.daily_grades.opportunity_volume_grade` and `opportunity_expected_grade` are NULL when `market_key` is not threes-related (other markets have no volume or expected-makes metric); `mlb.play_by_play.hit_launch_speed`, `hit_launch_angle`, and `hit_total_distance` are NULL when `is_hit_into_play = 0` (strikeouts, walks, HBP have no batted ball); `mlb.play_by_play.batter_id` is NULL on pickoff and caught-stealing events where no batter of record applies.
+
+Any successful Layer 1 validation for a `(table_name, row_key)` also clears prior `common.ingest_quarantine` and `common.data_completeness_log` entries for that same key, regardless of whether the new write came from a scheduled ETL run, a retry workflow, or a manual fix. This keeps HEALTH.md accurate and closes resolved Issues without requiring every resolution path to explicitly touch the integrity tables.
+
+**Layer 2 — Mapping resolver.** Entity-matching gaps go to `common.unmapped_entities` keyed by `(source_feed, entity_type, source_key)`. A nightly workflow `resolve-mappings.yml` attempts auto-resolution via exact match (case-insensitive), last-name + first-initial match, and normalized string distance against the relevant reference table. Any gap auto-resolved is logged with the resolution method. Any gap remaining after 3 nights of attempts raises a GitHub Issue labeled `data-integrity:unmapped` with source details and suggested candidates.
+
+**Layer 3 — Retry cadence for upstream lag.** `common.data_completeness_log` keyed by `(table_name, row_key, column_name)` with `first_detected_at`, `last_attempt_at`, `attempt_count`, `resolved_at`, `notes`. Nightly workflow `retry-incomplete.yml` scans quarantine + production tables for declared-critical fields still NULL. For each, if `attempt_count < 3` AND `last_attempt_at < today`, reattempts — re-fetches from upstream for that specific row key, not a full ETL re-run. If resolved, marks `resolved_at` and moves row from quarantine to production. If attempt 3 fails, raises a GitHub Issue labeled `data-integrity:incomplete`.
+
+**Retry cadence: one per day, max 3 attempts.** Sports data publication cycles are daily, not sub-daily. Exponential backoff within a day burns API quota against an upstream that cannot resolve faster. One-per-day aligns with existing ETL schedules (piggybacks on the next daily upstream state refresh). 3-day cap survives typical weekend publication delays (Fri ETL → Sat retry → Sun retry covers "data not posted until Monday"). Beyond 3 days, the root cause is almost never upstream lag; it is a mapping gap, an unrecognized legitimate null, or a parsing bug — all of which need human attention. Retrying further is wasted work.
+
+**Surfacing: `docs/HEALTH.md` + auto-opened GitHub Issues.**
+
+- `docs/HEALTH.md` is regenerated daily by a new `daily-health-report.yml` workflow and committed to `main`. Contents fall into two categories:
+  - **Column-level integrity** from Layer 1: quarantine counts per table, unresolved mappings with age, incomplete-retry counts at each attempt level.
+  - **Relational integrity** from scanned queries: one table's row counts aligned against another's expectations. Defined alongside `CRITICAL_FIELDS` in a sibling `RELATIONAL_CHECKS` dict. Real cases this must cover: games in `nba.schedule` with status >= 1 should have `nba.daily_lineups` rows covering both teams' rosters (typically 13-17 per team); games in `mlb.games` with status = 'F' should have corresponding `mlb.batting_stats` and `mlb.pitching_stats` rows; games in `nba.schedule` with status = 3 should have `nba.player_box_score_stats` rows for every player who appears in `nba.daily_lineups` with starter_status != 'Inactive'. A relational failure (e.g., playoff `boxscorepreviewv3` populating only 10 of 15 roster slots per team) does NOT block the ETL; it surfaces in HEALTH.md so the partial state is visible and re-fetches can be triggered.
+  - **Downstream-inference safety rule (documented here so sessions do not re-derive it wrong):** "did this player play?" is answered by `minutes > 0` in `nba.player_box_score_stats` or by `starter_status != 'Inactive'` in `nba.daily_lineups`. It is NEVER answered by whether stat values are zero. PTS = 0 with MIN > 0 is a player who played and did not score; PTS = 0 with MIN = 0 is a player who was on the roster but did not take the floor. Any code or query that uses stat-zero as a proxy for non-participation is wrong.
+
+Zero notification; pure reference. Session protocol will be amended to check HEALTH.md at start of any data-touching session.
+- GitHub Issues are auto-opened only at the 3-attempt cap (either layer). Labels: `data-integrity:unmapped` and `data-integrity:incomplete`. Body is auto-generated with row details + suggested resolution path. Issues auto-close via the Layer-1 clearing rule above: when a subsequent validation succeeds for the same `(table, row_key)`, the clearing step also closes any open Issue tagged with that row key. This covers all three resolution paths (retry workflow success, regular ETL re-write, manual DB fix). Workflow permissions are scoped via `permissions: issues: write` in the workflow YAML on the default `GITHUB_TOKEN` — no long-lived PAT expansion.
+
+**Consequences.**
+
+- New tables: `common.ingest_quarantine`, `common.unmapped_entities`, `common.data_completeness_log`. DDL owned by `etl/integrity.py` (pattern matches existing Python-owned DDL).
+- New workflows: `resolve-mappings.yml`, `retry-incomplete.yml`, `daily-health-report.yml`.
+- New shared module: `etl/integrity.py` with `CRITICAL_FIELDS` catalog + `validate_row()` + `write_quarantine()` + `move_from_quarantine()`.
+- Every existing ETL script gets a one-line change to route rows through `validate_row()` before upsert. Rollout per sport, NBA first (highest-volume, most test data), then MLB, then NFL.
+- Every existing `common.*`, `nba.*`, `mlb.*`, `nfl.*` table must declare its critical fields in `CRITICAL_FIELDS`. One-time cataloging, 1-2 hours per sport done carefully (including conditional-nullability rules). A 30-minute shallow pass will miss real cases and produce false positives in HEALTH.md.
+- `docs/HEALTH.md` becomes a canonical artifact. Session-start reading list is extended to include it.
+- The 135 NBA unmapped players become a resolvable class of problem rather than accepted loss. Either they get resolved via the mapping resolver or get marked `legitimate_unresolvable = 1` (player no longer in any current feed, deliberately skipped).
+- The `mlb.players` 20-32% NULL rate on historical name joins is a read-time join problem, not a write-time invariant problem. Rows in `mlb.player_at_bats` are fully valid at write time (both `batter_id` and `pitcher_id` are populated); the NULL appears only when joining to the current-season-scoped `mlb.players` at read time. Layer 1 does not catch it. It is tracked as a scanned metric in `docs/HEALTH.md` (percentage of `mlb.player_at_bats` rows where `batter_id` or `pitcher_id` does not resolve) and properly fixed by ADR-20260424-3 Initiative D's table-strategy change.
+
+**First-run scope requirement (not deferred):** v1 must include a retroactive scan pass that applies each table's `CRITICAL_FIELDS` rules against existing production rows, writes violations to `common.data_completeness_log` with a `detected_retroactively = 1` flag, but does NOT move existing rows out of production. Forward-looking quarantine applies only to new writes. Without the retroactive scan, HEALTH.md would show zero issues on day one despite real integrity gaps in historical data — the file would be misleading by design.
+
+**Open questions deferred to implementation.**
+
+- Exact schema for `common.ingest_quarantine` (row_payload as NVARCHAR(MAX) JSON vs sparse columns) — decide during implementation.
+- Whether to version the `CRITICAL_FIELDS` catalog (schema evolves; old quarantine rows need to re-validate against new invariants). Decide when second cataloging exercise runs.
+- Whether `resolve-mappings.yml` should attempt LLM-assisted resolution for ambiguous fuzzy matches. Likely no for v1 — deterministic match first, human review for the rest.
+
+**Supersedes.** The informal "accept 135 unmapped NBA players as tolerable loss" stance captured in `database/nba/README.md` and CHANGELOG. Under the new framework, unresolvable-after-3-attempts becomes an explicit state, not an implicit acceptance.
+
+---
+
+## ADR-20260424-3 [shared][docs] Streamlining initiative sequence: A → D → B → E → C
+
+Date: 2026-04-24
+
+**Context.** The 2026-04-24 audit surfaced five streamlining opportunities:
+
+- **A — Data integrity and completeness framework** (designed in ADR-20260424-2).
+- **B — Code reuse / DRY pass.** Unify the local `get_engine()` copy in `etl/nfl_etl.py` with `etl/db.py`. Promote reusable helpers (`clean_df()` from NFL, VARCHAR-width `INSERT_DTYPES` from MLB PBP). Consolidate workflow YAMLs where a single template + per-sport inputs would be cleaner than separate files.
+- **C — Observability layer.** A nightly `daily-health-check.yml` on top of A's tables. Alerts on workflow failures in last 24h, stale schedules (e.g., NBA ETL missed 24h), row-count sanity checks (`daily_grades` should grow monotonically). Markdown summary to a known location.
+- **D — MLB player table strategy.** Resolve the 20-32% NULL name rate on `mlb.player_at_bats`/`mlb.career_batter_vs_pitcher` joins. Either make `mlb.players` append-only with `last_seen_season`, or denormalize names onto the derived tables at ETL time. Decision-with-ADR when D activates.
+- **E — ROADMAP structure.** Add a "Completed and idle" section so finished-but-inactive items (NFL ETL today, others later) have somewhere natural to live.
+
+User directive: stop deferring; get these figured out.
+
+**Decision.** Execute strictly sequentially in the order A → D → B → E → C.
+
+**Rationale.**
+
+- **A first.** Highest-value intervention; every later initiative benefits from A's infrastructure being in place. Starting elsewhere would create work that needs refactoring into A's pattern later.
+- **D second.** The MLB NULL-name problem is the most acute active integrity loss. It is a specific application of A's framework, not a separate system. D validates A in production against a real pain point.
+- **B third.** Low-risk consolidation once A has established the shared-module pattern (`etl/integrity.py`). Scope stays bounded: unify `get_engine` imports, promote verified-reusable helpers only, consolidate workflow YAMLs where duplication exceeds 80%.
+- **E fourth.** 20-minute documentation-only change. Trivial once the other initiatives are underway.
+- **C fifth.** Observability consumes A's tables and wants B's cleanup to reduce false-positive noise. Cheapest and best-informed last.
+
+**Why strictly sequential, not parallel.** One developer with periodic Claude sessions. Parallelism creates merge conflicts on exactly the files that need coherent design (the new `etl/integrity.py`, the new `common.*` tables, the workflow YAMLs). Sequential execution is slower in theory but much more reliable in practice. Each initiative gets its own branch, its own implementation-level ADR, its own PR and merge.
+
+**Consequences.**
+
+- Exactly one initiative is "active" at a time. The next cannot start until the previous has landed on `main`.
+- Each initiative gets a dedicated implementation ADR (ADR-20260424-2 already covers A's design; A's implementation gets a follow-up ADR when it lands).
+- `docs/ROADMAP.md` "Active" section reflects the currently-active initiative. "Next up" holds the ordered queue.
+- Estimated effort: A implementation is 4-6 hours of focused work (ADR done; new tables, new shared module, rollout to NBA). D is ~2-3 hours (apply A to MLB). B is 2-3 hours. E is 30 minutes. C is 3-4 hours. Total: ~5 focused sessions to reach a state where all five are resolved and the project is meaningfully easier to manage.
+
+**Supersedes.** The "deferred indefinitely" status of items mentioned in prior Open Questions across several READMEs. Those deferrals are now scheduled, not deferred.

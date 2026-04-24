@@ -5,8 +5,8 @@ Area router for `/web/`. Next.js 15.2.8 app deployed to Azure Static Web Apps at
 ## Per-sport docs
 
 - `/web/nba/README.md` - STATUS: live
-- `/web/mlb/README.md` - STATUS: design phase
-- `/web/nfl/README.md` - STATUS: planning
+- `/web/mlb/README.md` - STATUS: in development (3 of 6 ADR-0003 pages coded, not considered live)
+- `/web/nfl/README.md` - STATUS: not started
 - `/web/_shared/README.md` - shared shell and cross-sport components
 
 ## Files

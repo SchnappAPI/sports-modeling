@@ -1,6 +1,6 @@
 # NFL Database
 
-**STATUS:** schema defined but not materialized. The `nfl.*` tables will be created automatically on the first successful run of `etl/nfl_etl.py`. No tables exist yet because that run has not happened.
+**STATUS:** idle (tables populated, not in active use). The `nfl.*` tables were created by the first successful run of `etl/nfl_etl.py` on 2026-04-21 and have not been actively worked on since. As of that first run: `nfl.games` (285 rows), `nfl.players` (24,376), `nfl.player_game_stats` (19,421), `nfl.snap_counts` (26,612), `nfl.ftn_charting` (47,316), `nfl.rosters_weekly` (46,820), `nfl.team_game_stats` (570). Schema will continue to evolve via `add_missing_columns()` on each subsequent scheduled run, but no downstream consumer queries these tables today.
 
 ## Purpose
 
@@ -16,9 +16,9 @@ Every table gets an implicit `created_at DATETIME2 NOT NULL DEFAULT GETUTCDATE()
 
 ## Key Concepts
 
-### Tables that will exist after the first ETL run
+### Tables
 
-| Table | Grain | Primary upsert key | Expected cardinality |
+| Table | Grain | Primary upsert key | Observed cardinality (as of 2026-04-21 first run) |
 |-------|-------|-------------------|----------------------|
 | `nfl.games` | One row per game | `game_id` | ~285 games per regular season + playoffs |
 | `nfl.players` | One row per player | `gsis_id` | ~2500 active players across the league |

@@ -128,11 +128,11 @@ Coverage: 97.1% of `common.daily_grades` player-market-games produce a tier row.
 
 ### Connection and reliability
 
-Server: `sports-modeling-server.database.windows.net`, DB `sports-modeling`, user `sqladmin`. Tier `GP_S_Gen5_2` Serverless. Auto-pauses; first connection after pause 20-60s cold start. Free offer applied so the auto-pause delay cannot be changed. Firewall allows `0.0.0.0 - 255.255.255.255` plus Allow Azure Services (required for GitHub Actions runners).
+Server: `sports-modeling-server.database.windows.net`, DB `sports-modeling`, user `sqladmin`. Tier `GP_S_Gen5_2` Serverless. Auto-pause delay set to 60 minutes on 2026-04-24 via the Azure portal. The earlier claim in this file that 'Free offer applied so the auto-pause delay cannot be changed' was accurate under the Azure Free trial; the trial has since expired, making the setting configurable. First connection after pause 20-60s cold start. Firewall allows `0.0.0.0 - 255.255.255.255` plus Allow Azure Services (required for GitHub Actions runners).
 
 Connections use SQLAlchemy + pyodbc with ODBC Driver 18. ETL uses `fast_executemany=True`. Grading engine has its own engine instance with `fast_executemany=False` to prevent NVARCHAR(MAX) truncation. Retry logic in `grading/grade_props.py:get_engine`: 3 attempts with 60s waits.
 
-Uptime Robot pings `https://schnapp.bet/api/ping` every 30 min to keep the DB from cold-starting during active hours. `keepalive.yml` is dispatch-only.
+Uptime Robot previously pinged `https://schnapp.bet/api/ping` every 30 min to keep the DB warm during active hours, but was paused 2026-04-23 to let auto-pause actually take effect and cut continuous-compute billing. `keepalive.yml` is dispatch-only and should not be rescheduled without making a deliberate decision to reverse the tradeoff.
 
 ## Invariants
 
