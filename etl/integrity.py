@@ -753,100 +753,125 @@ def validate_and_filter(
 # Retroactive scan (Layer 3 seed)
 # =====================================================================
 
-def retroactive_scan(engine) -> Dict[str, int]:
+def retroactive_scan(engine, dry_run: bool = True) -> Dict[str, Dict[str, int]]:
     """
-    For each table in CRITICAL_FIELDS, detect existing production rows that
-    violate always_required or required_when invariants. Write one row per
-    (table, row_key, column) violation to common.data_completeness_log with
-    detected_retroactively = 1.
+    For each table in CRITICAL_FIELDS, detect production rows that violate
+    always_required or required_when invariants.
 
-    Does NOT move existing production rows to quarantine — retroactive
-    movement is unsafe. The scan is visibility-only.
+    Two modes:
+      dry_run=True (default)  — read-only. Returns per-table, per-column
+                                 violation counts. No writes to the log.
+                                 Safe to run anytime.
+      dry_run=False           — writes one row per violation to
+                                 common.data_completeness_log via MERGE
+                                 (idempotent against UQ_completeness_log).
+                                 detected_retroactively=1 on all rows.
 
-    Idempotent via MERGE semantics against UQ_completeness_log. Re-running
-    only inserts new violations found since the last run.
+    Per-table isolation: if a SQL error hits one table (bad column name,
+    bad predicate), it is captured under results[table_name]["__error__"]
+    and the scan continues with other tables.
 
-    Returns dict of {table_name: rows_merged_on_this_run}.
+    Does NOT move existing production rows — retroactive movement is unsafe.
+    The scan is visibility-only regardless of mode.
+
+    Returns {table_name: {"always:col" or "conditional:col": count, ...}}.
+    Tables with no violations return an empty dict.
     """
-    results: Dict[str, int] = {}
-    with engine.begin() as conn:
-        for table_name, rules in CRITICAL_FIELDS.items():
-            always_required = rules.get("always_required", [])
-            required_when = rules.get("required_when", {})
-            key_cols = rules.get("row_key", [])
-            if not key_cols:
-                results[table_name] = 0
-                continue
+    results: Dict[str, Dict[str, int]] = {}
+    for table_name, rules in CRITICAL_FIELDS.items():
+        col_counts: Dict[str, int] = {}
+        always_required = rules.get("always_required", [])
+        required_when = rules.get("required_when", {})
+        key_cols = rules.get("row_key", [])
 
-            # Build row_key expression from the source row, aliased as t.
-            # NVARCHAR(50) per part; ISNULL guard keeps the expression safe
-            # for nullable key columns (e.g., common.daily_grades.player_id).
-            key_expr = " + '|' + ".join(
-                f"'{k}=' + ISNULL(CAST(t.[{k}] AS NVARCHAR(50)), 'NULL')"
-                for k in key_cols
-            )
+        if not key_cols:
+            results[table_name] = col_counts
+            continue
 
-            table_count = 0
+        key_expr = " + '|' + ".join(
+            f"'{k}=' + ISNULL(CAST(t.[{k}] AS NVARCHAR(50)), 'NULL')"
+            for k in key_cols
+        )
 
-            # always_required violations
-            for col in always_required:
-                merge_sql = text(f"""
-                    MERGE common.data_completeness_log AS tgt
-                    USING (
-                        SELECT :tbl AS table_name,
-                               {key_expr} AS row_key,
-                               :col AS column_name
-                        FROM {table_name} t
-                        WHERE t.[{col}] IS NULL
-                    ) AS src
-                    ON tgt.table_name = src.table_name
-                       AND tgt.row_key = src.row_key
-                       AND tgt.column_name = src.column_name
-                    WHEN NOT MATCHED BY TARGET THEN
-                        INSERT (table_name, row_key, column_name,
-                                detected_retroactively, notes)
-                        VALUES (src.table_name, src.row_key, src.column_name,
-                                1, :notes);
-                """)
-                result = conn.execute(merge_sql, {
-                    "tbl": table_name, "col": col,
-                    "notes": "Retroactive: always_required",
-                })
-                table_count += result.rowcount or 0
+        try:
+            ctx = engine.connect() if dry_run else engine.begin()
+            with ctx as conn:
 
-            # required_when violations (uses sql_predicate; py_predicate is
-            # write-time only)
-            for col, spec in required_when.items():
-                sql_pred = spec.get("sql_predicate")
-                if not sql_pred:
-                    continue
-                description = spec.get("description", "required_when predicate")
-                merge_sql = text(f"""
-                    MERGE common.data_completeness_log AS tgt
-                    USING (
-                        SELECT :tbl AS table_name,
-                               {key_expr} AS row_key,
-                               :col AS column_name
-                        FROM {table_name} t
-                        WHERE t.[{col}] IS NULL
-                          AND ({sql_pred})
-                    ) AS src
-                    ON tgt.table_name = src.table_name
-                       AND tgt.row_key = src.row_key
-                       AND tgt.column_name = src.column_name
-                    WHEN NOT MATCHED BY TARGET THEN
-                        INSERT (table_name, row_key, column_name,
-                                detected_retroactively, notes)
-                        VALUES (src.table_name, src.row_key, src.column_name,
-                                1, :notes);
-                """)
-                result = conn.execute(merge_sql, {
-                    "tbl": table_name, "col": col,
-                    "notes": f"Retroactive: required_when ({description})",
-                })
-                table_count += result.rowcount or 0
+                # always_required
+                for col in always_required:
+                    if dry_run:
+                        n = conn.execute(text(
+                            f"SELECT COUNT(*) FROM {table_name} t WHERE t.[{col}] IS NULL"
+                        )).scalar() or 0
+                    else:
+                        merge_sql = text(f"""
+                            MERGE common.data_completeness_log AS tgt
+                            USING (
+                                SELECT :tbl AS table_name,
+                                       {key_expr} AS row_key,
+                                       :col AS column_name
+                                FROM {table_name} t
+                                WHERE t.[{col}] IS NULL
+                            ) AS src
+                            ON tgt.table_name = src.table_name
+                               AND tgt.row_key = src.row_key
+                               AND tgt.column_name = src.column_name
+                            WHEN NOT MATCHED BY TARGET THEN
+                                INSERT (table_name, row_key, column_name,
+                                        detected_retroactively, notes)
+                                VALUES (src.table_name, src.row_key, src.column_name,
+                                        1, :notes);
+                        """)
+                        r = conn.execute(merge_sql, {
+                            "tbl": table_name, "col": col,
+                            "notes": "Retroactive: always_required",
+                        })
+                        n = r.rowcount or 0
+                    if n:
+                        col_counts[f"always:{col}"] = n
 
-            results[table_name] = table_count
+                # required_when (sql_predicate path; py_predicate is write-time only)
+                for col, spec in required_when.items():
+                    sql_pred = spec.get("sql_predicate")
+                    if not sql_pred:
+                        continue
+                    description = spec.get("description", "required_when predicate")
+                    if dry_run:
+                        n = conn.execute(text(
+                            f"SELECT COUNT(*) FROM {table_name} t "
+                            f"WHERE t.[{col}] IS NULL AND ({sql_pred})"
+                        )).scalar() or 0
+                    else:
+                        merge_sql = text(f"""
+                            MERGE common.data_completeness_log AS tgt
+                            USING (
+                                SELECT :tbl AS table_name,
+                                       {key_expr} AS row_key,
+                                       :col AS column_name
+                                FROM {table_name} t
+                                WHERE t.[{col}] IS NULL
+                                  AND ({sql_pred})
+                            ) AS src
+                            ON tgt.table_name = src.table_name
+                               AND tgt.row_key = src.row_key
+                               AND tgt.column_name = src.column_name
+                            WHEN NOT MATCHED BY TARGET THEN
+                                INSERT (table_name, row_key, column_name,
+                                        detected_retroactively, notes)
+                                VALUES (src.table_name, src.row_key, src.column_name,
+                                        1, :notes);
+                        """)
+                        r = conn.execute(merge_sql, {
+                            "tbl": table_name, "col": col,
+                            "notes": f"Retroactive: required_when ({description})",
+                        })
+                        n = r.rowcount or 0
+                    if n:
+                        col_counts[f"conditional:{col}"] = n
+        except Exception as e:
+            col_counts["__error__"] = str(e)[:300]
+
+        results[table_name] = col_counts
     return results
 
 
