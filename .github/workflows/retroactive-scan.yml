@@ -1,0 +1,99 @@
+name: Retroactive Integrity Scan
+
+# Runs etl.integrity.retroactive_scan across every table in CRITICAL_FIELDS.
+# Flags existing production rows that violate always_required or required_when
+# invariants. Visibility-only — never moves production rows.
+#
+# Two modes via the `mode` input:
+#   dry_run  (default): read-only counts. No writes to common.data_completeness_log.
+#   write              : MERGE violations into common.data_completeness_log.
+#
+# Always start with dry_run after any catalog change. If counts look sensible
+# (not catastrophic due to a catalog bug), re-dispatch with mode=write to
+# populate the log.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry_run (read-only counts) or write (MERGE into log)'
+        required: true
+        default: 'dry_run'
+        type: choice
+        options:
+          - dry_run
+          - write
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  scan:
+    runs-on: [self-hosted, schnapp-runner]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Activate venv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Run scan
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+        run: |
+          python -c "
+          import os, sys
+          from etl.db import get_engine
+          from etl.integrity import retroactive_scan, CRITICAL_FIELDS
+
+          mode = os.environ.get('MODE', 'dry_run')
+          dry = (mode == 'dry_run')
+
+          print(f'=== Retroactive scan: mode={mode} ===')
+          print(f'Tables in catalog: {len(CRITICAL_FIELDS)}')
+          print()
+
+          results = retroactive_scan(get_engine(), dry_run=dry)
+
+          clean_tables = []
+          dirty_tables = []
+          error_tables = []
+          grand_total = 0
+
+          for table, counts in sorted(results.items()):
+              if not counts:
+                  clean_tables.append(table)
+                  continue
+              if '__error__' in counts:
+                  error_tables.append((table, counts['__error__']))
+                  continue
+              table_total = sum(counts.values())
+              grand_total += table_total
+              dirty_tables.append((table, table_total, counts))
+
+          if clean_tables:
+              print(f'Clean ({len(clean_tables)}):')
+              for t in clean_tables:
+                  print(f'  {t}')
+              print()
+
+          if dirty_tables:
+              print(f'Violations ({len(dirty_tables)} tables, {grand_total} total):')
+              for table, total, counts in sorted(dirty_tables, key=lambda x: -x[1]):
+                  print(f'  {table}: {total}')
+                  for col, n in sorted(counts.items(), key=lambda x: -x[1]):
+                      print(f'    {col}: {n}')
+              print()
+
+          if error_tables:
+              print(f'Errors ({len(error_tables)}):')
+              for table, err in error_tables:
+                  print(f'  {table}: {err}')
+              print()
+              sys.exit(1)
+
+          print(f'=== done. mode={mode}. {grand_total} violations across {len(dirty_tables)} tables. ===')
+          "
