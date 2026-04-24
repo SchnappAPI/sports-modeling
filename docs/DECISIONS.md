@@ -535,14 +535,21 @@ Root causes of unexpected NULL values in a field that should have one, with the 
 2. Transient API error — already handled by `get_engine` retry (3 attempts × 45s)
 3. Entity mapping gap — mapping resolver (not retry; retrying the same failed lookup is pointless)
 4. Schema drift / new entity — daily retry (resolves after next reference-table pull)
-5. Legitimately null (DNP player has no PTS) — never retry; accept
+5. Legitimately null (domain-conditional — e.g., no batted ball data on a strikeout; no opportunity_volume_grade for a rebounds market) — never retry; accept
 6. Our parsing bug — human attention; retry masks it
 
 A single generic "retry everything NULL" is wrong for multiple of these.
 
 **Decision.** Three-layer framework. Each layer addresses a distinct failure mode.
 
-**Layer 1 — Invariants enforced at write time.** Every table that opts in declares its "must-not-be-null" critical fields in a Python dict constant `CRITICAL_FIELDS` in `etl/integrity.py` (flat per ADR-0002). Before the MERGE/INSERT step, a shared `validate_row()` helper checks each row. Violating rows do NOT land in the production table; they go to `common.ingest_quarantine` with the full row payload as JSON, the failed invariant, the source workflow, and timestamps. The ETL workflow continues per-row (fail-soft) but logs quarantine counts. Legitimate-null exceptions are declared in `CRITICAL_FIELDS` itself: e.g., `nba.player_box_score_stats.pts` is nullable when `dnp = 1`.
+**Layer 1 — Invariants enforced at write time.** Every table that opts in declares its "must-not-be-null" critical fields in a Python dict constant `CRITICAL_FIELDS` in `etl/integrity.py` (flat per ADR-0002). Before the MERGE/INSERT step, a shared `validate_row()` helper checks each row. Violating rows do NOT land in the production table; they go to `common.ingest_quarantine` with the full row payload as JSON, the failed invariant, the source workflow, and timestamps. The ETL workflow continues per-row (fail-soft) but logs quarantine counts.
+
+Two kinds of "null is valid" need to be distinguished:
+
+- **Stat-zero vs stat-null.** A stat column (PTS, REB, AST, hit counts, etc.) is never NULL when the row exists. A player who played 4 minutes and scored nothing has PTS=0, not PTS=NULL. If a row has NULL where the schema says stat, that is a Layer-1 violation — something went wrong in parsing or upstream delivery. DNP players produce no row (they do not appear in `nba.player_box_score_stats` at all), so there is nothing to "conditionally null" for them.
+- **Domain-conditional nullability** is declared in `CRITICAL_FIELDS` as SQL-expression rules. Real examples in the current codebase: `nba.daily_grades.over_price` is NULL on bracket lines (only the center line in a bracket-expanded standard market carries the posted price); `nba.daily_grades.opportunity_volume_grade` and `opportunity_expected_grade` are NULL when `market_key` is not threes-related (other markets have no volume or expected-makes metric); `mlb.play_by_play.hit_launch_speed`, `hit_launch_angle`, and `hit_total_distance` are NULL when `is_hit_into_play = 0` (strikeouts, walks, HBP have no batted ball); `mlb.play_by_play.batter_id` is NULL on pickoff and caught-stealing events where no batter of record applies.
+
+Any successful Layer 1 validation for a `(table_name, row_key)` also clears prior `common.ingest_quarantine` and `common.data_completeness_log` entries for that same key, regardless of whether the new write came from a scheduled ETL run, a retry workflow, or a manual fix. This keeps HEALTH.md accurate and closes resolved Issues without requiring every resolution path to explicitly touch the integrity tables.
 
 **Layer 2 — Mapping resolver.** Entity-matching gaps go to `common.unmapped_entities` keyed by `(source_feed, entity_type, source_key)`. A nightly workflow `resolve-mappings.yml` attempts auto-resolution via exact match (case-insensitive), last-name + first-initial match, and normalized string distance against the relevant reference table. Any gap auto-resolved is logged with the resolution method. Any gap remaining after 3 nights of attempts raises a GitHub Issue labeled `data-integrity:unmapped` with source details and suggested candidates.
 
@@ -553,7 +560,7 @@ A single generic "retry everything NULL" is wrong for multiple of these.
 **Surfacing: `docs/HEALTH.md` + auto-opened GitHub Issues.**
 
 - `docs/HEALTH.md` is regenerated daily by a new `daily-health-report.yml` workflow and committed to `main`. Contents: quarantine counts per table, unresolved mappings with age, incomplete-retry counts at each attempt level. Zero notification; pure reference. Session protocol will be amended to check HEALTH.md at start of any data-touching session.
-- GitHub Issues are auto-opened only at the 3-attempt cap (either layer). Labels: `data-integrity:unmapped` and `data-integrity:incomplete`. Body is auto-generated with row details + suggested resolution path. Issues are auto-closed if the underlying row later resolves (workflow checks on next run). This channel delivers actionable notifications via the repo-notifications channel already in use, without forcing subscription to a new system.
+- GitHub Issues are auto-opened only at the 3-attempt cap (either layer). Labels: `data-integrity:unmapped` and `data-integrity:incomplete`. Body is auto-generated with row details + suggested resolution path. Issues auto-close via the Layer-1 clearing rule above: when a subsequent validation succeeds for the same `(table, row_key)`, the clearing step also closes any open Issue tagged with that row key. This covers all three resolution paths (retry workflow success, regular ETL re-write, manual DB fix). Workflow permissions are scoped via `permissions: issues: write` in the workflow YAML on the default `GITHUB_TOKEN` — no long-lived PAT expansion.
 
 **Consequences.**
 
@@ -561,10 +568,12 @@ A single generic "retry everything NULL" is wrong for multiple of these.
 - New workflows: `resolve-mappings.yml`, `retry-incomplete.yml`, `daily-health-report.yml`.
 - New shared module: `etl/integrity.py` with `CRITICAL_FIELDS` catalog + `validate_row()` + `write_quarantine()` + `move_from_quarantine()`.
 - Every existing ETL script gets a one-line change to route rows through `validate_row()` before upsert. Rollout per sport, NBA first (highest-volume, most test data), then MLB, then NFL.
-- Every existing `common.*`, `nba.*`, `mlb.*`, `nfl.*` table must declare its critical fields in `CRITICAL_FIELDS`. One-time cataloging, approximately 30 min per sport.
+- Every existing `common.*`, `nba.*`, `mlb.*`, `nfl.*` table must declare its critical fields in `CRITICAL_FIELDS`. One-time cataloging, 1-2 hours per sport done carefully (including conditional-nullability rules). A 30-minute shallow pass will miss real cases and produce false positives in HEALTH.md.
 - `docs/HEALTH.md` becomes a canonical artifact. Session-start reading list is extended to include it.
 - The 135 NBA unmapped players become a resolvable class of problem rather than accepted loss. Either they get resolved via the mapping resolver or get marked `legitimate_unresolvable = 1` (player no longer in any current feed, deliberately skipped).
-- The `mlb.players` 20-32% NULL rate is made visible by the quarantine layer but is NOT solved by this framework alone. Proper fix is ADR-20260424-3 Initiative D.
+- The `mlb.players` 20-32% NULL rate on historical name joins is a read-time join problem, not a write-time invariant problem. Rows in `mlb.player_at_bats` are fully valid at write time (both `batter_id` and `pitcher_id` are populated); the NULL appears only when joining to the current-season-scoped `mlb.players` at read time. Layer 1 does not catch it. It is tracked as a scanned metric in `docs/HEALTH.md` (percentage of `mlb.player_at_bats` rows where `batter_id` or `pitcher_id` does not resolve) and properly fixed by ADR-20260424-3 Initiative D's table-strategy change.
+
+**First-run scope requirement (not deferred):** v1 must include a retroactive scan pass that applies each table's `CRITICAL_FIELDS` rules against existing production rows, writes violations to `common.data_completeness_log` with a `detected_retroactively = 1` flag, but does NOT move existing rows out of production. Forward-looking quarantine applies only to new writes. Without the retroactive scan, HEALTH.md would show zero issues on day one despite real integrity gaps in historical data — the file would be misleading by design.
 
 **Open questions deferred to implementation.**
 
