@@ -1,0 +1,93 @@
+name: Validate Integrity Catalog
+
+# Sanity-checks the CRITICAL_FIELDS and RELATIONAL_CHECKS catalogs in
+# etl/integrity.py against the live DB schema. For each table in
+# CRITICAL_FIELDS: verifies table exists and every referenced column
+# (row_key, always_required, required_when) exists on it. For each
+# RELATIONAL_CHECKS query: runs SET PARSEONLY ON to validate SQL syntax
+# without executing (no rows read, no rows modified).
+#
+# Run this after every change to etl/integrity.py's catalog sections.
+# Idempotent and side-effect-free — does not touch common.data_completeness_log
+# or any production data.
+
+on:
+  workflow_dispatch:
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  validate:
+    runs-on: [self-hosted, schnapp-runner]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Activate venv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Validate catalog against DB
+        run: |
+          python -c "
+          import sys
+          from etl.db import get_engine
+          from etl.integrity import CRITICAL_FIELDS, RELATIONAL_CHECKS
+          from sqlalchemy import text
+
+          engine = get_engine()
+          problems = []
+
+          # ----- CRITICAL_FIELDS: table + column existence -----
+          with engine.connect() as conn:
+              for table_name, rules in CRITICAL_FIELDS.items():
+                  if '.' not in table_name:
+                      problems.append(f'{table_name}: not schema-qualified')
+                      continue
+                  schema, table = table_name.split('.', 1)
+                  rows = conn.execute(text('''
+                      SELECT column_name FROM information_schema.columns
+                      WHERE table_schema = :s AND table_name = :t
+                  '''), {'s': schema, 't': table}).fetchall()
+                  if not rows:
+                      problems.append(f'{table_name}: TABLE DOES NOT EXIST')
+                      continue
+                  actual = {r[0].lower() for r in rows}
+                  referenced = set()
+                  referenced.update(rules.get('row_key', []))
+                  referenced.update(rules.get('always_required', []))
+                  referenced.update(rules.get('required_when', {}).keys())
+                  missing = sorted(c for c in referenced if c.lower() not in actual)
+                  if missing:
+                      problems.append(f'{table_name}: referenced columns not in DB: {missing}')
+
+          # ----- RELATIONAL_CHECKS: SQL syntax via SET PARSEONLY ON -----
+          with engine.connect() as conn:
+              for name, spec in RELATIONAL_CHECKS.items():
+                  query = spec.get('query', '').strip()
+                  if not query:
+                      problems.append(f'check {name}: query is empty')
+                      continue
+                  try:
+                      conn.execute(text('SET PARSEONLY ON'))
+                      conn.execute(text(query))
+                      conn.execute(text('SET PARSEONLY OFF'))
+                  except Exception as e:
+                      problems.append(f'check {name}: SQL parse failed — {str(e)[:200]}')
+
+          # ----- Report -----
+          print(f'Tables in CRITICAL_FIELDS: {len(CRITICAL_FIELDS)}')
+          print(f'Checks in RELATIONAL_CHECKS: {len(RELATIONAL_CHECKS)}')
+          if problems:
+              print()
+              print('PROBLEMS FOUND:')
+              for p in problems:
+                  print(f'  - {p}')
+              sys.exit(1)
+          else:
+              print('All catalog entries verified against live DB.')
+          "
