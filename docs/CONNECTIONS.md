@@ -1,6 +1,10 @@
 # Connections
 
-This file lists every external system the project connects to and where credentials live. Secret values are not stored here; they live in environment variables, GitHub repository secrets, Azure SWA app settings, or VM systemd environment files. This document points to where they are, not what they are.
+This file is the single source of truth for every external system the project connects to. For each system it documents the resource, the credentials that access it, the name under which each credential is stored, and every location that stores it.
+
+Secret values are inlined. This repo is private; if it ever becomes public, rotate every secret in this file before exposing the repo.
+
+Last verified against Azure Portal and VM state: 2026-04-24.
 
 ## Azure SQL Database
 
