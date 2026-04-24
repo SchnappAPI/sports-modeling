@@ -71,7 +71,265 @@ from sqlalchemy import bindparam, text
 #
 # Keep empty until Phase 2 so no existing ETL is affected by the module
 # landing. Opt-in enforcement means tables not listed here pass through.
-CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {}
+CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {
+
+    # =================================================================
+    # nba schema
+    # =================================================================
+
+    "nba.schedule": {
+        "row_key": ["game_id"],
+        "always_required": [
+            "game_id", "game_date", "game_status",
+            "home_team_id", "away_team_id",
+            "home_team_tricode", "away_team_tricode",
+        ],
+        "required_when": {
+            "home_score": {
+                "py_predicate": lambda r: r.get("game_status") is not None and int(r["game_status"]) >= 2,
+                "sql_predicate": "t.game_status >= 2",
+                "description": "home_score required once game has started or finished",
+            },
+            "away_score": {
+                "py_predicate": lambda r: r.get("game_status") is not None and int(r["game_status"]) >= 2,
+                "sql_predicate": "t.game_status >= 2",
+                "description": "away_score required once game has started or finished",
+            },
+        },
+    },
+
+    "nba.games": {
+        "row_key": ["game_id"],
+        "always_required": [
+            "game_id", "game_date",
+            "home_team_id", "away_team_id",
+            "home_score", "away_score",
+        ],
+        "required_when": {},
+    },
+
+    "nba.teams": {
+        "row_key": ["team_id"],
+        "always_required": ["team_id", "team_tricode", "team_name"],
+        "required_when": {},
+    },
+
+    "nba.players": {
+        "row_key": ["player_id"],
+        "always_required": ["player_id", "player_name"],
+        "required_when": {
+            "team_id": {
+                "py_predicate": lambda r: r.get("roster_status") == 1,
+                "sql_predicate": "t.roster_status = 1",
+                "description": "active-roster players (roster_status=1) must have team_id",
+            },
+            "team_tricode": {
+                "py_predicate": lambda r: r.get("roster_status") == 1,
+                "sql_predicate": "t.roster_status = 1",
+                "description": "active-roster players (roster_status=1) must have team_tricode",
+            },
+        },
+    },
+
+    "nba.daily_lineups": {
+        # Keyed by player_name + team_tricode per database/nba/README.md.
+        # No player_id on this table.
+        "row_key": ["game_id", "player_name", "team_tricode"],
+        "always_required": [
+            "game_id", "game_date", "player_name", "team_tricode",
+            "starter_status", "lineup_status",
+        ],
+        "required_when": {
+            # Per etl/nba/README.md: position is populated only for starters.
+            # Bench and inactive rows legitimately have position empty or NULL
+            # because NBA daily lineups JSON + boxscorepreviewv3 set position
+            # only on the five starters per team.
+            "position": {
+                "py_predicate": lambda r: r.get("starter_status") == "Starter",
+                "sql_predicate": "t.starter_status = 'Starter'",
+                "description": "starters must have position; bench/inactive legitimately null",
+            },
+        },
+    },
+
+    "nba.player_box_score_stats": {
+        # Row exists only for players who appeared. DNP players produce no row.
+        # Every stat column is 0-or-positive; NULL is a violation, not a DNP
+        # signal. "Did this player play?" is answered by minutes > 0, never
+        # by stat-zero inference (ADR-20260424-2).
+        "row_key": ["game_id", "player_id", "period"],
+        "always_required": [
+            "game_id", "player_id", "period", "team_id", "minutes",
+            "pts", "reb", "ast", "stl", "blk", "tov", "pf",
+            "fgm", "fga", "ftm", "fta", "fg3m", "fg3a",
+            "oreb", "dreb",
+        ],
+        "required_when": {},
+    },
+
+    "nba.player_passing_stats": {
+        "row_key": ["player_id", "game_date"],
+        "always_required": ["player_id", "game_date", "potential_ast"],
+        "required_when": {},
+    },
+
+    "nba.player_rebound_chances": {
+        "row_key": ["player_id", "game_date"],
+        "always_required": ["player_id", "game_date", "reb_chances"],
+        "required_when": {},
+    },
+
+    # =================================================================
+    # odds schema (cross-sport; NBA-primary today, MLB uses same tables)
+    # =================================================================
+
+    "odds.event_game_map": {
+        "row_key": ["event_id"],
+        "always_required": ["event_id", "game_id", "game_date"],
+        "required_when": {},
+    },
+
+    "odds.upcoming_events": {
+        # game_id not always_required: unmapped events get written before
+        # mapping resolves. Unmapped entities are tracked via
+        # record_unmapped_entity on common.unmapped_entities.
+        "row_key": ["event_id"],
+        "always_required": [
+            "event_id", "sport_key",
+            "home_tricode", "away_tricode",
+            "commence_time",
+        ],
+        "required_when": {},
+    },
+
+    "odds.upcoming_player_props": {
+        # link is nullable: populated only from per-event Odds API endpoint;
+        # bulk-endpoint rows legitimately have NULL link per docs.
+        "row_key": ["event_id", "market_key", "outcome_point", "player_name", "outcome_name", "snap_ts"],
+        "always_required": [
+            "event_id", "market_key", "outcome_point", "player_name",
+            "bookmaker_key", "snap_ts", "outcome_price", "outcome_name",
+        ],
+        "required_when": {},
+    },
+
+    "odds.player_props": {
+        "row_key": ["event_id", "market_key", "outcome_point", "player_name", "outcome_name", "snap_ts"],
+        "always_required": [
+            "event_id", "market_key", "outcome_point", "player_name",
+            "bookmaker_key", "snap_ts", "outcome_price", "outcome_name",
+        ],
+        "required_when": {},
+    },
+
+    "odds.upcoming_game_lines": {
+        "row_key": ["event_id", "market_key", "outcome_name", "outcome_point", "snap_ts"],
+        "always_required": [
+            "event_id", "market_key", "bookmaker_key", "snap_ts",
+            "outcome_price", "outcome_name",
+        ],
+        "required_when": {
+            "outcome_point": {
+                # Spreads and totals have a point; moneyline (h2h) does not.
+                "py_predicate": lambda r: r.get("market_key") in ("spreads", "totals"),
+                "sql_predicate": "t.market_key IN ('spreads', 'totals')",
+                "description": "spread/total lines require outcome_point; h2h legitimately null",
+            },
+        },
+    },
+
+    "odds.game_lines": {
+        "row_key": ["event_id", "market_key", "outcome_name", "outcome_point", "snap_ts"],
+        "always_required": [
+            "event_id", "market_key", "bookmaker_key", "snap_ts",
+            "outcome_price", "outcome_name",
+        ],
+        "required_when": {
+            "outcome_point": {
+                "py_predicate": lambda r: r.get("market_key") in ("spreads", "totals"),
+                "sql_predicate": "t.market_key IN ('spreads', 'totals')",
+                "description": "spread/total lines require outcome_point; h2h legitimately null",
+            },
+        },
+    },
+
+    "odds.player_map": {
+        "row_key": ["source_name"],
+        "always_required": ["source_name", "player_id"],
+        "required_when": {},
+    },
+
+    # =================================================================
+    # common schema
+    # =================================================================
+
+    "common.teams": {
+        "row_key": ["team_id", "sport"],
+        "always_required": ["team_id", "team_tricode", "full_name", "sport"],
+        "required_when": {},
+    },
+
+    "common.user_codes": {
+        "row_key": ["code"],
+        "always_required": ["code", "is_demo"],
+        "required_when": {},
+    },
+
+    "common.demo_config": {
+        "row_key": ["sport"],
+        "always_required": ["sport", "demo_date"],
+        "required_when": {},
+    },
+
+    "common.player_line_patterns": {
+        # p_hit_after_hit / p_hit_after_miss are legitimately NULL when fewer
+        # than MIN_TRANSITION_OBS = 3 observations in that state (per
+        # etl/nba/README.md). No invariant on them.
+        "row_key": ["player_id", "market_key", "line_value"],
+        "always_required": [
+            "player_id", "market_key", "line_value",
+            "n", "hr_overall", "last_updated",
+        ],
+        "required_when": {},
+    },
+
+    "common.daily_grades": {
+        # UQ is (grade_date, event_id, player_id, market_key, bookmaker_key,
+        # line_value, outcome_name). player_id is declared NULL in schema but
+        # enforced required here — a grade row with NULL player_id indicates
+        # an unmapped odds-feed player and should not reach production.
+        #
+        # over_price is legitimately NULL on bracket lines (only center line
+        # in a bracket-expanded standard market carries the posted price).
+        # composite/trend/matchup/regression/momentum/pattern_grade and all
+        # six opportunity_* grades are legitimately NULL under various
+        # data-availability conditions (grade_props.py + ADR-20260423-1).
+        # outcome is legitimately NULL until games resolve. No invariants
+        # on any of these columns.
+        "row_key": ["grade_date", "event_id", "player_id", "market_key", "bookmaker_key", "line_value", "outcome_name"],
+        "always_required": [
+            "grade_id", "grade_date", "event_id",
+            "player_id", "player_name", "game_id",
+            "market_key", "bookmaker_key",
+            "line_value", "outcome_name",
+            "hit_rate_60", "sample_size_60", "grade",
+        ],
+        "required_when": {},
+    },
+
+    "common.player_tier_lines": {
+        # Safe tier is always populated by compute_kde_tier_lines. Value,
+        # HighRisk, and Lotto are legitimately NULL when no qualifying line
+        # or market price exists at that threshold (ADR-20260423-1).
+        "row_key": ["grade_date", "game_id", "player_id", "market_key"],
+        "always_required": [
+            "tier_id", "grade_date", "game_id", "player_id", "market_key",
+            "kde_window", "blowout_dampened",
+            "safe_line", "safe_prob",
+        ],
+        "required_when": {},
+    },
+}
 
 
 # =====================================================================
@@ -101,7 +359,124 @@ CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {}
 #       ''',
 #       'severity': 'warn',
 #   }
-RELATIONAL_CHECKS: Dict[str, Dict[str, Any]] = {}
+RELATIONAL_CHECKS: Dict[str, Dict[str, Any]] = {
+
+    # Every started game in the last 30 days should have lineup rows for both
+    # teams. Typical NBA roster is 13-17 per team; 20 total is a conservative
+    # lower bound that catches "we only got the five starters" (seen on the
+    # 2026-04-23 playoff regression when boxscorepreviewv3 populated only 10
+    # starters per team).
+    "nba_lineup_coverage_30d": {
+        "description": "nba.schedule games with status>=1 in last 30d should have >=20 daily_lineups rows",
+        "query": """
+            SELECT s.game_id, s.game_date,
+                   COUNT(dl.player_name) AS lineup_rows
+            FROM nba.schedule s
+            LEFT JOIN nba.daily_lineups dl ON dl.game_id = s.game_id
+            WHERE s.game_status >= 1
+              AND s.game_date >= DATEADD(day, -30, GETUTCDATE())
+            GROUP BY s.game_id, s.game_date
+            HAVING COUNT(dl.player_name) < 20
+            ORDER BY s.game_date DESC
+        """,
+        "severity": "warn",
+    },
+
+    # Every completed game should have box score rows. Lack = ETL failure.
+    "nba_boxscores_missing_30d": {
+        "description": "nba.schedule games with status=3 in last 30d should have player_box_score_stats rows",
+        "query": """
+            SELECT s.game_id, s.game_date
+            FROM nba.schedule s
+            LEFT JOIN (
+                SELECT DISTINCT game_id FROM nba.player_box_score_stats
+            ) bs ON bs.game_id = s.game_id
+            WHERE s.game_status = 3
+              AND s.game_date >= DATEADD(day, -30, GETUTCDATE())
+              AND bs.game_id IS NULL
+            ORDER BY s.game_date DESC
+        """,
+        "severity": "error",
+    },
+
+    # Every box score player should have a corresponding lineup row for that
+    # game. A player appearing in the box score without a lineup row is a gap.
+    "nba_boxscore_lineup_alignment_30d": {
+        "description": "every box score player should have a daily_lineups row for that game",
+        "query": """
+            SELECT DISTINCT bs.game_id, bs.player_id, p.player_name
+            FROM nba.player_box_score_stats bs
+            LEFT JOIN nba.players p ON p.player_id = bs.player_id
+            LEFT JOIN nba.daily_lineups dl
+                ON dl.game_id = bs.game_id
+               AND dl.player_name = p.player_name
+            INNER JOIN nba.schedule s ON s.game_id = bs.game_id
+            WHERE s.game_date >= DATEADD(day, -30, GETUTCDATE())
+              AND dl.player_name IS NULL
+        """,
+        "severity": "warn",
+    },
+
+    # Active-roster players must have a team.
+    "nba_active_players_have_team": {
+        "description": "nba.players with roster_status=1 must have team_id",
+        "query": """
+            SELECT player_id, player_name
+            FROM nba.players
+            WHERE roster_status = 1
+              AND team_id IS NULL
+        """,
+        "severity": "error",
+    },
+
+    # Every nba.games row must have a matching schedule entry.
+    "nba_games_have_schedule": {
+        "description": "every nba.games row must have a matching nba.schedule entry",
+        "query": """
+            SELECT g.game_id
+            FROM nba.games g
+            LEFT JOIN nba.schedule s ON s.game_id = g.game_id
+            WHERE s.game_id IS NULL
+        """,
+        "severity": "error",
+    },
+
+    # NBA odds events within 24h of commence should have a game_id mapping.
+    "odds_nba_events_mapped_24h": {
+        "description": "odds.upcoming_events basketball_nba near commence should be mapped",
+        "query": """
+            SELECT e.event_id, e.commence_time
+            FROM odds.upcoming_events e
+            LEFT JOIN odds.event_game_map m ON m.event_id = e.event_id
+            WHERE e.sport_key = 'basketball_nba'
+              AND e.commence_time <= DATEADD(hour, 24, GETUTCDATE())
+              AND e.commence_time >= DATEADD(day, -7, GETUTCDATE())
+              AND m.event_id IS NULL
+        """,
+        "severity": "warn",
+    },
+
+    # daily_grades and player_tier_lines ship in lockstep per ADR-20260423-1.
+    # A grade with no matching tier row = tier computation failed.
+    "nba_grades_have_tier_lines_7d": {
+        "description": "daily_grades rows in last 7d should have matching player_tier_lines (Over side)",
+        "query": """
+            SELECT DISTINCT g.grade_date, g.game_id, g.player_id, g.market_key
+            FROM common.daily_grades g
+            LEFT JOIN common.player_tier_lines t
+                ON t.grade_date = g.grade_date
+               AND t.game_id = g.game_id
+               AND t.player_id = g.player_id
+               AND t.market_key = g.market_key
+            WHERE g.grade_date >= DATEADD(day, -7, GETUTCDATE())
+              AND g.outcome_name = 'Over'
+              AND g.player_id IS NOT NULL
+              AND g.game_id IS NOT NULL
+              AND t.tier_id IS NULL
+        """,
+        "severity": "warn",
+    },
+}
 
 
 # =====================================================================
@@ -375,48 +750,96 @@ def validate_and_filter(
 def retroactive_scan(engine) -> Dict[str, int]:
     """
     For each table in CRITICAL_FIELDS, detect existing production rows that
-    violate always_required invariants. Write one row per (table, row_key,
-    column) violation to common.data_completeness_log with
+    violate always_required or required_when invariants. Write one row per
+    (table, row_key, column) violation to common.data_completeness_log with
     detected_retroactively = 1.
 
-    Does NOT move existing production rows out to quarantine — retroactive
+    Does NOT move existing production rows to quarantine — retroactive
     movement is unsafe. The scan is visibility-only.
 
-    Currently scans only always_required rules. required_when scan-time
-    support is added per-table during the cataloging phase via sql_predicate
-    expressions (see CRITICAL_FIELDS structure comment).
+    Idempotent via MERGE semantics against UQ_completeness_log. Re-running
+    only inserts new violations found since the last run.
 
-    Returns dict of {table_name: total_violations_detected}.
+    Returns dict of {table_name: rows_merged_on_this_run}.
     """
     results: Dict[str, int] = {}
     with engine.begin() as conn:
         for table_name, rules in CRITICAL_FIELDS.items():
             always_required = rules.get("always_required", [])
+            required_when = rules.get("required_when", {})
             key_cols = rules.get("row_key", [])
-            if not always_required or not key_cols:
+            if not key_cols:
                 results[table_name] = 0
                 continue
 
-            table_count = 0
+            # Build row_key expression from the source row, aliased as t.
+            # NVARCHAR(50) per part; ISNULL guard keeps the expression safe
+            # for nullable key columns (e.g., common.daily_grades.player_id).
             key_expr = " + '|' + ".join(
-                f"'{k}=' + CAST(t.[{k}] AS NVARCHAR(100))" for k in key_cols
+                f"'{k}=' + ISNULL(CAST(t.[{k}] AS NVARCHAR(50)), 'NULL')"
+                for k in key_cols
             )
+
+            table_count = 0
+
+            # always_required violations
             for col in always_required:
-                insert_sql = text(f"""
-                    INSERT INTO common.data_completeness_log
-                        (table_name, row_key, column_name, detected_retroactively, notes)
-                    SELECT :tbl, {key_expr}, :col, 1, 'Retroactive scan'
-                    FROM {table_name} t
-                    WHERE t.[{col}] IS NULL
-                    AND NOT EXISTS (
-                        SELECT 1 FROM common.data_completeness_log dcl
-                        WHERE dcl.table_name = :tbl
-                          AND dcl.row_key = {key_expr}
-                          AND dcl.column_name = :col
-                    )
+                merge_sql = text(f"""
+                    MERGE common.data_completeness_log AS tgt
+                    USING (
+                        SELECT :tbl AS table_name,
+                               {key_expr} AS row_key,
+                               :col AS column_name
+                        FROM {table_name} t
+                        WHERE t.[{col}] IS NULL
+                    ) AS src
+                    ON tgt.table_name = src.table_name
+                       AND tgt.row_key = src.row_key
+                       AND tgt.column_name = src.column_name
+                    WHEN NOT MATCHED BY TARGET THEN
+                        INSERT (table_name, row_key, column_name,
+                                detected_retroactively, notes)
+                        VALUES (src.table_name, src.row_key, src.column_name,
+                                1, :notes);
                 """)
-                result = conn.execute(insert_sql, {"tbl": table_name, "col": col})
+                result = conn.execute(merge_sql, {
+                    "tbl": table_name, "col": col,
+                    "notes": "Retroactive: always_required",
+                })
                 table_count += result.rowcount or 0
+
+            # required_when violations (uses sql_predicate; py_predicate is
+            # write-time only)
+            for col, spec in required_when.items():
+                sql_pred = spec.get("sql_predicate")
+                if not sql_pred:
+                    continue
+                description = spec.get("description", "required_when predicate")
+                merge_sql = text(f"""
+                    MERGE common.data_completeness_log AS tgt
+                    USING (
+                        SELECT :tbl AS table_name,
+                               {key_expr} AS row_key,
+                               :col AS column_name
+                        FROM {table_name} t
+                        WHERE t.[{col}] IS NULL
+                          AND ({sql_pred})
+                    ) AS src
+                    ON tgt.table_name = src.table_name
+                       AND tgt.row_key = src.row_key
+                       AND tgt.column_name = src.column_name
+                    WHEN NOT MATCHED BY TARGET THEN
+                        INSERT (table_name, row_key, column_name,
+                                detected_retroactively, notes)
+                        VALUES (src.table_name, src.row_key, src.column_name,
+                                1, :notes);
+                """)
+                result = conn.execute(merge_sql, {
+                    "tbl": table_name, "col": col,
+                    "notes": f"Retroactive: required_when ({description})",
+                })
+                table_count += result.rowcount or 0
+
             results[table_name] = table_count
     return results
 
