@@ -1,0 +1,265 @@
+name: Investigate Integrity Findings
+
+# One-off investigation workflow. Answers the open questions from the
+# 2026-04-24 Phase 3 retroactive-scan dry-run: are the flagged violations
+# catalog bugs, real data gaps, or legitimate historical rows?
+#
+# Read-only. No writes to production or framework tables.
+# Remove this workflow once findings are acted upon.
+
+on:
+  workflow_dispatch:
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  investigate:
+    runs-on: [self-hosted, schnapp-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Activate venv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+      - name: Run investigations
+        run: |
+          python << 'PYEOF'
+          from etl.db import get_engine
+          from sqlalchemy import text
+
+          eng = get_engine()
+
+          def banner(s):
+              print()
+              print("=" * 78)
+              print(s)
+              print("=" * 78)
+
+          def dump_cols(conn, schema, table):
+              rows = conn.execute(text(
+                  "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+                  "WHERE table_schema = :s AND table_name = :t ORDER BY ordinal_position"
+              ), {"s": schema, "t": table}).fetchall()
+              for r in rows:
+                  print(f"    {r.column_name}: {r.data_type}{' NULL' if r.is_nullable == 'YES' else ' NOT NULL'}")
+
+          with eng.connect() as conn:
+
+              banner("A. odds.event_game_map NULL game_id")
+              print("Schema:")
+              dump_cols(conn, 'odds', 'event_game_map')
+
+              # Pattern by year
+              print("\nBy year (NULL game_id only):")
+              rows = conn.execute(text("""
+                  SELECT YEAR(game_date) AS yr, COUNT(*) AS cnt
+                  FROM odds.event_game_map
+                  WHERE game_id IS NULL
+                  GROUP BY YEAR(game_date)
+                  ORDER BY yr DESC
+              """)).fetchall()
+              for r in rows:
+                  print(f"    {r.yr}: {r.cnt}")
+
+              # Sample rows
+              print("\nSample NULL game_id rows (5 most recent):")
+              rows = conn.execute(text("""
+                  SELECT TOP 5 event_id, game_id, game_date
+                  FROM odds.event_game_map
+                  WHERE game_id IS NULL
+                  ORDER BY game_date DESC
+              """)).fetchall()
+              for r in rows:
+                  print(f"    event_id={r.event_id} game_date={r.game_date}")
+
+              # Join with upcoming_events to see sport
+              print("\nBy sport (joined via upcoming_events; historical events won't join):")
+              try:
+                  rows = conn.execute(text("""
+                      SELECT
+                          COALESCE(e.sport_key, '(not in upcoming_events)') AS sk,
+                          COUNT(*) AS cnt
+                      FROM odds.event_game_map m
+                      LEFT JOIN odds.upcoming_events e ON e.event_id = m.event_id
+                      WHERE m.game_id IS NULL
+                      GROUP BY e.sport_key
+                      ORDER BY cnt DESC
+                  """)).fetchall()
+                  for r in rows:
+                      print(f"    {r.sk}: {r.cnt}")
+              except Exception as ex:
+                  print(f"    (query failed: {ex})")
+
+              # Check if there is any historical events table we can join to
+              print("\nAll odds tables containing 'event':")
+              rows = conn.execute(text("""
+                  SELECT table_name FROM information_schema.tables
+                  WHERE table_schema = 'odds' AND table_name LIKE '%event%'
+              """)).fetchall()
+              for r in rows:
+                  print(f"    odds.{r.table_name}")
+
+              banner("B. odds.player_map NULL mappings")
+              print("Schema:")
+              dump_cols(conn, 'odds', 'player_map')
+
+              print("\nBy sport_key:")
+              rows = conn.execute(text("""
+                  SELECT
+                      sport_key,
+                      COUNT(*) AS total_rows,
+                      SUM(CASE WHEN player_id IS NULL THEN 1 ELSE 0 END) AS null_pid,
+                      SUM(CASE WHEN matched_name IS NULL THEN 1 ELSE 0 END) AS null_matched,
+                      MIN(created_at) AS earliest,
+                      MAX(created_at) AS latest
+                  FROM odds.player_map
+                  GROUP BY sport_key
+                  ORDER BY total_rows DESC
+              """)).fetchall()
+              for r in rows:
+                  print(f"    {r.sport_key}: {r.total_rows} total, {r.null_pid} NULL pid, {r.null_matched} NULL matched")
+                  print(f"      created: {r.earliest} to {r.latest}")
+
+              print("\nBy match_method:")
+              rows = conn.execute(text("""
+                  SELECT match_method, COUNT(*) AS cnt
+                  FROM odds.player_map
+                  GROUP BY match_method
+                  ORDER BY cnt DESC
+              """)).fetchall()
+              for r in rows:
+                  mm = r.match_method if r.match_method is not None else '(NULL)'
+                  print(f"    {mm}: {r.cnt}")
+
+              # Sample NULL names
+              print("\nSample NULL-pid names (30, NBA first):")
+              rows = conn.execute(text("""
+                  SELECT TOP 30 odds_player_name, sport_key, match_method, created_at
+                  FROM odds.player_map
+                  WHERE player_id IS NULL
+                  ORDER BY sport_key, odds_player_name
+              """)).fetchall()
+              for r in rows:
+                  print(f"    [{r.sport_key}] {r.odds_player_name} (method={r.match_method}, created={r.created_at})")
+
+              banner("C. common.daily_grades — 13,664 rows with NULL hit_rate_60/grade")
+              print("Schema (key columns):")
+              rows = conn.execute(text("""
+                  SELECT column_name, data_type, is_nullable FROM information_schema.columns
+                  WHERE table_schema = 'common' AND table_name = 'daily_grades'
+                    AND column_name IN ('hit_rate_60','sample_size_60','grade','composite_grade','market_key','player_id','grade_date','game_id','outcome_name','outcome_point','line_value')
+                  ORDER BY column_name
+              """)).fetchall()
+              for r in rows:
+                  print(f"    {r.column_name}: {r.data_type}{' NULL' if r.is_nullable == 'YES' else ' NOT NULL'}")
+
+              print("\nSample NULL-hit_rate rows (10):")
+              rows = conn.execute(text("""
+                  SELECT TOP 10 grade_date, player_name, market_key, sample_size_60, hit_rate_60, grade, composite_grade, line_value, outcome_name
+                  FROM common.daily_grades
+                  WHERE hit_rate_60 IS NULL
+                  ORDER BY grade_date DESC
+              """)).fetchall()
+              for r in rows:
+                  print(f"    {r.grade_date} {r.player_name or '(none)'} / {r.market_key} line={r.line_value} {r.outcome_name}")
+                  print(f"       sample_size_60={r.sample_size_60} hit_rate_60={r.hit_rate_60} grade={r.grade} composite={r.composite_grade}")
+
+              print("\nDistribution of sample_size_60 on NULL-hit_rate rows:")
+              rows = conn.execute(text("""
+                  SELECT
+                      CASE
+                          WHEN sample_size_60 IS NULL THEN 'NULL'
+                          WHEN sample_size_60 = 0 THEN '0'
+                          WHEN sample_size_60 BETWEEN 1 AND 5 THEN '1-5'
+                          WHEN sample_size_60 BETWEEN 6 AND 20 THEN '6-20'
+                          WHEN sample_size_60 BETWEEN 21 AND 60 THEN '21-60'
+                          ELSE '60+'
+                      END AS bucket,
+                      COUNT(*) AS cnt
+                  FROM common.daily_grades
+                  WHERE hit_rate_60 IS NULL
+                  GROUP BY
+                      CASE
+                          WHEN sample_size_60 IS NULL THEN 'NULL'
+                          WHEN sample_size_60 = 0 THEN '0'
+                          WHEN sample_size_60 BETWEEN 1 AND 5 THEN '1-5'
+                          WHEN sample_size_60 BETWEEN 6 AND 20 THEN '6-20'
+                          WHEN sample_size_60 BETWEEN 21 AND 60 THEN '21-60'
+                          ELSE '60+'
+                      END
+                  ORDER BY cnt DESC
+              """)).fetchall()
+              for r in rows:
+                  print(f"    sample_size_60 {r.bucket}: {r.cnt}")
+
+              banner("D. common.player_tier_lines — 3,087 rows with NULL safe_line/prob")
+              print("Sample NULL-safe_line rows (10):")
+              rows = conn.execute(text("""
+                  SELECT TOP 10 grade_date, player_id, market_key, composite_grade, kde_window,
+                                 safe_line, safe_prob, value_line, highrisk_line, lotto_line
+                  FROM common.player_tier_lines
+                  WHERE safe_line IS NULL
+                  ORDER BY grade_date DESC
+              """)).fetchall()
+              for r in rows:
+                  print(f"    {r.grade_date} pid={r.player_id} / {r.market_key} kde={r.kde_window} composite={r.composite_grade}")
+                  print(f"       safe=({r.safe_line},{r.safe_prob}) value={r.value_line} high={r.highrisk_line} lotto={r.lotto_line}")
+
+              # When did the NULLs land
+              print("\nNULL-safe_line by grade_date (last 20 with NULLs):")
+              rows = conn.execute(text("""
+                  SELECT TOP 20 grade_date, COUNT(*) AS cnt
+                  FROM common.player_tier_lines
+                  WHERE safe_line IS NULL
+                  GROUP BY grade_date
+                  ORDER BY grade_date DESC
+              """)).fetchall()
+              for r in rows:
+                  print(f"    {r.grade_date}: {r.cnt}")
+
+              banner("E. MLB coverage sanity")
+              # Does MLB data show up in event_game_map, daily_grades?
+              print("odds.event_game_map MLB-looking rows (game_id containing MLB markers):")
+              rows = conn.execute(text("""
+                  SELECT TOP 5
+                      COUNT(*) OVER () AS total,
+                      game_id, game_date
+                  FROM odds.event_game_map
+                  WHERE game_id IS NOT NULL
+                    AND (game_id NOT LIKE '002%' AND LEN(game_id) <> 10)
+                  ORDER BY game_date DESC
+              """)).fetchall()
+              if rows:
+                  print(f"    total non-NBA-looking: {rows[0].total}")
+                  for r in rows:
+                      print(f"      {r.game_id} / {r.game_date}")
+              else:
+                  print("    none (all mapped games look like NBA 10-digit IDs)")
+
+              # Distinct market_key families in daily_grades
+              print("\ncommon.daily_grades market_key families:")
+              rows = conn.execute(text("""
+                  SELECT
+                      CASE
+                          WHEN market_key LIKE 'player_%' THEN 'player_* (NBA-style)'
+                          WHEN market_key LIKE 'batter_%' THEN 'batter_* (MLB)'
+                          WHEN market_key LIKE 'pitcher_%' THEN 'pitcher_* (MLB)'
+                          ELSE 'other'
+                      END AS family,
+                      COUNT(*) AS cnt,
+                      MIN(grade_date) AS earliest,
+                      MAX(grade_date) AS latest
+                  FROM common.daily_grades
+                  GROUP BY CASE
+                          WHEN market_key LIKE 'player_%' THEN 'player_* (NBA-style)'
+                          WHEN market_key LIKE 'batter_%' THEN 'batter_* (MLB)'
+                          WHEN market_key LIKE 'pitcher_%' THEN 'pitcher_* (MLB)'
+                          ELSE 'other'
+                      END
+                  ORDER BY cnt DESC
+              """)).fetchall()
+              for r in rows:
+                  print(f"    {r.family}: {r.cnt} rows, {r.earliest} to {r.latest}")
+          PYEOF
