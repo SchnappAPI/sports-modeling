@@ -708,3 +708,68 @@ D. **MLB scope.** MLB grading does not yet exist (ADR-20260424-3 sequencing). Bu
 - ADR-20260424-2 (data integrity framework — adds a relational check covered here)
 - ADR-20260424-3 (initiative sequence — this falls inside Initiative A's ongoing iteration)
 
+## ADR-20260424-5 — Tier-line justification via historical + recent hit signals
+
+**Status:** Proposed. Amends ADR-20260424-4 before implementation. Austin's answer to Q1 on proximity band revealed the frame was wrong; this ADR captures the corrected approach.
+
+**Context**
+
+ADR-20260424-4 proposed a ±100% proximity band around the posted center as control 3. Austin pushed back: the purpose of HighRisk and Lotto tiers is to surface extreme cases that the player has a real chance of hitting. Proximity band actively suppresses the exact cases those tiers exist to find. His concrete example: player averages 20pts hit rate 17% season-long, 5% last 20 games, usage increasing. Multiple signals pointing different directions. The user should see them, not have the model collapse them into one suppress/surface decision.
+
+The right frame is not "is this line reasonable relative to center." It is "has this player done this before, and is there signal they might again."
+
+Controls 1, 2, 4 from ADR-20260424-4 are unchanged (posted-line source, -500 implied-odds ceiling, isotonic calibration). Q2/Q3/Q4 answers from the same round are incorporated: isotonic with inspectable bucket view, no row when all four tiers NULL, NBA only for v1.
+
+**Decision**
+
+*Amended control 3 — historical-justification filter.* A tier line is surfaced only if the player has hit that threshold at least once in available game history for that stat. Zero-history lines do not surface at any tier. Lighter-touch than proximity and directly tied to the "no good reason" test.
+
+*Market exclusion.* `TIER_EXCLUDED_MARKETS = {player_blocks, player_blocks_alternate, player_steals, player_steals_alternate}`. Bypass tier computation entirely for these markets.
+
+*New — supporting-context columns on common.player_tier_lines.* For each tier that gets a line, emit the raw hit evidence alongside the calibrated probability. Per tier, four new columns:
+
+- `<tier>_hits_all` (INT) — total games where player hit at or above the line
+- `<tier>_games_all` (INT) — total games in the full history considered
+- `<tier>_hits_20` (INT) — hits in last 20 games played by this player
+- `<tier>_games_20` (INT) — denominator for the recent window (usually 20, less if player has fewer games on record)
+
+Applied to all four tiers: 16 new columns total. Existing rows get NULL until regeneration.
+
+*Recent window.* `RECENT_GAMES_WINDOW = 20` games. Defined as player's last 20 games played working backward from tonight's date, not calendar window. Short enough to reflect current form, long enough to be statistically meaningful.
+
+*UI downstream (tracked separately).* Columns enable surfacing: "Lotto 30pts @ 22% — hit 2/15 recent, 5/200 all-time." User sees the evidence behind each tier and decides trust. Model does not hide its reasoning.
+
+**Consequences**
+
+Positive:
+- HighRisk and Lotto tiers do their actual job: find extremes with precedent rather than filter them by distance from center.
+- Raw hit counts alongside calibrated probability create a feedback loop — if calibration drifts from historical reality, it is visible.
+- Historical-precedent filter is a genuine "no good reason" test without suppressing legitimate extremes.
+- UI layer gets enough to surface the "why" of each tier line.
+
+Negative:
+- 16 new columns on common.player_tier_lines. Schema migration is additive so back-compat is fine; old rows NULL until regenerated.
+- compute_kde_tier_lines needs per-tier hit counts. Cheapest implementation: compute while fitting the KDE — the KDE already consumes the full game-level distribution, so tallying hits above each candidate line is additional bookkeeping on existing data, no new queries.
+- Out-of-scope for v1: context-similarity analysis. Austin flagged it as worth doing ("see the before and after games of previous times they hit this"). Deferred to a post-implementation evaluation — evaluate whether v1's historical + recent stats are sufficient before investing in feature-matching.
+
+**Implementation plan**
+
+1. Schema migration: add 16 columns to common.player_tier_lines. Additive only, no type changes.
+2. Write grading/calibrate_grades.py: fit isotonic regression on resolved daily_grades outcomes, output calibration mapping. Also produce bucket inspection table for sanity checks.
+3. Rewrite compute_kde_tier_lines in grade_props.py:
+   - Apply TIER_EXCLUDED_MARKETS before anything else.
+   - For each tier threshold, among posted alt lines:
+     - Filter by -500 implied odds ceiling.
+     - Filter by historical hits >= 1.
+     - Pick the line closest to the threshold.
+     - Tally hits_all / games_all / hits_20 / games_20 from the KDE's underlying distribution.
+   - Apply isotonic calibration to the emitted probability.
+   - If no tier produces a line, no row is written (ADR-4 Q3 answer).
+4. Force-regrade last 30 days via grading.yml backfill. Inspect: tier-line emission rates, new column values, before/after comparison.
+5. Monitor first week: volume, distribution of hit counts, any UI weirdness.
+
+**Related ADRs**
+
+- ADR-20260424-4 — controls 1, 2, 4 unchanged; control 3 replaced by this ADR.
+- ADR-20260423-1 — tier_lines schema; this ADR extends additively, no contradiction.
+

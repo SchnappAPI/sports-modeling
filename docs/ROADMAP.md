@@ -43,7 +43,7 @@ These came up during planning conversations and were explicitly not decided:
 Initiative A (data integrity framework) Phase 3 complete. Catalog reconciled: 272,703 → 29 violations, all remaining are known All-Star / non-team-sport edges. MLB odds daily cadence restored.
 
 **Active:**
-- Await Austin sign-off on ADR-20260424-4 (tier-line discretion). Four open questions in the ADR block implementation.
+- Implement ADR-20260424-5 (tier-line justification). Q1-Q4 of ADR-4 answered; ADR-5 supersedes control 3 with the corrected historical-justification frame. Schema migration first (16 additive columns), then calibration script, then compute_kde_tier_lines rewrite, then 30-day backfill.
 - Monitor tonight's 10:00 UTC odds-etl.yml for successful MLB upcoming ingest (first run after the --sport all change).
 
 **Next-up (in order):**
