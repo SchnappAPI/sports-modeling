@@ -60,7 +60,10 @@ jobs:
           github.event.inputs.mode == 'upcoming'
         run: |
           DAYS="${{ github.event.inputs.days_ahead || '1' }}"
-          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          # Scheduled daily run: sport input is empty, default to 'all' so MLB/NFL
+          # get upcoming odds on the same cadence as NBA. Manual dispatch with
+          # sport=nba/mlb/nfl overrides.
+          SPORT="${{ github.event.inputs.sport || 'all' }}"
           python etl/odds_etl.py --mode upcoming --sport $SPORT --days-ahead $DAYS
 
       - name: Discover (pipeline or explicit)
