@@ -79,6 +79,29 @@ TIER_LOTTO_PROB     = 0.07
 TIER_HIGHRISK_MIN_PRICE = 150
 TIER_LOTTO_MIN_PRICE    = 400
 
+# ADR-20260424-5: Tier discretion controls.
+IMPLIED_ODDS_CEILING = -500  # reject Over prices stronger than this (implied > 83.3%)
+RECENT_GAMES_WINDOW  = 20    # recent form window for hit stats and opportunity averages
+TIER_EXCLUDED_MARKETS = frozenset([
+    "player_blocks",
+    "player_blocks_alternate",
+    "player_steals",
+    "player_steals_alternate",
+])
+# Per-market opportunity signal column (from fetch_opportunity_history output).
+# Missing entries => opportunity columns emit NULL for that market.
+MARKET_OPPORTUNITY_COL = {
+    "player_points":               "fga",
+    "player_points_alternate":     "fga",
+    "player_threes":               "fg3a",
+    "player_threes_alternate":     "fg3a",
+    "player_rebounds":             "reb_chances",
+    "player_rebounds_alternate":   "reb_chances",
+    "player_assists":              "potential_ast",
+    "player_assists_alternate":    "potential_ast",
+    # Combo markets (PR, PA, RA, PRA and _alternate) omitted in v1; NULL opportunity.
+}
+
 # Blowout dampening: applied when pre-game spread >= this threshold and
 # player is on projected losing team. Points/combo markets only.
 BLOWOUT_SPREAD_THRESHOLD = 10.5
@@ -509,103 +532,169 @@ def compute_kde_tier_lines(
     available_lines: list,
     price_lookup: dict,
     blowout_delta: float = 0.0,
+    market_key: str = None,
+    minutes_values: np.ndarray = None,
+    opportunity_values: np.ndarray = None,
+    calibrator = None,
 ) -> dict:
     """
     Compute tier line values from the player's stat distribution.
-
-    Args:
-        stat_values:      Full season game log for this stat (sorted ASC by date).
-        composite_grade:  New composite grade (0-100) for this player-market.
-        available_lines:  Sorted list of line values available in the market
-                          (standard + alternate). Can be empty.
-        price_lookup:     Dict of {line_value: american_odds} for Over prices.
-                          Used to find qualifying prices for high_risk/lotto.
-        blowout_delta:    Points to subtract from each stat value before fitting
-                          KDE (only for pts/combo markets when blowout risk is
-                          high and player is on projected losing team).
-                          Derived from player's historical blowout loss profile.
-
-    Returns dict with keys:
-        safe_line, safe_prob,
-        value_line, value_prob,
-        highrisk_line, highrisk_prob, highrisk_price,
-        lotto_line, lotto_prob, lotto_price,
-        kde_window, blowout_dampened
+    Per ADR-20260424-5:
+      - Uses ONLY posted alternate lines (no dense_grid interpolation).
+      - Applies -500 implied-odds ceiling across all tiers.
+      - Skips markets in TIER_EXCLUDED_MARKETS (blocks / steals).
+      - Returns per-tier hit evidence: hits_all, games_all, hits_20, games_20.
+      - Returns per-player-market opportunity context: recent_minutes_20,
+        recent_opportunity, historical_opportunity.
+      - Applies isotonic calibrator to tier probabilities.
     """
     result = {
-        "safe_line": None, "safe_prob": None,
-        "value_line": None, "value_prob": None,
+        "safe_line": None, "safe_prob": None, "safe_price": None,
+        "value_line": None, "value_prob": None, "value_price": None,
         "highrisk_line": None, "highrisk_prob": None, "highrisk_price": None,
         "lotto_line": None, "lotto_prob": None, "lotto_price": None,
+        "safe_hits_all": None, "safe_games_all": None, "safe_hits_20": None, "safe_games_20": None,
+        "value_hits_all": None, "value_games_all": None, "value_hits_20": None, "value_games_20": None,
+        "highrisk_hits_all": None, "highrisk_games_all": None, "highrisk_hits_20": None, "highrisk_games_20": None,
+        "lotto_hits_all": None, "lotto_games_all": None, "lotto_hits_20": None, "lotto_games_20": None,
+        "recent_minutes_20": None,
+        "recent_opportunity": None,
+        "historical_opportunity": None,
         "kde_window": None, "blowout_dampened": False,
     }
 
+    # Bypass excluded markets entirely
+    if market_key in TIER_EXCLUDED_MARKETS:
+        return result
+
+    # Opportunity context (always computed when data present; independent of KDE)
+    if minutes_values is not None:
+        mv = np.asarray(minutes_values, dtype=float)
+        mv = mv[~np.isnan(mv)]
+        if len(mv) >= 1:
+            recent_min = mv[-RECENT_GAMES_WINDOW:] if len(mv) >= RECENT_GAMES_WINDOW else mv
+            result["recent_minutes_20"] = float(round(np.mean(recent_min), 2))
+
+    if opportunity_values is not None:
+        ov = np.asarray(opportunity_values, dtype=float)
+        ov = ov[~np.isnan(ov)]
+        if len(ov) >= 1:
+            result["historical_opportunity"] = float(round(np.mean(ov), 2))
+            recent_opp = ov[-RECENT_GAMES_WINDOW:] if len(ov) >= RECENT_GAMES_WINDOW else ov
+            result["recent_opportunity"] = float(round(np.mean(recent_opp), 2))
+
+    # KDE needs 3+ games
     if stat_values is None or len(stat_values) < 3:
         return result
 
     window = _select_kde_window(composite_grade)
     result["kde_window"] = window
 
-    # Apply grade-weighted window
     values = stat_values[-window:] if len(stat_values) > window else stat_values
-    values = values.astype(float)
+    values = np.asarray(values, dtype=float)
 
-    # Apply blowout dampening: shift the distribution left by delta
     if blowout_delta != 0.0:
         values = np.maximum(values - abs(blowout_delta), 0.0)
         result["blowout_dampened"] = True
 
-    # Build candidate lines: union of available market lines and a dense grid
-    # across the player's plausible stat range. This ensures we always find
-    # tier cutoffs even when the market hasn't posted lines in that range.
-    p5  = float(np.percentile(values, 5))
-    p95 = float(np.percentile(values, 95))
-    step = 0.5
-    grid_min = max(0.0, p5 - 5.0)
-    grid_max = p95 + 15.0
-    dense_grid = list(np.arange(grid_min, grid_max + step, step))
-
-    posted_lines = sorted(set(dense_grid + [float(l) for l in available_lines]))
-
-    # Compute P(stat > line) for every candidate line
+    # Posted lines only — no dense_grid
+    if not available_lines:
+        return result
+    posted_lines = sorted({float(l) for l in available_lines})
     probs = [(line, _kde_prob_above(values, line)) for line in posted_lines]
 
-    # Safe: highest line where P >= TIER_SAFE_PROB
-    safe_candidates = [(l, p) for l, p in probs if p >= TIER_SAFE_PROB]
+    # -500 implied-odds cap: reject prices more negative than -500
+    def _passes_price_cap(line):
+        price = price_lookup.get(line)
+        if price is None:
+            return True
+        try:
+            p = int(price)
+        except (TypeError, ValueError):
+            return True
+        if p < 0 and p < IMPLIED_ODDS_CEILING:
+            return False
+        return True
+
+    # Apply isotonic calibrator if present
+    def _cal(p):
+        if p is None:
+            return None
+        if calibrator is not None:
+            try:
+                return round(float(calibrator(p)), 4)
+            except Exception:
+                return round(float(p), 4)
+        return round(float(p), 4)
+
+    # Hit stats for the picked line, computed from full stat_values (not windowed)
+    all_arr = np.asarray(stat_values, dtype=float)
+    all_arr = all_arr[~np.isnan(all_arr)]
+    recent_arr = all_arr[-RECENT_GAMES_WINDOW:] if len(all_arr) >= 1 else all_arr
+
+    def _hits(line):
+        return {
+            "hits_all":  int(np.sum(all_arr >= line)),
+            "games_all": int(len(all_arr)),
+            "hits_20":   int(np.sum(recent_arr >= line)),
+            "games_20":  int(len(recent_arr)),
+        }
+
+    # Safe: highest line where P >= SAFE and price passes cap
+    safe_candidates = [(l, p) for l, p in probs if p >= TIER_SAFE_PROB and _passes_price_cap(l)]
     if safe_candidates:
-        result["safe_line"] = safe_candidates[-1][0]
-        result["safe_prob"] = round(safe_candidates[-1][1], 4)
+        line, prob = safe_candidates[-1]
+        result["safe_line"] = line
+        result["safe_prob"] = _cal(prob)
+        result["safe_price"] = price_lookup.get(line)
+        h = _hits(line)
+        result["safe_hits_all"]  = h["hits_all"]
+        result["safe_games_all"] = h["games_all"]
+        result["safe_hits_20"]   = h["hits_20"]
+        result["safe_games_20"]  = h["games_20"]
 
-    # Value: highest line where P >= TIER_VALUE_PROB (must be above safe line)
+    # Value: above safe floor, P >= VALUE, passes cap
     safe_floor = result["safe_line"] or 0.0
-    value_candidates = [(l, p) for l, p in probs if p >= TIER_VALUE_PROB and l > safe_floor]
+    value_candidates = [(l, p) for l, p in probs
+                        if p >= TIER_VALUE_PROB and l > safe_floor and _passes_price_cap(l)]
     if value_candidates:
-        result["value_line"] = value_candidates[-1][0]
-        result["value_prob"] = round(value_candidates[-1][1], 4)
+        line, prob = value_candidates[-1]
+        result["value_line"] = line
+        result["value_prob"] = _cal(prob)
+        result["value_price"] = price_lookup.get(line)
+        h = _hits(line)
+        result["value_hits_all"]  = h["hits_all"]
+        result["value_games_all"] = h["games_all"]
+        result["value_hits_20"]   = h["hits_20"]
+        result["value_games_20"]  = h["games_20"]
 
-    # High risk: highest line where P >= TIER_HIGHRISK_PROB AND market offers +150 or better.
-    # Only populate if a qualifying price exists near that line (within 0.5).
+    # HighRisk: above value floor, P >= HIGHRISK, passes cap, price floor +150
     value_floor = result["value_line"] or safe_floor
     for line, prob in reversed(probs):
         if prob < TIER_HIGHRISK_PROB:
             continue
         if line <= value_floor:
             continue
-        # Find closest posted price
+        if not _passes_price_cap(line):
+            continue
         closest_price = None
-        for candidate_line, price in price_lookup.items():
-            if abs(candidate_line - line) <= 0.5 and price is not None:
+        for cand_line, price in price_lookup.items():
+            if abs(cand_line - line) <= 0.5 and price is not None:
                 if price >= TIER_HIGHRISK_MIN_PRICE:
                     if closest_price is None or price > closest_price:
                         closest_price = price
         if closest_price is not None:
-            result["highrisk_line"] = line
-            result["highrisk_prob"] = round(prob, 4)
+            result["highrisk_line"]  = line
+            result["highrisk_prob"]  = _cal(prob)
             result["highrisk_price"] = closest_price
+            h = _hits(line)
+            result["highrisk_hits_all"]  = h["hits_all"]
+            result["highrisk_games_all"] = h["games_all"]
+            result["highrisk_hits_20"]   = h["hits_20"]
+            result["highrisk_games_20"]  = h["games_20"]
             break
 
-    # Lotto: highest line where P >= TIER_LOTTO_PROB AND market offers +400 or better
-    # AND composite_grade is above 50 (need a signal, not just a rare event).
+    # Lotto: above highrisk floor, P >= LOTTO, passes cap, price floor +400, composite >= 50
     highrisk_floor = result["highrisk_line"] or value_floor
     if composite_grade is not None and float(composite_grade) >= 50:
         for line, prob in reversed(probs):
@@ -613,24 +702,27 @@ def compute_kde_tier_lines(
                 continue
             if line <= highrisk_floor:
                 continue
+            if not _passes_price_cap(line):
+                continue
             closest_price = None
-            for candidate_line, price in price_lookup.items():
-                if abs(candidate_line - line) <= 0.5 and price is not None:
+            for cand_line, price in price_lookup.items():
+                if abs(cand_line - line) <= 0.5 and price is not None:
                     if price >= TIER_LOTTO_MIN_PRICE:
                         if closest_price is None or price > closest_price:
                             closest_price = price
             if closest_price is not None:
-                result["lotto_line"] = line
-                result["lotto_prob"] = round(prob, 4)
+                result["lotto_line"]  = line
+                result["lotto_prob"]  = _cal(prob)
                 result["lotto_price"] = closest_price
+                h = _hits(line)
+                result["lotto_hits_all"]  = h["hits_all"]
+                result["lotto_games_all"] = h["games_all"]
+                result["lotto_hits_20"]   = h["hits_20"]
+                result["lotto_games_20"]  = h["games_20"]
                 break
 
     return result
 
-
-# ---------------------------------------------------------------------------
-# New data fetchers: spreads and blowout profiles
-# ---------------------------------------------------------------------------
 
 def fetch_game_spreads(engine, game_ids: list) -> dict:
     """
@@ -736,8 +828,9 @@ def fetch_player_blowout_profiles(engine, player_ids: list) -> dict:
 
 def upsert_tier_lines(engine, rows: list) -> int:
     """
-    Upsert rows into common.player_tier_lines.
-    One row per (grade_date, game_id, player_id, market_key).
+    Upsert rows into common.player_tier_lines. Per ADR-20260424-5 schema:
+    41 columns total including 21 new (16 tier hit-stats + 2 new prices +
+    3 opportunity context).
     """
     if not rows:
         return 0
@@ -747,58 +840,63 @@ def upsert_tier_lines(engine, rows: list) -> int:
         seen[k] = r
     rows = list(seen.values())
 
+    ALL_COLS = [
+        "grade_date", "game_id", "player_id", "player_name", "market_key",
+        "composite_grade", "kde_window", "blowout_dampened",
+        "safe_line", "safe_prob", "safe_price",
+        "safe_hits_all", "safe_games_all", "safe_hits_20", "safe_games_20",
+        "value_line", "value_prob", "value_price",
+        "value_hits_all", "value_games_all", "value_hits_20", "value_games_20",
+        "highrisk_line", "highrisk_prob", "highrisk_price",
+        "highrisk_hits_all", "highrisk_games_all", "highrisk_hits_20", "highrisk_games_20",
+        "lotto_line", "lotto_prob", "lotto_price",
+        "lotto_hits_all", "lotto_games_all", "lotto_hits_20", "lotto_games_20",
+        "recent_minutes_20", "recent_opportunity", "historical_opportunity",
+    ]
+
+    create_cols_sql = """
+        grade_date DATE, game_id VARCHAR(15), player_id BIGINT, player_name NVARCHAR(100),
+        market_key VARCHAR(100), composite_grade FLOAT, kde_window INT, blowout_dampened BIT,
+        safe_line DECIMAL(6,1), safe_prob FLOAT, safe_price INT,
+        safe_hits_all INT, safe_games_all INT, safe_hits_20 INT, safe_games_20 INT,
+        value_line DECIMAL(6,1), value_prob FLOAT, value_price INT,
+        value_hits_all INT, value_games_all INT, value_hits_20 INT, value_games_20 INT,
+        highrisk_line DECIMAL(6,1), highrisk_prob FLOAT, highrisk_price INT,
+        highrisk_hits_all INT, highrisk_games_all INT, highrisk_hits_20 INT, highrisk_games_20 INT,
+        lotto_line DECIMAL(6,1), lotto_prob FLOAT, lotto_price INT,
+        lotto_hits_all INT, lotto_games_all INT, lotto_hits_20 INT, lotto_games_20 INT,
+        recent_minutes_20 FLOAT, recent_opportunity FLOAT, historical_opportunity FLOAT
+    """
+
+    placeholders = ",".join("?" for _ in ALL_COLS)
+    update_set = ",\n    ".join(f"t.{c}=s.{c}" for c in ALL_COLS if c not in ("grade_date", "game_id", "player_id", "market_key"))
+    insert_cols = ", ".join(ALL_COLS)
+    insert_vals = ", ".join(f"s.{c}" for c in ALL_COLS)
+
+    def _row_tuple(r):
+        return tuple(
+            (1 if r.get(c) else 0) if c == "blowout_dampened" else r.get(c)
+            for c in ALL_COLS
+        )
+
     with engine.begin() as conn:
-        conn.execute(text(
-            "IF OBJECT_ID('tempdb..#stage_tiers') IS NOT NULL DROP TABLE #stage_tiers"
-        ))
-        conn.execute(text("""
-CREATE TABLE #stage_tiers(
-    grade_date DATE, game_id VARCHAR(15), player_id BIGINT, player_name NVARCHAR(100),
-    market_key VARCHAR(100), composite_grade FLOAT, kde_window INT, blowout_dampened BIT,
-    safe_line DECIMAL(6,1), safe_prob FLOAT,
-    value_line DECIMAL(6,1), value_prob FLOAT,
-    highrisk_line DECIMAL(6,1), highrisk_prob FLOAT, highrisk_price INT,
-    lotto_line DECIMAL(6,1), lotto_prob FLOAT, lotto_price INT
-)"""))
+        conn.execute(text("IF OBJECT_ID('tempdb..#stage_tiers') IS NOT NULL DROP TABLE #stage_tiers"))
+        conn.execute(text(f"CREATE TABLE #stage_tiers({create_cols_sql})"))
         for i in range(0, len(rows), 500):
             chunk = rows[i:i + 500]
             conn.exec_driver_sql(
-                "INSERT INTO #stage_tiers VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [(r["grade_date"], r["game_id"], r["player_id"], r["player_name"],
-                  r["market_key"], r["composite_grade"], r["kde_window"],
-                  1 if r["blowout_dampened"] else 0,
-                  r["safe_line"], r["safe_prob"],
-                  r["value_line"], r["value_prob"],
-                  r["highrisk_line"], r["highrisk_prob"], r["highrisk_price"],
-                  r["lotto_line"], r["lotto_prob"], r["lotto_price"])
-                 for r in chunk]
+                f"INSERT INTO #stage_tiers VALUES({placeholders})",
+                [_row_tuple(r) for r in chunk],
             )
-        conn.execute(text("""
+        merge_sql = f"""
 MERGE common.player_tier_lines AS t USING #stage_tiers AS s
 ON (t.grade_date=s.grade_date AND t.game_id=s.game_id
     AND t.player_id=s.player_id AND t.market_key=s.market_key)
 WHEN MATCHED THEN UPDATE SET
-    t.player_name=s.player_name, t.composite_grade=s.composite_grade,
-    t.kde_window=s.kde_window, t.blowout_dampened=s.blowout_dampened,
-    t.safe_line=s.safe_line, t.safe_prob=s.safe_prob,
-    t.value_line=s.value_line, t.value_prob=s.value_prob,
-    t.highrisk_line=s.highrisk_line, t.highrisk_prob=s.highrisk_prob,
-    t.highrisk_price=s.highrisk_price,
-    t.lotto_line=s.lotto_line, t.lotto_prob=s.lotto_prob,
-    t.lotto_price=s.lotto_price
-WHEN NOT MATCHED THEN INSERT(
-    grade_date, game_id, player_id, player_name, market_key,
-    composite_grade, kde_window, blowout_dampened,
-    safe_line, safe_prob, value_line, value_prob,
-    highrisk_line, highrisk_prob, highrisk_price,
-    lotto_line, lotto_prob, lotto_price
-) VALUES(
-    s.grade_date, s.game_id, s.player_id, s.player_name, s.market_key,
-    s.composite_grade, s.kde_window, s.blowout_dampened,
-    s.safe_line, s.safe_prob, s.value_line, s.value_prob,
-    s.highrisk_line, s.highrisk_prob, s.highrisk_price,
-    s.lotto_line, s.lotto_prob, s.lotto_price
-);"""))
+    {update_set}
+WHEN NOT MATCHED THEN INSERT({insert_cols}) VALUES({insert_vals});
+"""
+        conn.execute(text(merge_sql))
     return len(rows)
 
 
@@ -875,6 +973,7 @@ def fetch_opportunity_history(engine, player_ids, as_of_date):
                SUM(CAST(b.fgm  AS INT)) AS fgm,
                SUM(CAST(b.fg3m AS INT)) AS fg3m,
                SUM(CAST(b.ftm  AS INT)) AS ftm,
+               SUM(CAST(b.minutes AS FLOAT)) AS minutes,
                MAX(pa.potential_ast)    AS potential_ast,
                MAX(rc.reb_chances)      AS reb_chances
           FROM nba.player_box_score_stats b
@@ -1755,6 +1854,24 @@ def grade_props_for_date(
 
     is_under = (direction == "under")
 
+    # ADR-20260424-5: initialize calibrator (fit once per run) and opportunity groupings.
+    _tier_calibrator = None
+    try:
+        from grading.calibrate_grades import fit_calibrator, publish_calibration_buckets
+        _cal, _buckets = fit_calibrator(engine)
+        _tier_calibrator = _cal
+        if _buckets is not None and len(_buckets) > 0:
+            try:
+                publish_calibration_buckets(engine, _buckets)
+            except Exception as _e:
+                log.info(f"  Calibration bucket publish skipped: {_e}")
+    except Exception as _e:
+        log.info(f"  Calibrator init skipped ({_e}); using identity probabilities.")
+
+    _opp_groups = {}
+    if opp_df is not None and not opp_df.empty:
+        _opp_groups = {int(pid): grp.sort_values("game_date") for pid, grp in opp_df.groupby("player_id")}
+
     # Build per-(player_id, market_key) lists of all available lines and prices
     # for tier computation. Only Over rows; tier lines always expressed as Over.
     # Build price lookup per (player_id, market_key) for tier computation
@@ -1904,13 +2021,33 @@ def grade_props_for_date(
 
                 price_lookup_for_player = player_market_lines.get((pid_int, mkt), {})
 
+                # ADR-20260424-5: minutes and market-specific opportunity from opp_df.
+                minutes_values = None
+                opportunity_values = None
+                opp_grp = _opp_groups.get(pid_int) if _opp_groups else None
+                if opp_grp is not None:
+                    if "minutes" in opp_grp.columns:
+                        minutes_values = opp_grp["minutes"].values
+                    opp_col = MARKET_OPPORTUNITY_COL.get(mkt)
+                    if opp_col and opp_col in opp_grp.columns:
+                        opportunity_values = opp_grp[opp_col].values
+
                 tier = compute_kde_tier_lines(
                     stat_values=stat_values,
                     composite_grade=composite,
                     available_lines=list(price_lookup_for_player.keys()),
                     price_lookup=price_lookup_for_player,
                     blowout_delta=blowout_delta,
+                    market_key=mkt,
+                    minutes_values=minutes_values,
+                    opportunity_values=opportunity_values,
+                    calibrator=_tier_calibrator,
                 )
+
+                # Skip emission when no tier produced a line (ADR-4 Q3 answer).
+                if (tier["safe_line"] is None and tier["value_line"] is None
+                        and tier["highrisk_line"] is None and tier["lotto_line"] is None):
+                    continue
 
                 tier_rows.append({
                     "grade_date":       grade_date_str,
@@ -1923,14 +2060,35 @@ def grade_props_for_date(
                     "blowout_dampened": tier["blowout_dampened"],
                     "safe_line":        tier["safe_line"],
                     "safe_prob":        tier["safe_prob"],
+                    "safe_price":       tier["safe_price"],
+                    "safe_hits_all":    tier["safe_hits_all"],
+                    "safe_games_all":   tier["safe_games_all"],
+                    "safe_hits_20":     tier["safe_hits_20"],
+                    "safe_games_20":    tier["safe_games_20"],
                     "value_line":       tier["value_line"],
                     "value_prob":       tier["value_prob"],
+                    "value_price":      tier["value_price"],
+                    "value_hits_all":   tier["value_hits_all"],
+                    "value_games_all":  tier["value_games_all"],
+                    "value_hits_20":    tier["value_hits_20"],
+                    "value_games_20":   tier["value_games_20"],
                     "highrisk_line":    tier["highrisk_line"],
                     "highrisk_prob":    tier["highrisk_prob"],
                     "highrisk_price":   tier["highrisk_price"],
+                    "highrisk_hits_all":  tier["highrisk_hits_all"],
+                    "highrisk_games_all": tier["highrisk_games_all"],
+                    "highrisk_hits_20":   tier["highrisk_hits_20"],
+                    "highrisk_games_20":  tier["highrisk_games_20"],
                     "lotto_line":       tier["lotto_line"],
                     "lotto_prob":       tier["lotto_prob"],
                     "lotto_price":      tier["lotto_price"],
+                    "lotto_hits_all":   tier["lotto_hits_all"],
+                    "lotto_games_all":  tier["lotto_games_all"],
+                    "lotto_hits_20":    tier["lotto_hits_20"],
+                    "lotto_games_20":   tier["lotto_games_20"],
+                    "recent_minutes_20":      tier["recent_minutes_20"],
+                    "recent_opportunity":     tier["recent_opportunity"],
+                    "historical_opportunity": tier["historical_opportunity"],
                 })
 
     return grade_rows, tier_rows
