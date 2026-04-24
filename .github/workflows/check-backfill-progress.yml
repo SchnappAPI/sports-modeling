@@ -1,0 +1,41 @@
+name: Check backfill progress
+on: workflow_dispatch
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+jobs:
+  check:
+    runs-on: [self-hosted, schnapp-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+      - run: |
+          python << 'PYEOF'
+          from etl.db import get_engine
+          from sqlalchemy import text
+          eng = get_engine()
+          with eng.connect() as conn:
+              r = conn.execute(text("""
+                  SELECT
+                      COUNT(*) AS total,
+                      COUNT(DISTINCT grade_date) AS dates,
+                      MIN(grade_date) AS min_d,
+                      MAX(grade_date) AS max_d,
+                      SUM(CASE WHEN recent_minutes_20 IS NOT NULL THEN 1 ELSE 0 END) AS mins,
+                      SUM(CASE WHEN recent_opportunity IS NOT NULL THEN 1 ELSE 0 END) AS opp,
+                      SUM(CASE WHEN safe_line IS NOT NULL THEN 1 ELSE 0 END) AS safe,
+                      SUM(CASE WHEN value_line IS NOT NULL THEN 1 ELSE 0 END) AS val,
+                      SUM(CASE WHEN highrisk_line IS NOT NULL THEN 1 ELSE 0 END) AS hi,
+                      SUM(CASE WHEN lotto_line IS NOT NULL THEN 1 ELSE 0 END) AS lo
+                  FROM common.player_tier_lines
+                  WHERE grade_date >= DATEADD(day, -30, CAST(GETUTCDATE() AS DATE))
+              """)).fetchone()
+              print(f"Rows in 30d window: {r.total}")
+              print(f"Distinct dates: {r.dates}")
+              print(f"Date range: {r.min_d} to {r.max_d}")
+              print(f"Tier presence: Safe={r.safe} Value={r.val} HighRisk={r.hi} Lotto={r.lo}")
+              print(f"Context: minutes={r.mins} opportunity={r.opp}")
+              print(f"Coverage: mins {100.0*r.mins/max(r.total,1):.1f}%, opp {100.0*r.opp/max(r.total,1):.1f}%")
+          PYEOF
