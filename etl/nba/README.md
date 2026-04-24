@@ -244,7 +244,7 @@ Active NBA workflows:
 | `restart-flask.yml` | `workflow_dispatch` | Restart `schnapp-flask.service` |
 | `install-mcp.yml` | `workflow_dispatch` | Install or update MCP server on VM |
 
-Retired (dispatch-only, do not reschedule): `pregame-refresh.yml`, `nba-live.yml`, `lineup-poll.yml`, `keepalive.yml` (replaced by Uptime Robot).
+Retired (dispatch-only, do not reschedule): `pregame-refresh.yml`, `nba-live.yml`, `lineup-poll.yml`, `keepalive.yml`. `keepalive.yml` was originally replaced by Uptime Robot, which was paused 2026-04-23 — the DB now auto-pauses after 60 minutes of idle, accepted as a tradeoff for billing savings. Do not reschedule `keepalive.yml` without making a deliberate decision to reverse that tradeoff.
 
 ## Recent Changes
 

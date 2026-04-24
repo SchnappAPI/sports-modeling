@@ -5,13 +5,13 @@ Area router for `/etl/`. Python ETL pipelines run in GitHub Actions on the self-
 ## Per-sport docs
 
 - `/etl/nba/README.md` - STATUS: live
-- `/etl/mlb/README.md` - STATUS: design phase
-- `/etl/nfl/README.md` - STATUS: planning
+- `/etl/mlb/README.md` - STATUS: partially live
+- `/etl/nfl/README.md` - STATUS: live
 - `/etl/_shared/README.md` - cross-sport patterns
 
 ## Files
 
-Code files live flat in `/etl/` per `/docs/DECISIONS.md` ADR-0002. Examples: `etl/nba_etl.py`, `etl/mlb_etl.py`, `etl/odds_etl.py`, `etl/grading.py`. All 27 workflows reference these flat paths.
+Code files live flat in `/etl/` per `/docs/DECISIONS.md` ADR-0002. Examples: `etl/nba_etl.py`, `etl/mlb_etl.py`, `etl/nfl_etl.py`, `etl/odds_etl.py`, `etl/mlb_play_by_play.py`, `etl/runner.py`. Grading lives separately under `/grading/` (`grade_props.py`). As of 2026-04-24, 30 workflows exist under `.github/workflows/`, all referencing these flat paths.
 
 ## Key Concepts
 
