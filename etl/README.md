@@ -5,8 +5,8 @@ Area router for `/etl/`. Python ETL pipelines run in GitHub Actions on the self-
 ## Per-sport docs
 
 - `/etl/nba/README.md` - STATUS: live
-- `/etl/mlb/README.md` - STATUS: partially live
-- `/etl/nfl/README.md` - STATUS: live
+- `/etl/mlb/README.md` - STATUS: in development
+- `/etl/nfl/README.md` - STATUS: in development (pipeline runs on schedule; no active work; no product consumer)
 - `/etl/_shared/README.md` - cross-sport patterns
 
 ## Files

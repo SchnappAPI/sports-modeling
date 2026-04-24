@@ -1,6 +1,6 @@
 # NFL ETL
 
-**STATUS:** live. `etl/nfl_etl.py` is a full 7-table ETL automated via `.github/workflows/nfl-etl.yml`, which runs Tuesday 09:00 UTC (after Monday Night Football, after nflverse updates) and supports `workflow_dispatch` with an optional `season` input. First production run completed 2026-04-21 for season 2025 with all 7 tables green.
+**STATUS:** in development. `etl/nfl_etl.py` is a full 7-table ETL automated via `.github/workflows/nfl-etl.yml`, which runs Tuesday 09:00 UTC (after Monday Night Football, after nflverse updates) and supports `workflow_dispatch` with an optional `season` input. First production run completed 2026-04-21 for season 2025 with all 7 tables green. No active development has happened since the first run, and no product consumer queries the data — calling the data 'live' overstates the state.
 
 ## Purpose
 

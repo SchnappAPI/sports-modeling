@@ -128,7 +128,7 @@ Coverage: 97.1% of `common.daily_grades` player-market-games produce a tier row.
 
 ### Connection and reliability
 
-Server: `sports-modeling-server.database.windows.net`, DB `sports-modeling`, user `sqladmin`. Tier `GP_S_Gen5_2` Serverless. Auto-pause delay is configurable and was set to 60 minutes on 2026-04-24 (any prior note claiming the Free offer locks this setting is stale — it is configurable via the portal). First connection after pause 20-60s cold start. Firewall allows `0.0.0.0 - 255.255.255.255` plus Allow Azure Services (required for GitHub Actions runners).
+Server: `sports-modeling-server.database.windows.net`, DB `sports-modeling`, user `sqladmin`. Tier `GP_S_Gen5_2` Serverless. Auto-pause delay set to 60 minutes on 2026-04-24 via the Azure portal. The earlier claim in this file that 'Free offer applied so the auto-pause delay cannot be changed' was accurate under the Azure Free trial; the trial has since expired, making the setting configurable. First connection after pause 20-60s cold start. Firewall allows `0.0.0.0 - 255.255.255.255` plus Allow Azure Services (required for GitHub Actions runners).
 
 Connections use SQLAlchemy + pyodbc with ODBC Driver 18. ETL uses `fast_executemany=True`. Grading engine has its own engine instance with `fast_executemany=False` to prevent NVARCHAR(MAX) truncation. Retry logic in `grading/grade_props.py:get_engine`: 3 attempts with 60s waits.
 

@@ -1,6 +1,6 @@
 # MLB ETL
 
-**STATUS:** partially live. 7 tables loaded nightly from MLB Stats API. 1 pitch-level table populated on demand, plus 2 derived tables materialized in-lockstep. 3 derived entities from ADR-0004 remain.
+**STATUS:** in development. 7 tables loaded nightly from MLB Stats API. 1 pitch-level table populated on demand, plus 2 derived tables materialized in-lockstep. 3 derived entities from ADR-0004 remain.
 
 ## Purpose
 

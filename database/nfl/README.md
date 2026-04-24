@@ -1,6 +1,6 @@
 # NFL Database
 
-**STATUS:** live. The `nfl.*` tables were created by the first successful run of `etl/nfl_etl.py` on 2026-04-21. As of that run: `nfl.games` (285 rows), `nfl.players` (24,376), `nfl.player_game_stats` (19,421), `nfl.snap_counts` (26,612), `nfl.ftn_charting` (47,316), `nfl.rosters_weekly` (46,820), `nfl.team_game_stats` (570). Schema continues to evolve via `add_missing_columns()` on each subsequent run.
+**STATUS:** tables populated, not in active use. The `nfl.*` tables were created by the first successful run of `etl/nfl_etl.py` on 2026-04-21 and have not been actively worked on since. As of that first run: `nfl.games` (285 rows), `nfl.players` (24,376), `nfl.player_game_stats` (19,421), `nfl.snap_counts` (26,612), `nfl.ftn_charting` (47,316), `nfl.rosters_weekly` (46,820), `nfl.team_game_stats` (570). Schema will continue to evolve via `add_missing_columns()` on each subsequent scheduled run, but no downstream consumer queries these tables today.
 
 ## Purpose
 
