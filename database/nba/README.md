@@ -42,6 +42,7 @@ DDL is defined inline in the NBA ETL scripts (`etl/nba_etl.py`, `etl/odds_etl.py
 | `odds.upcoming_player_props` | Today's FanDuel player prop lines. Key fields: `event_id`, `market_key`, `outcome_point`, `player_name`, `bookmaker_key`, `snap_ts`, `outcome_price`, `outcome_name`, `link VARCHAR(500)` |
 | `odds.player_props` | Historical player prop lines |
 | `odds.upcoming_game_lines` | Today's game lines (spread, total, moneyline) |
+| `odds.game_lines` | Historical game lines (spread, total, moneyline). Read by `fetch_game_spreads` for blowout risk computation on backfill runs |
 | `odds.player_map` | Maps odds player names to `nba.players.player_id` |
 
 NBA odds backfill range complete Mar 24 - Apr 3, 2026 as of the 2026-04-02 reference point. The `mappings` mode has been run; 135 players remain unmapped. All are inactive or off current rosters. Not blocking grading and not a problem to fix.
@@ -53,8 +54,8 @@ Defined in `grading/grade_props.py:ensure_tables`. Full column list:
 - Identity: `grade_id INT IDENTITY`, `grade_date DATE`, `event_id VARCHAR(50)`, `game_id VARCHAR(15) NULL`, `player_id BIGINT NULL`, `player_name NVARCHAR(100)`
 - Market: `market_key VARCHAR(100)`, `bookmaker_key VARCHAR(50)`, `line_value DECIMAL(6,1)`, `outcome_name VARCHAR(5) DEFAULT 'Over'` (`'Over'` / `'Under'`), `over_price INT NULL` (direction-appropriate price, name kept for migration simplicity)
 - Hit rates: `hit_rate_60 FLOAT`, `hit_rate_20 FLOAT`, `sample_size_60 INT`, `sample_size_20 INT`, `weighted_hit_rate FLOAT`, `grade FLOAT`
-- Component grades: `trend_grade FLOAT`, `momentum_grade FLOAT`, `pattern_grade FLOAT`, `matchup_grade FLOAT`, `regression_grade FLOAT`, `composite_grade FLOAT`
-- Opportunity grades (added 2026-04-22, ADR-0017): `opportunity_short_grade FLOAT`, `opportunity_long_grade FLOAT`, `opportunity_matchup_grade FLOAT`, `opportunity_streak_grade FLOAT`, `opportunity_volume_grade FLOAT` (threes only; NULL elsewhere), `opportunity_expected_grade FLOAT` (threes only; NULL elsewhere). See `/etl/nba/README.md` for definitions
+- Component grades: `trend_grade FLOAT`, `momentum_grade FLOAT`, `pattern_grade FLOAT`, `matchup_grade FLOAT`, `regression_grade FLOAT`, `composite_grade FLOAT`. Since ADR-20260423-1 only `momentum_grade`, `hit_rate_60` (scaled), and `pattern_grade` enter `composite_grade`; the others are stored as context only
+- Opportunity grades (added 2026-04-22, ADR-0017): `opportunity_short_grade FLOAT`, `opportunity_long_grade FLOAT`, `opportunity_matchup_grade FLOAT`, `opportunity_streak_grade FLOAT`, `opportunity_volume_grade FLOAT` (threes only; NULL elsewhere), `opportunity_expected_grade FLOAT` (threes only; NULL elsewhere). See `/etl/nba/README.md` for definitions. Since ADR-20260423-1 these are stored as context only and are NOT in `composite_grade`
 - Opponent: `hit_rate_opp FLOAT`, `sample_size_opp INT`
 - Resolution: `outcome VARCHAR(5) NULL` (`'Won'` / `'Lost'` / `NULL`). Populated by `grade_props.py --mode outcomes` as a pure SQL `UPDATE` after games go Final (`nba.schedule.game_status = 3`)
 - Audit: `created_at DATETIME2 DEFAULT GETUTCDATE()`
@@ -81,7 +82,7 @@ Rules:
 - Reference point: 27,765 rows on 2026-04-10
 - Any aggregate of `is_*` columns must use `SUM(CAST(col AS INT))`
 
-### `common.player_tier_lines` (added 2026-04-23)
+### `common.player_tier_lines` (added 2026-04-23, ADR-20260423-1)
 
 PK `tier_id` IDENTITY. UNIQUE on `(grade_date, game_id, player_id, market_key)`. One row per player-market-game-date.
 
@@ -91,14 +92,35 @@ Tier definitions (calibrated 2026-04-23):
 
 - **Safe**: P(stat > line) >= 0.80 from KDE on grade-weighted game log
 - **Value**: P >= 0.58, line above safe_line
-- **High Risk**: P >= 0.28, market price >= +150 available
-- **Lotto**: P >= 0.07, market price >= +400 available, composite_grade >= 50
+- **High Risk**: P >= 0.28, market price >= +150 available within 0.5 of model line
+- **Lotto**: P >= 0.07, market price >= +400 available within 0.5 of model line, composite_grade >= 50
 
 KDE window: composite >= 80 uses last 15 games (player peaking), 50-79 uses last 30 games, < 50 uses full season. Normal dist fallback when n < 10. Reflection boundary at 0 prevents negative-stat probability mass.
 
 Written by `grade_props.py` via `upsert_tier_lines` during all grading modes (upcoming, intraday, backfill). Over rows only. NULL tier values mean no qualifying market price exists at that threshold for this player-market.
 
-Reference point: populated for all 174 historical dates by backfill run 2026-04-23.
+Reference point: populated for all 174 historical dates by backfill run 2026-04-23. Current live state 2026-04-24: 191K rows across 2025-10-27 to 2026-04-23.
+
+#### Tier effectiveness (backtest 2026-04-24)
+
+Evaluated 176,346 tier rows against actual box score outcomes across 16 NBA markets.
+
+| Tier | n | Actual hit % | Model predicted % | Design % | Calibration |
+|------|---|--------------|-------------------|----------|-------------|
+| Safe | 164,718 | 85.9% | 82.8% | 80% | Well-calibrated; slightly conservative |
+| Value | 167,066 | 61.0% | 60.8% | 58% | Well-calibrated |
+| High Risk | 67,479 | 19.8% | 31.5% | 28% | Overconfident by 12 points; breakeven at +348 is 27.8%, so -EV at current prices |
+| Lotto | 49,248 | 6.4% | 12.6% | 7% | Hit rate on target; model probability overconfident; -EV at avg +1,189 |
+
+Probability calibration is reliable in the 50-90% range (e.g., 80-90% predicted → 86.7% actual) and degrades at both extremes. Below 50% the model overestimates by 10-20 points. Above 90% the model predicts 99%+ but actual hit rate is 69.5% (the same overconfidence-at-extremes pattern the composite grade exhibited before the formula change).
+
+Per-market variation: combo markets (PRA, PR, PA, RA and their alternates) outperform the Safe target by 9-11 points (89-92% actual). Points and rebounds land on target (85-86% actual). Three-point markets underperform Safe at 74-76% because the discrete low-count distribution is smoothed more than KDE can reliably represent.
+
+Blowout dampening improves calibration when applied. Dampened rows hit Safe at 91.4% vs 88.7% not-dampened; Value at 68.0% vs 62.9%.
+
+Brier scores: Safe 0.127, Value 0.239, High Risk 0.174, Lotto 0.065.
+
+Coverage: 97.1% of `common.daily_grades` player-market-games produce a tier row. The 2.9% missing are players below the `KDE_MIN_GAMES = 10` threshold with fewer than 3 observations in their game log.
 
 ### Other `common` tables
 
@@ -121,7 +143,9 @@ Do not revert without an ADR.
 - `nba.games` filter uses `game_date <= today`, not `< today`. Today's finals must enter `nba.games` so FK allows same-day box-score writes
 - `nba.daily_lineups` is keyed by `player_name` + `team_tricode`. Positions for starters are full strings (PG, SG, SF, PF, C). Historical rows preserved
 - `common.daily_grades` UNIQUE key includes `outcome_name`. `outcome` column is populated by `grade_props.py --mode outcomes`, not by the upcoming/intraday grading paths
+- `common.daily_grades.composite_grade` follows the 40/40/20 formula (ADR-20260423-1). The matchup, regression, trend, and opportunity columns are stored but not in the composite mean
 - `getGrades` reads `outcome_name` and `over_price` directly from `common.daily_grades`. Never join odds for prices
+- `common.player_tier_lines` UNIQUE key is `(grade_date, game_id, player_id, market_key)`. Over-side only. Written in lockstep with `common.daily_grades` inside `grade_props.py`
 - `common.player_line_patterns` updated nightly by `compute-patterns.yml` at 07:30 UTC
 - `BIT` columns require `CAST(col AS INT)` before `SUM()`
 - `fast_executemany=True` in ETL, `False` in the grading engine. Do not unify
@@ -133,5 +157,7 @@ See `/docs/CHANGELOG.md` filtered by `[nba][database]`. Historical entries befor
 
 ## Open Questions
 
-- Whether the 135 unmapped inactive players need periodic cleanup or can stay indefinitely
-- Whether pitch-level-equivalent MLB Statcast storage warrants a similar separation of runtime-queried vs internal-only tables for NBA (currently not needed)
+- High Risk and Lotto tiers are -EV at their current price floors. Either raise `TIER_HIGHRISK_MIN_PRICE` and `TIER_LOTTO_MIN_PRICE` (mechanical but loses some rows), or apply an isotonic calibration pass on model probability before tier cutoff selection (more correct, more work). Deferred.
+- Three-point markets calibrate worse than points/rebounds/assists. A discrete Poisson or negative-binomial fit may be more appropriate than KDE for low-count stats.
+- Whether the 135 unmapped inactive players need periodic cleanup or can stay indefinitely.
+- Whether pitch-level-equivalent MLB Statcast storage warrants a similar separation of runtime-queried vs internal-only tables for NBA (currently not needed).
