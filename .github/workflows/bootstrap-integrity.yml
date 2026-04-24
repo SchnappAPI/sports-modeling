@@ -1,0 +1,56 @@
+name: Bootstrap Integrity Framework
+
+# One-shot workflow to create the three integrity-framework tables:
+#   common.ingest_quarantine
+#   common.unmapped_entities
+#   common.data_completeness_log
+#
+# Idempotent: safe to run repeatedly. DDL uses CREATE IF NOT EXISTS
+# semantics via sys.objects checks. See etl/integrity.py and
+# /docs/DECISIONS.md ADR-20260424-2 for design.
+
+on:
+  workflow_dispatch:
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  bootstrap:
+    runs-on: [self-hosted, schnapp-runner]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Activate venv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Ensure framework tables
+        run: |
+          python -c "
+          from etl.db import get_engine
+          from etl.integrity import ensure_tables
+          from sqlalchemy import text
+
+          engine = get_engine()
+          ensure_tables(engine)
+          print('ensure_tables completed.')
+
+          with engine.connect() as conn:
+              for tbl in ('common.ingest_quarantine',
+                          'common.unmapped_entities',
+                          'common.data_completeness_log'):
+                  r = conn.execute(text(
+                      f\"SELECT COUNT(*) FROM sys.objects \"
+                      f\"WHERE object_id = OBJECT_ID('{tbl}') AND type = 'U'\"
+                  ))
+                  count = r.scalar()
+                  status = 'exists' if count == 1 else 'MISSING'
+                  print(f'  {tbl}: {status}')
+                  assert count == 1, f'{tbl} did not get created'
+          print('All three tables verified.')
+          "
