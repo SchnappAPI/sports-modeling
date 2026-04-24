@@ -49,6 +49,23 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import bindparam, text
 
+# Binary player-prop markets — yes/no props where outcome_point is always NULL
+# (first TD scorer, first basket, double-double, etc.). Used by CRITICAL_FIELDS
+# predicates for odds.player_props and odds.upcoming_player_props.
+_BINARY_PLAYER_MARKETS = frozenset([
+    "batter_first_home_run",
+    "player_1st_td",
+    "player_anytime_td",
+    "player_double_double",
+    "player_first_basket",
+    "player_last_td",
+    "player_triple_double",
+])
+_BINARY_PLAYER_MARKETS_SQL = "(" + ",".join(
+    f"'{m}'" for m in sorted(_BINARY_PLAYER_MARKETS)
+) + ")"
+
+
 
 # =====================================================================
 # CRITICAL_FIELDS catalog
@@ -184,8 +201,13 @@ CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {
     # =================================================================
 
     "odds.event_game_map": {
+        # game_id is not always_required: 3,310 historical rows (2023-2025) have
+        # NULL game_id from periods before schedule coverage. Forward-looking
+        # mapping gaps are covered by the nba_events_mapped_24h relational check
+        # and by the mapping resolver (Layer 2). Historical backfill is tracked
+        # separately — see ROADMAP.
         "row_key": ["event_id"],
-        "always_required": ["event_id", "game_id", "game_date"],
+        "always_required": ["event_id", "sport_key", "game_date"],
         "required_when": {},
     },
 
@@ -205,21 +227,38 @@ CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {
     "odds.upcoming_player_props": {
         # link is nullable: populated only from per-event Odds API endpoint;
         # bulk-endpoint rows legitimately have NULL link per docs.
+        # outcome_point: see _BINARY_PLAYER_MARKETS — binary yes/no markets
+        # have no line value.
         "row_key": ["event_id", "market_key", "outcome_point", "player_name", "outcome_name", "snap_ts"],
         "always_required": [
-            "event_id", "market_key", "outcome_point", "player_name",
+            "event_id", "market_key", "player_name",
             "bookmaker_key", "snap_ts", "outcome_price", "outcome_name",
         ],
-        "required_when": {},
+        "required_when": {
+            "outcome_point": {
+                "py_predicate": lambda r: r.get("market_key") not in _BINARY_PLAYER_MARKETS,
+                "sql_predicate": f"t.market_key NOT IN {_BINARY_PLAYER_MARKETS_SQL}",
+                "description": "outcome_point required for line-based markets, not binary yes/no",
+            },
+        },
     },
 
     "odds.player_props": {
+        # outcome_point is NULL for binary yes/no player markets (first TD,
+        # first basket, double-double, triple-double, first home run). For all
+        # line-based markets it is required. See _BINARY_PLAYER_MARKETS.
         "row_key": ["event_id", "market_key", "outcome_point", "player_name", "outcome_name", "snap_ts"],
         "always_required": [
-            "event_id", "market_key", "outcome_point", "player_name",
+            "event_id", "market_key", "player_name",
             "bookmaker_key", "snap_ts", "outcome_price", "outcome_name",
         ],
-        "required_when": {},
+        "required_when": {
+            "outcome_point": {
+                "py_predicate": lambda r: r.get("market_key") not in _BINARY_PLAYER_MARKETS,
+                "sql_predicate": f"t.market_key NOT IN {_BINARY_PLAYER_MARKETS_SQL}",
+                "description": "outcome_point required for line-based markets, not binary yes/no",
+            },
+        },
     },
 
     "odds.upcoming_game_lines": {
@@ -255,10 +294,23 @@ CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {
 
     "odds.player_map": {
         # Canonical mapping between odds-feed player names and player_ids.
-        # Scoped by sport so the same name across sports doesn't collide.
+        # match_method = 'no_match' is a legitimate sentinel state meaning
+        # "we tried, found nothing". Those rows have NULL player_id +
+        # matched_name by design — they are Layer-2 tracking, not broken data.
         "row_key": ["odds_player_name", "sport_key"],
-        "always_required": ["odds_player_name", "sport_key", "player_id", "matched_name", "match_method"],
-        "required_when": {},
+        "always_required": ["odds_player_name", "sport_key", "match_method"],
+        "required_when": {
+            "player_id": {
+                "py_predicate": lambda r: r.get("match_method") != "no_match",
+                "sql_predicate": "t.match_method <> 'no_match'",
+                "description": "player_id required when we successfully matched the name",
+            },
+            "matched_name": {
+                "py_predicate": lambda r: r.get("match_method") != "no_match",
+                "sql_predicate": "t.match_method <> 'no_match'",
+                "description": "matched_name required when we successfully matched",
+            },
+        },
     },
 
     # =================================================================
@@ -312,26 +364,49 @@ CRITICAL_FIELDS: Dict[str, Dict[str, Any]] = {
         # data-availability conditions (grade_props.py + ADR-20260423-1).
         # outcome is legitimately NULL until games resolve. No invariants
         # on any of these columns.
+        #
+        # hit_rate_60 and grade are conditional on sample_size_60 > 0. Rows
+        # with sample_size_60 = 0 (typically rookies or returning players with
+        # no games in the 60-game window) legitimately have NULL hit_rate_60
+        # and grade. composite_grade is still computed from other components
+        # (trend/matchup/regression) and is not gated on sample size.
+        # See 2026-04-24 investigation and the pending redesign of the
+        # eligibility gate (ROADMAP: replace fixed 60-game window with
+        # % of available games threshold).
         "row_key": ["grade_date", "event_id", "player_id", "market_key", "bookmaker_key", "line_value", "outcome_name"],
         "always_required": [
             "grade_id", "grade_date", "event_id",
             "player_id", "player_name", "game_id",
             "market_key", "bookmaker_key",
             "line_value", "outcome_name",
-            "hit_rate_60", "sample_size_60", "grade",
+            "sample_size_60",
         ],
-        "required_when": {},
+        "required_when": {
+            "hit_rate_60": {
+                "py_predicate": lambda r: r.get("sample_size_60") is not None and int(r["sample_size_60"]) > 0,
+                "sql_predicate": "t.sample_size_60 > 0",
+                "description": "hit_rate_60 required only when we have >=1 prior game in the window",
+            },
+            "grade": {
+                "py_predicate": lambda r: r.get("sample_size_60") is not None and int(r["sample_size_60"]) > 0,
+                "sql_predicate": "t.sample_size_60 > 0",
+                "description": "grade required only when sample_size_60 > 0 (grade uses hit_rate)",
+            },
+        },
     },
 
     "common.player_tier_lines": {
-        # Safe tier is always populated by compute_kde_tier_lines. Value,
-        # HighRisk, and Lotto are legitimately NULL when no qualifying line
-        # or market price exists at that threshold (ADR-20260423-1).
+        # ALL four tiers (Safe/Value/HighRisk/Lotto) are legitimately NULL
+        # when no posted alternate line satisfies the tier threshold. High-
+        # composite players often have NULL safe_line because the lowest
+        # posted alternate is already past the safe probability cutoff —
+        # the model has nothing to recommend at that tier.
+        # Tier-line discretion redesign (2026-04-24) will further gate these
+        # on reasonableness (no -500+ implied odds, posted-line sanity checks).
         "row_key": ["grade_date", "game_id", "player_id", "market_key"],
         "always_required": [
             "tier_id", "grade_date", "game_id", "player_id", "market_key",
             "kde_window", "blowout_dampened",
-            "safe_line", "safe_prob",
         ],
         "required_when": {},
     },
