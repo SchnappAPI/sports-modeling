@@ -6,7 +6,7 @@ Area router for the Azure SQL schema. Database: `sports-modeling` on `sports-mod
 
 - `nba` - NBA tables. STATUS: live. See `/database/nba/README.md`.
 - `mlb` - MLB tables. STATUS: in development (7 nightly + 1 on-demand + 2 derived; 3 ADR-0004 entities remain). See `/database/mlb/README.md`.
-- `nfl` - NFL tables. STATUS: populated, not in active use (7 tables from nflreadpy; first run 2026-04-21). See `/database/nfl/README.md`.
+- `nfl` - NFL tables. STATUS: idle (7 tables from nflreadpy; first run 2026-04-21; not in active use). See `/database/nfl/README.md`.
 - `odds` - cross-sport odds tables. See `/database/_shared/README.md`.
 - `common` - cross-sport utility tables (user codes, demo config, teams, patterns). See `/database/_shared/README.md`.
 
