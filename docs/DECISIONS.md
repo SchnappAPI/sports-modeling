@@ -708,68 +708,80 @@ D. **MLB scope.** MLB grading does not yet exist (ADR-20260424-3 sequencing). Bu
 - ADR-20260424-2 (data integrity framework — adds a relational check covered here)
 - ADR-20260424-3 (initiative sequence — this falls inside Initiative A's ongoing iteration)
 
-## ADR-20260424-5 — Tier-line justification via historical + recent hit signals
+## ADR-20260424-5 — Tier-line justification and breakout-detection (replaces ADR-4 control 3)
 
-**Status:** Proposed. Amends ADR-20260424-4 before implementation. Austin's answer to Q1 on proximity band revealed the frame was wrong; this ADR captures the corrected approach.
+**Status:** Approved. Amends ADR-20260424-4 before implementation. Revised 2026-04-24 after Austin clarified: breakout opportunities are what the tool is TRYING to find, not what it should filter out.
 
 **Context**
 
-ADR-20260424-4 proposed a ±100% proximity band around the posted center as control 3. Austin pushed back: the purpose of HighRisk and Lotto tiers is to surface extreme cases that the player has a real chance of hitting. Proximity band actively suppresses the exact cases those tiers exist to find. His concrete example: player averages 20pts hit rate 17% season-long, 5% last 20 games, usage increasing. Multiple signals pointing different directions. The user should see them, not have the model collapse them into one suppress/surface decision.
+ADR-20260424-4 proposed a proximity band. ADR-5 v1 replaced that with a historical-justification filter ("player must have hit the threshold at least once"). Both framings are wrong. From Austin:
 
-The right frame is not "is this line reasonable relative to center." It is "has this player done this before, and is there signal they might again."
+> Dont omit anything just because they have not done it before. For example a player may never have had 10 rebounds before, but has been averaging 18 rebound chances a game as of recently, or a player has never hit 15 points before, but as of lately they are taking more shots, getting more playing time, and shooting more efficiently. Those are just two examples of what i dont want to unintentionally hide from myself. Instead those are things i am trying to find.
 
-Controls 1, 2, 4 from ADR-20260424-4 are unchanged (posted-line source, -500 implied-odds ceiling, isotonic calibration). Q2/Q3/Q4 answers from the same round are incorporated: isotonic with inspectable bucket view, no row when all four tiers NULL, NBA only for v1.
+The goal is identifying extremes-with-signal, including breakout candidates who have NEVER hit the line before but show leading indicators (opportunity, minutes, usage) trending in that direction. Any filter gating on historical outcomes suppresses the exact cases the tool should surface.
 
 **Decision**
 
-*Amended control 3 — historical-justification filter.* A tier line is surfaced only if the player has hit that threshold at least once in available game history for that stat. Zero-history lines do not surface at any tier. Lighter-touch than proximity and directly tied to the "no good reason" test.
+*Remove dense-grid line interpolation.* Tier lines are chosen from posted alternate lines only — no freely-generated 4.4pt lines. Implements ADR-4 control 1.
 
-*Market exclusion.* `TIER_EXCLUDED_MARKETS = {player_blocks, player_blocks_alternate, player_steals, player_steals_alternate}`. Bypass tier computation entirely for these markets.
+*Remove historical-justification filter entirely.* No precedent required to surface a tier line. Surface everything that has a posted alternate passing the -500 implied-odds cap. Trust the user, not a filter, to assess the evidence.
 
-*New — supporting-context columns on common.player_tier_lines.* For each tier that gets a line, emit the raw hit evidence alongside the calibrated probability. Per tier, four new columns:
+*Keep -500 implied-odds ceiling across all tiers.* Reject any posted line whose Over price is more negative than -500 (implied probability > 83.3%). Applies to Safe, Value, HighRisk, Lotto uniformly. Keeps the existing per-tier minimum-price floors for HighRisk (+150 or better) and Lotto (+400 or better) — these define what makes each tier that tier.
 
-- `<tier>_hits_all` (INT) — total games where player hit at or above the line
-- `<tier>_games_all` (INT) — total games in the full history considered
-- `<tier>_hits_20` (INT) — hits in last 20 games played by this player
-- `<tier>_games_20` (INT) — denominator for the recent window (usually 20, less if player has fewer games on record)
+*Exclude blocks and steals.* TIER_EXCLUDED_MARKETS covers player_blocks, player_blocks_alternate, player_steals, player_steals_alternate. Bypass tier computation for these markets entirely.
 
-Applied to all four tiers: 16 new columns total. Existing rows get NULL until regeneration.
+*Surface raw evidence alongside calibrated probability.* Add 21 new columns to common.player_tier_lines across three groups:
 
-*Recent window.* `RECENT_GAMES_WINDOW = 20` games. Defined as player's last 20 games played working backward from tonight's date, not calendar window. Short enough to reflect current form, long enough to be statistically meaningful.
+Per-tier hit evidence (16 columns — 4 metrics × 4 tiers):
+- `<tier>_hits_all` INT — games player hit at or above the line across all available history
+- `<tier>_games_all` INT — denominator for the above
+- `<tier>_hits_20` INT — hits in the last 20 games played by this player
+- `<tier>_games_20` INT — denominator, usually 20 (less if player has fewer games on record)
 
-*UI downstream (tracked separately).* Columns enable surfacing: "Lotto 30pts @ 22% — hit 2/15 recent, 5/200 all-time." User sees the evidence behind each tier and decides trust. Model does not hide its reasoning.
+Per-tier price (2 new columns; HighRisk and Lotto already had these):
+- safe_price INT
+- value_price INT
+
+Per-player-market context (3 columns shared across tiers — the breakout-detection signals):
+- recent_minutes_20 FLOAT — avg minutes per game in last 20
+- recent_opportunity FLOAT — avg of market-appropriate opportunity metric, last 20
+- historical_opportunity FLOAT — same metric over the full window (lets user compute the trend themselves)
+
+Opportunity metric per market (from v1):
+- points / points_alternate: FGA (shot attempts from box score)
+- threes / threes_alternate: FG3A (three attempts from box score)
+- rebounds / rebounds_alternate: reb_chances (from nba.player_rebound_chances)
+- assists / assists_alternate: potential_ast (from nba.player_passing_stats)
+- combos (PR, PA, RA, PRA and _alternate): NULL for v1, evaluated case-by-case in v2
+
+*Apply isotonic calibration to emitted probabilities.* Fit isotonic regression on resolved common.daily_grades (composite_grade -> Won/Lost). Calibrated probability replaces raw KDE prob in tier_prob columns. Also publish discrete bucket view for inspection.
+
+*When every tier fails.* Emit no row.
 
 **Consequences**
 
 Positive:
-- HighRisk and Lotto tiers do their actual job: find extremes with precedent rather than filter them by distance from center.
-- Raw hit counts alongside calibrated probability create a feedback loop — if calibration drifts from historical reality, it is visible.
-- Historical-precedent filter is a genuine "no good reason" test without suppressing legitimate extremes.
-- UI layer gets enough to surface the "why" of each tier line.
+- Breakout candidates surface. Player with rising minutes and rising shot attempts but no historical hits at the line gets a tier line with 0/200 hits_all but 18.2 recent_opportunity vs 14.3 historical.
+- User sees hits_all, hits_20, recent_minutes, recent_opportunity, calibrated probability together. They form the judgment.
+- Non-tradeable line values eliminated. Every emitted line is on the posted board.
+- False certainty eliminated. Implied-odds cap holds across all tiers.
+- Calibrated probabilities match historical hit rates.
 
 Negative:
-- 16 new columns on common.player_tier_lines. Schema migration is additive so back-compat is fine; old rows NULL until regenerated.
-- compute_kde_tier_lines needs per-tier hit counts. Cheapest implementation: compute while fitting the KDE — the KDE already consumes the full game-level distribution, so tallying hits above each candidate line is additional bookkeeping on existing data, no new queries.
-- Out-of-scope for v1: context-similarity analysis. Austin flagged it as worth doing ("see the before and after games of previous times they hit this"). Deferred to a post-implementation evaluation — evaluate whether v1's historical + recent stats are sufficient before investing in feature-matching.
+- 21 new columns on common.player_tier_lines. Additive; existing rows NULL until regenerated.
+- compute_kde_tier_lines needs per-tier hit counts and per-player-market opportunity values. Hit counts come free from stat_values already in hand; opportunity needs a separate fetch joining nba.player_rebound_chances and nba.player_passing_stats for rebound/assist markets.
+- Tier row volume likely increases net-net (no historical filter removing rows).
 
 **Implementation plan**
 
-1. Schema migration: add 16 columns to common.player_tier_lines. Additive only, no type changes.
-2. Write grading/calibrate_grades.py: fit isotonic regression on resolved daily_grades outcomes, output calibration mapping. Also produce bucket inspection table for sanity checks.
-3. Rewrite compute_kde_tier_lines in grade_props.py:
-   - Apply TIER_EXCLUDED_MARKETS before anything else.
-   - For each tier threshold, among posted alt lines:
-     - Filter by -500 implied odds ceiling.
-     - Filter by historical hits >= 1.
-     - Pick the line closest to the threshold.
-     - Tally hits_all / games_all / hits_20 / games_20 from the KDE's underlying distribution.
-   - Apply isotonic calibration to the emitted probability.
-   - If no tier produces a line, no row is written (ADR-4 Q3 answer).
-4. Force-regrade last 30 days via grading.yml backfill. Inspect: tier-line emission rates, new column values, before/after comparison.
-5. Monitor first week: volume, distribution of hit counts, any UI weirdness.
+1. Schema migration: 21 additive columns via one-off workflow.
+2. Calibration module: grading/calibrate_grades.py — fit isotonic regression on resolved daily_grades, publish bucket table for inspection.
+3. Opportunity fetcher in grade_props.py: pull fga, fg3a, reb_chances, potential_ast per (player, game) over LOOKBACK_OPP.
+4. Rewrite compute_kde_tier_lines per this ADR.
+5. Update caller and upsert_tier_lines with new columns.
+6. Force-regrade last 30 days via grading.yml backfill.
+7. Monitor first week.
 
-**Related ADRs**
-
+**Related**
 - ADR-20260424-4 — controls 1, 2, 4 unchanged; control 3 replaced by this ADR.
-- ADR-20260423-1 — tier_lines schema; this ADR extends additively, no contradiction.
-
+- ADR-20260423-1 — tier_lines schema; this ADR extends additively.
