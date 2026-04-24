@@ -624,3 +624,87 @@ User directive: stop deferring; get these figured out.
 - Estimated effort: A implementation is 4-6 hours of focused work (ADR done; new tables, new shared module, rollout to NBA). D is ~2-3 hours (apply A to MLB). B is 2-3 hours. E is 30 minutes. C is 3-4 hours. Total: ~5 focused sessions to reach a state where all five are resolved and the project is meaningfully easier to manage.
 
 **Supersedes.** The "deferred indefinitely" status of items mentioned in prior Open Questions across several READMEs. Those deferrals are now scheduled, not deferred.
+
+## ADR-20260424-4 — Tier-line discretion: filter, quantize, calibrate
+
+**Status:** Proposed. Design-only; implementation pending Austin sign-off on the four open questions at the bottom.
+
+**Context**
+
+Live-product feedback from Austin on 2026-04-24: `common.player_tier_lines` surfaces lines that are unusable in practice. Four failure modes:
+
+- Non-tradeable line values (e.g., 4.4 points) when all posted alternate lines are 0.5-increment. The current `compute_kde_tier_lines` interpolates freely from the KDE output instead of snapping to the posted board.
+- Implied-odds overconfidence (lines at American -1400, implied probability >93%). Austin's bar: nothing stronger than -500 (implied ~83%) because post-vig EV collapses and the confidence creates a false-certainty UX.
+- Unreasonable proximity to the posted center. Example cited: safe 5 points when the posted center is 18.5. The model picks the lowest line that clears a probability threshold regardless of where it sits on the distribution.
+- Raw KDE probability does not match historical outcomes at the top of the composite-grade range. Backtest signal: as composite grades rise past ~85, actual hit rate flattens while displayed probability continues to rise.
+
+Independent signal from the 2026-04-24 retroactive scan: 3,087 NULL safe_line rows exist in production. These are cases where the current code correctly declines to emit a Safe line because no posted alternate qualifies. That behavior is right; this ADR generalizes it to all four tiers and adds explicit discretion controls.
+
+ADR-20260423-1 established the tier schema; this ADR modifies the line-selection function. Schema unchanged.
+
+**Decision**
+
+Four controls applied in sequence inside `grading.grade_props.compute_kde_tier_lines`:
+
+1. **Posted-line source.** Tier lines must be chosen from the set of posted alternate lines for that `(player_id, market_key)`. Free-form KDE interpolation is removed. After the KDE produces a target probability for a tier threshold, pick the posted alt line whose KDE probability most closely satisfies the threshold. Every emitted line is tradeable on FanDuel as-is.
+
+2. **Implied-odds ceiling.** Reject any posted line whose current American odds are stronger than -500 (implied probability > 0.833). Implementation: join the candidate line against `odds.upcoming_player_props.outcome_price` on the Over side. If every posted alt line at a tier fails this cap, that tier is NULL. "Too sure to bet" becomes a non-result rather than a surfaced line.
+
+3. **Posted-center proximity band.** A tier line must lie within ±N% of the posted center (the standard, non-alternate line for that market). Initial N: 50%. Rejects candidates outside `[center * (1 - N), center * (1 + N)]`. Eliminates the safe-5-when-center-is-18.5 failure mode. Band may need per-market tuning — see Question A.
+
+4. **Backtest-calibrated probability.** Replace raw KDE probability in the output with an empirically-calibrated probability derived from historical `grade → outcome` correlation. Process:
+   - Build a calibration table (`common.grade_calibration` or an in-memory lookup rebuilt nightly) by bucketing resolved `common.daily_grades` rows by composite_grade and computing empirical hit rate per bucket.
+   - Initial buckets: 0-25, 25-50, 50-65, 65-75, 75-85, 85-92, 92+.
+   - Shrinkage factor for each bucket: `empirical_hit_rate / raw_kde_prob_mean`.
+   - At tier-line emit time, multiply the raw probability by the bucket's shrinkage factor before writing to `safe_prob` / `value_prob` / etc. The displayed 78% then reflects 78% historical reality rather than model-optimistic 85%.
+
+**Order of operations**
+
+For each tier (Safe threshold ~0.75, Value ~0.58, HighRisk ~0.45, Lotto ~0.25):
+
+1. Collect posted alt lines for `(player_id, market_key)` from `odds.upcoming_player_props`.
+2. Filter by proximity band (control 3).
+3. Filter by implied-odds ceiling (control 2).
+4. Compute raw KDE probability for each surviving line.
+5. Pick the line whose KDE probability is closest to the tier threshold from above (highest prob that still satisfies the tier).
+6. Apply calibration shrinkage (control 4) to produce the emitted probability.
+7. If zero lines survive steps 2-5, tier value is NULL.
+
+**Consequences**
+
+Positive:
+- Every emitted tier line is tradeable; no 4.4-point anomalies.
+- No "false certainty" at -500+ implied odds.
+- Safe/Value/HighRisk/Lotto all stay within a reasonable band of the posted center.
+- Displayed probability matches historical reality.
+- Tier NULL becomes semantically clean: "no qualifying line at this tier" instead of "data gap."
+
+Negative:
+- Expected 30-50% reduction in emitted tier-line counts (exact figure TBD from first post-change run). User may perceive fewer "picks."
+- Calibration dataset needs periodic rebuild as outcomes accumulate. Add a nightly workflow step or rebuild inside the grading run.
+- Proximity band assumes the posted center line is always available. Add a RELATIONAL_CHECK: every graded market in the window should have a posted center line in `odds.upcoming_player_props`.
+- Existing `common.player_tier_lines` rows remain under old logic until backfilled. Post-change backfill of the last 30 days is recommended (workflow: `grading.yml` with a force flag, limited to tier_lines regeneration).
+
+**Open questions — answer before implementation**
+
+A. **Proximity band width.** 50% is plausible for points (18.5 → 9-28). Too tight for low-value markets (blocks 1.5 → 0.75-2.25 excludes legitimate 0.5 and 2.5). Options: per-market band, stat-dependent band, or use standard deviation from player's recent games. Recommendation: per-market table, default 50%, overrides for `player_blocks`, `player_steals`, `player_threes` set to ±100% or a fixed 2-line spread.
+
+B. **Calibration bucket granularity.** 7 buckets seems reasonable for 1M+ row dataset. Alternative: continuous shrinkage curve (isotonic regression on composite_grade). Continuous is more accurate but harder to explain; discrete buckets are inspectable. Recommendation: start with 7 discrete buckets, evaluate isotonic later.
+
+C. **When every tier fails.** If no posted line satisfies any tier, emit an empty tier_lines row (all four tier values NULL) or emit nothing? Empty row preserves grade_date + player_id + market_key for joinability but wastes space. No-row is cleaner but breaks the "every graded player-market has a tier row" invariant. Recommendation: empty row with all NULLs, document invariant as "tier_lines row exists for every graded player-market; tier values are individually nullable."
+
+D. **MLB scope.** MLB grading does not yet exist (ADR-20260424-3 sequencing). Build this ADR's changes as NBA-only for v1 and re-parameterize when MLB grading is implemented. Recommendation: NBA-only v1, parameterize on sport_key when MLB grading lands.
+
+**Implementation plan once approved**
+
+1. Write `grading/calibrate_grades.py` — computes empirical hit rate per composite_grade bucket from resolved `common.daily_grades`. Idempotent; writes `common.grade_calibration` or returns a DataFrame cached in-process.
+2. Modify `compute_kde_tier_lines` in `grade_props.py` to apply the four controls in order.
+3. Add RELATIONAL_CHECK `nba_graded_markets_have_posted_center` to `etl/integrity.py`.
+4. Force-regrade last 30 days via existing `grading.yml` backfill mode to produce a before/after comparison.
+5. Monitor first week post-deploy: tier-line count per day, NULL rate per tier, user-reported weirdness.
+
+**Related ADRs**
+- ADR-20260423-1 (player_tier_lines initial design — schema unchanged by this ADR)
+- ADR-20260424-2 (data integrity framework — adds a relational check covered here)
+- ADR-20260424-3 (initiative sequence — this falls inside Initiative A's ongoing iteration)
+

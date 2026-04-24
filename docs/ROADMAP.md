@@ -37,3 +37,23 @@ These came up during planning conversations and were explicitly not decided:
 
 - **Multi-bookmaker support**. FanDuel only for now. Rationale captured in ADR-0007.
 - **Public Statcast Excel exports vs. live API for MLB historical data**. Currently both exist (`mlb-data/mlbSavantStatcast-2024-25.xlsx` etc. on local Windows machine). Need to decide whether the ETL relies on local Excel exports or pulls fresh from Savant for historical seasons.
+
+## 2026-04-24 Phase 3 update
+
+Initiative A (data integrity framework) Phase 3 complete. Catalog reconciled: 272,703 → 29 violations, all remaining are known All-Star / non-team-sport edges. MLB odds daily cadence restored.
+
+**Active:**
+- Await Austin sign-off on ADR-20260424-4 (tier-line discretion). Four open questions in the ADR block implementation.
+- Monitor tonight's 10:00 UTC odds-etl.yml for successful MLB upcoming ingest (first run after the --sport all change).
+
+**Next-up (in order):**
+1. Implement ADR-20260424-4 once questions A-D are answered. Estimate: one working session for compute_kde_tier_lines rewrite + calibration script + 30-day backfill.
+2. ADR for sample-size/eligibility-gate redesign (item #1 from 2026-04-24 discussion). Replaces fixed-60-game hit_rate window with time-based window + rotation-role gate.
+3. Historical mapping backfill pass (item #4): 810 unmapped player names + 3,310 unmapped event_game_map rows. Writes a resolver pass using expanded name-normalization and cross-season roster lookup.
+4. Phase 5 wire validate_and_filter() into NBA ETL / odds ETL / grading. Deferred behind tier-line and sample-size work so those changes inherit enforcement rather than fight it.
+
+**Deferred:**
+- Initiative D (MLB null-name fix) — folded into item #3 / item #4 historical backfill.
+- Initiative E (ROADMAP structure standardization) — low priority; lived with current format for now.
+- MLB grading engine build — large, depends on #1 and #2 settling first so MLB inherits the improved design.
+
