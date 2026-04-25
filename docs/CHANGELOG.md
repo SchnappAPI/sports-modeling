@@ -1,5 +1,7 @@
 # Changelog
 
+2026-04-24 [nba][web] Fixed Props tab HTTP 500 caused by /api/grades timing out at the 15s SWA limit. Root cause: getGrades in web/lib/queries.ts wrapped the date column in CONVERT(VARCHAR(10), dg.grade_date, 120) = @gradeDate, which is non-sargable and forced a scan instead of an index seek. With the walk-forward backfill loading common.daily_grades, the query crossed the 15s threshold and the API returned 500. Reproduced against DB: 52.5s with the CONVERT predicate, 0.12s with sargable dg.grade_date = @gradeDate (column is DATE, param is YYYY-MM-DD varchar; SQL Server casts the constant once). Two other CONVERT calls in SELECT clauses at lines 519 and 594 are output formatting, kept as-is. The same code path feeds At a Glance and the player Props page, both should also be faster. See /web/nba/README.md.
+
 ## 2026-04-24 [nba][grading][schema][adr] ADR-20260424-6 — tier qualification redesign
 
 Refines ADR-5. Three changes addressing direct user feedback that the strict

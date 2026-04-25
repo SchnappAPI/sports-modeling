@@ -558,7 +558,7 @@ export async function getGrades(
      LEFT JOIN nba.teams ht ON ht.team_id = s.home_team_id
      LEFT JOIN nba.teams at ON at.team_id = s.away_team_id
      ${linkJoin}
-     WHERE CONVERT(VARCHAR(10), dg.grade_date, 120) = @gradeDate
+     WHERE dg.grade_date = @gradeDate
      ${gameFilter}
      ORDER BY COALESCE(dg.composite_grade, dg.grade) DESC`
   );
