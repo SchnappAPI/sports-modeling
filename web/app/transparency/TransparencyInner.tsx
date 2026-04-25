@@ -72,7 +72,7 @@ function gapColor(gap: number): string {
 export default function TransparencyInner() {
   const [buckets, setBuckets] = useState<Bucket[] | null>(null);
   const [bucketsErr, setBucketsErr] = useState<string | null>(null);
-  const [tierWindow, setTierWindow] = useState<WindowChoice>('30');
+  const [tierWindow, setTierWindow] = useState<WindowChoice>('all');
   const [tiers, setTiers] = useState<TierStats[] | null>(null);
   const [tiersErr, setTiersErr] = useState<string | null>(null);
   const [trend, setTrend] = useState<TrendPoint[] | null>(null);
