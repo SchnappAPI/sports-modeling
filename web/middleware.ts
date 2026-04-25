@@ -1,16 +1,35 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-// Site-wide maintenance gate. Flip MAINTENANCE_ON to true, commit, push.
-// SWA redeploys in ~90s and the site is locked for everyone except
-// visitors who hit any URL with ?unlock=<UNLOCK_CODE> (sets a 30-day
-// cookie, then redirects to the clean URL). Flip back to false to
-// disable.
-
-const MAINTENANCE_ON = true;
-const UNLOCK_CODE = 'go';
+// Site-wide gates driven by the `common.feature_flags` table. Flags are
+// fetched via /api/flags and cached in module memory for CACHE_MS so the
+// DB sees at most one read per minute per function instance. Failing
+// open on any error is deliberate — the gate exists to discourage
+// casual visitors during work, not to enforce security.
 
 const COOKIE_NAME = 'sb_unlock';
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
+const UNLOCK_CODE = 'go';
+const CACHE_MS = 60_000;
+
+let cachedFlags: Record<string, boolean> | null = null;
+let cachedAt = 0;
+
+async function getFlags(req: NextRequest): Promise<Record<string, boolean>> {
+  const now = Date.now();
+  if (cachedFlags && now - cachedAt < CACHE_MS) return cachedFlags;
+  try {
+    const url = new URL('/api/flags', req.url);
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`flags fetch ${res.status}`);
+    const data = (await res.json()) as Record<string, boolean>;
+    cachedFlags = data;
+    cachedAt = now;
+    return data;
+  } catch {
+    // Fail open: return last good cache if we have one, else empty map.
+    return cachedFlags ?? {};
+  }
+}
 
 const MAINTENANCE_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -40,20 +59,16 @@ const MAINTENANCE_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-export function middleware(request: NextRequest) {
-  if (!MAINTENANCE_ON) return NextResponse.next();
-
+export async function middleware(request: NextRequest) {
   const { pathname, searchParams } = request.nextUrl;
 
-  // Always allow the keep-alive ping.
-  if (pathname === '/api/ping') return NextResponse.next();
-
-  // Cookie present and matches: pass through.
-  if (request.cookies.get(COOKIE_NAME)?.value === UNLOCK_CODE) {
+  // Always allow the keep-alive ping and the flags endpoint itself.
+  if (pathname === '/api/ping' || pathname === '/api/flags') {
     return NextResponse.next();
   }
 
-  // Unlock attempt via query string.
+  // Unlock attempt via query string. Always honored, even if maintenance
+  // is off — sets the bypass cookie so future locks let you through.
   if (searchParams.get('unlock') === UNLOCK_CODE) {
     const cleanUrl = request.nextUrl.clone();
     cleanUrl.searchParams.delete('unlock');
@@ -69,6 +84,14 @@ export function middleware(request: NextRequest) {
     });
     return res;
   }
+
+  // Cookie present and matches: pass through regardless of maintenance.
+  if (request.cookies.get(COOKIE_NAME)?.value === UNLOCK_CODE) {
+    return NextResponse.next();
+  }
+
+  const flags = await getFlags(request);
+  if (!flags['maintenance_mode']) return NextResponse.next();
 
   return new NextResponse(MAINTENANCE_HTML, {
     status: 503,

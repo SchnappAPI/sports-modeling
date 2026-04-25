@@ -5,15 +5,29 @@ const REPO     = 'sports-modeling';
 const WORKFLOW = 'refresh-data.yml';
 
 export async function POST(req: NextRequest) {
-  // Validate admin passcode
-  const body = await req.json().catch(() => ({}));
-  const adminCode = (body.code ?? '').trim().toUpperCase();
-  const expected  = (process.env.ADMIN_REFRESH_CODE ?? '').trim().toUpperCase();
+  // Two auth paths:
+  //   1. Admin session token in `x-admin-token` header (matches ADMIN_PASSCODE).
+  //      Used by the admin Tools tab so you don't need a separate code.
+  //   2. Body `{ code: string }` matching ADMIN_REFRESH_CODE.
+  //      Used by the legacy in-page Refresh Data button.
+  const adminToken = req.headers.get('x-admin-token') ?? '';
+  const adminPasscode = process.env.ADMIN_PASSCODE ?? '';
+  const adminAuthed = !!adminPasscode && adminToken === adminPasscode;
 
-  if (!expected) {
-    return NextResponse.json({ error: 'ADMIN_REFRESH_CODE not configured' }, { status: 500 });
+  let bodyAuthed = false;
+  if (!adminAuthed) {
+    const body = await req.json().catch(() => ({}));
+    const adminCode = (body.code ?? '').trim().toUpperCase();
+    const expected  = (process.env.ADMIN_REFRESH_CODE ?? '').trim().toUpperCase();
+    if (!expected) {
+      return NextResponse.json({ error: 'ADMIN_REFRESH_CODE not configured' }, { status: 500 });
+    }
+    if (adminCode && adminCode === expected) {
+      bodyAuthed = true;
+    }
   }
-  if (!adminCode || adminCode !== expected) {
+
+  if (!adminAuthed && !bodyAuthed) {
     return NextResponse.json({ error: 'Invalid code.' }, { status: 401 });
   }
 
