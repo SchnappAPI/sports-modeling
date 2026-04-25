@@ -910,3 +910,36 @@ Context-size monitoring fires soft warning around 60-70% of capacity (one-time n
 **Open questions.** None for v1. Refinements expected after first real usage. Likely candidates for revision: context-size threshold percentages, whether the Evolution Note field needs further structure, whether wrap-and-merge should auto-tag the PR with anything for filtering.
 
 **Supersedes.** Nothing. Extends the documentation system without modifying ADR-0001's core structure.
+
+## ADR-20260425-2 [shared][web] DB-backed feature flags as the runtime visibility surface
+
+Date: 2026-04-25
+
+**Context.** Three operational needs converged. First, maintenance mode was a hardcoded constant in `web/middleware.ts` that required a commit-and-push (and a 90-second SWA redeploy) every time it flipped. Second, with NBA shipping ahead of MLB and MLB ahead of NFL, individual sports and sub-pages periodically need to be hidden from end users without removing the underlying code. Third, the existing inline `RefreshDataButton` on NBA pages required a separate `ADMIN_REFRESH_CODE` prompt every time, even though the same admin already had a session at `/admin`. A single source of truth that handles all three, editable from a phone in seconds, was preferable to growing the env-var surface.
+
+**Decision.** Introduce `common.feature_flags` (`flag_key VARCHAR(100) PK`, `enabled BIT`) as the single runtime visibility surface. The DB is authoritative; no env vars, no Azure portal flips, no commits to toggle. Seed seven flags on creation (`maintenance_mode`, `sport.nba`, `sport.mlb`, `sport.nfl`, `page.nba.grades`, `page.nba.player`, `page.mlb.main`); future pages add one row plus one line in the admin UI list.
+
+Reads happen in two places, both with a 60-second in-process cache so DB load is at most one read per minute per Azure Functions instance:
+
+- `web/middleware.ts` reads `maintenance_mode` to drive the maintenance gate.
+- `web/lib/feature-flags.ts` exports `isPageVisible(flagKey)` for server components. Sport pages call it with `sport.<x>`; sub-pages call it with `page.<x>.<y>`.
+
+Three layered behaviors keep the design predictable:
+
+1. **Cascade.** A `page.<sport>.<x>` lookup short-circuits to false if its parent `sport.<sport>` flag is explicitly disabled. Disabling NBA hides every NBA sub-page in one flip; sub-pages don't need their parent state duplicated.
+2. **Admin bypass.** Any visitor with the `sb_unlock=go` cookie passes every gate. The cookie is set automatically by `/api/admin/*` on successful auth, so signing into `/admin` simultaneously authenticates and unlocks every disabled surface for that browser. The separate `?unlock=go` URL is preserved for the same flow without an admin sign-in.
+3. **Fail open.** Any DB error in `loadFlags()` returns the previously-cached map (or an empty map on cold start). The site stays up if the database stalls; flag flips are best-effort, not a hard dependency.
+
+Admin UI extends the existing `/admin` page with three tabs (Codes, Visibility, Tools). Visibility renders one row per flag with an enable/disable toggle hitting `/api/admin/flags`. Tools holds the relocated Refresh Data button, which now reads the admin session header instead of prompting for `ADMIN_REFRESH_CODE`. The discreet entry to `/admin` is a triple-tap on the top-left 32x32 corner of any page (zero visual surface, works identically on desktop and mobile).
+
+**Tradeoffs.** The DB read adds latency to every page load (worst case ~50ms on a cold instance, sub-1ms on a warm cache). A flag flip takes up to 60 seconds to propagate across instances; this is acceptable for an operator tool, not for any user-facing latency-sensitive logic. The surface area is meaningfully larger than the constant it replaces: a DB table, two API routes, a server helper, an admin UI section, page-wrapper edits across every sport. The benefit is that toggles are live and reversible from a phone with no push.
+
+**Alternatives considered.** Env vars in Azure SWA app settings: rejected because Azure portal flips are slow on mobile and the SWA settings page is awkward on a phone screen. A single global JSON in blob storage: viable but introduces a second source of truth that has to stay in sync with the DB-backed admin codes table that already exists. Per-sport hardcoded constants with deploys: same redeploy-on-flip problem as the maintenance constant; rejected for the same reason.
+
+**Consequences.**
+
+- `web/middleware.ts` no longer carries a `MAINTENANCE_ON` constant. The `web/README.md` Maintenance Gate section is updated to reflect the DB-backed flow.
+- Adding a new gated page is a two-line change: insert one row into `common.feature_flags`, add one `if (!(await isPageVisible(...)))` line at the top of the page wrapper. The admin UI auto-renders the new flag in the Visibility tab on next load (it lists whatever rows exist in the table).
+- The `ADMIN_REFRESH_CODE` env var stays defined for backward compatibility but is no longer the primary refresh entry point.
+- Three commits landed the framework: `7c9d52f`, `4f5da59`, `7e65752`. See CHANGELOG 2026-04-25 for the file-level breakdown.
+

@@ -97,7 +97,7 @@ Note: player-level `DUE` and line-level `SLUMP` both display with the "DUE" labe
 - Default `minOdds = -600`. Slider range `-1000` to `+200`. Reset button goes to `-1000` (shows everything).
 - `ODDS_MIN = -1000`. `oddsFilterActive = minOdds > ODDS_MIN`. Do not change this condition.
 - Over/Under toggle filters on `r.outcomeName`.
-- Refresh Data button requires admin passcode (`ADMIN_REFRESH_CODE` set in Azure SWA app settings).
+- Refresh Data button moved to `/admin` Tools tab (2026-04-25). Uses the admin session header; no separate `ADMIN_REFRESH_CODE` prompt.
 - Player team tricode chip renders before the player name in both list rows and PropMatrix rows. Derived inline from row data: `oppTeamAbbr === homeTeamAbbr ? awayTeamAbbr : homeTeamAbbr`. No schema change.
 - PropMatrix players within each game and stat group are sorted by right-to-left lexicographic walk over the threshold ladder: a populated cell ranks above a missing one, then ASC by American odds (more negative = more favored = higher), with alphabetical as the final tiebreaker. Mirrors FanDuel's Live SGP grid.
 
@@ -132,7 +132,7 @@ Line and Odds cells in the At-a-Glance table become tappable FanDuel betslip dee
 
 ### Refresh buttons
 
-- `RefreshDataButton` is on the NBA page header and on At a Glance. Hits `/api/refresh-data`. Requires `ADMIN_REFRESH_CODE`. Runs all four steps (live box, odds, grading, lineup poll).
+- `RefreshDataButton` lives in the `/admin` Tools tab as of 2026-04-25; it's no longer inline on NBA pages. It hits `/api/refresh-data` using the admin session header (no separate `ADMIN_REFRESH_CODE` prompt) and runs all four steps (live box, odds, grading, lineup poll).
 - A separate unauthenticated refresh hits `/api/refresh-lines` and runs odds + grading only. Used from older on-page controls.
 
 ### Flask live-data integration
@@ -190,7 +190,7 @@ Do not revert without an ADR.
 - Polling intervals: scoreboard and live box score 30s, live odds 60s
 - Position grouping via `posToGroup()` (PG/SG → G, SF/PF → F, C → C, compound by `LEFT(1)`)
 - FanDuel betslip link appears when `row.link` is present and the game is open
-- `RefreshDataButton` requires `ADMIN_REFRESH_CODE`; `/api/refresh-lines` is unauthenticated
+- `RefreshDataButton` is admin-only and reached via `/admin` Tools tab; `/api/refresh-lines` is unauthenticated. Inline refresh on NBA pages was removed 2026-04-25
 - Signal logic lives in `web/lib/signals.ts`. Player-level `DUE` (regression-based) and line-level `SLUMP` displayed as `DUE` (momentum-based) are distinct signals with different inputs
 - `/api/games` treats the DB as the game-list source of truth. CDN only overlays live score/status onto games already in the DB; CDN-only games are ignored
 - All web routes that call Flask on the VM use `https://live.schnapp.bet` (Cloudflare subdomain), never a hardcoded IP
