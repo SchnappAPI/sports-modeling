@@ -451,7 +451,21 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
     for (const [gameKey, gEntry] of gameMap) {
       const players = Array.from(gEntry.playerMap.values())
         .filter((p) => Object.keys(p.cells).length > 0)
-        .sort((a, b) => a.playerName.localeCompare(b.playerName));
+        .sort((a, b) => {
+          // Right-to-left lexicographic over the threshold ladder:
+          // populated beats missing; then ASC by American odds (more
+          // negative = more favored = ranks higher). Mirrors FanDuel.
+          for (let i = cols.length - 1; i >= 0; i--) {
+            const col = cols[i];
+            const ap = a.cells[col]?.price;
+            const bp = b.cells[col]?.price;
+            const aHas = typeof ap === 'number';
+            const bHas = typeof bp === 'number';
+            if (aHas !== bHas) return aHas ? -1 : 1;
+            if (aHas && bHas && ap !== bp) return (ap as number) - (bp as number);
+          }
+          return a.playerName.localeCompare(b.playerName);
+        });
       if (players.length > 0) {
         games.push({ label: gameLabelMap.get(gameKey) ?? gameKey, players });
       }
