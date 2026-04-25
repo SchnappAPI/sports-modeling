@@ -2023,22 +2023,43 @@ def grade_props_for_date(
 
     is_under = (direction == "under")
 
-    # ADR-20260424-5: initialize calibrator (fit once per run) and opportunity groupings.
+    # ADR-20260425-3: read calibrator from common.grade_calibration. The
+    # weekly_calibration.py job is the only writer; daily grading just reads.
+    # Identity fallback if the table is missing/empty (e.g. weekly job has
+    # not run yet on a fresh DB).
     _tier_calibrator = None
     try:
-        try:
-            from calibrate_grades import fit_calibrator, publish_calibration_buckets
-        except ImportError:
-            from grading.calibrate_grades import fit_calibrator, publish_calibration_buckets
-        _cal, _buckets = fit_calibrator(engine, as_of_date=grade_date_str)
-        _tier_calibrator = _cal
-        if _buckets is not None and len(_buckets) > 0:
-            try:
-                publish_calibration_buckets(engine, _buckets)
-            except Exception as _e:
-                log.info(f"  Calibration bucket publish skipped: {_e}")
+        with engine.connect() as _c:
+            _rows = _c.execute(text("""
+                SELECT bucket_min, bucket_max, isotonic_hit_rate, max_well_sampled_rate
+                  FROM common.grade_calibration
+                 ORDER BY bucket_min ASC
+            """)).fetchall()
+        if _rows and len(_rows) >= 3:
+            _bucket_width = float(_rows[0][1]) - float(_rows[0][0])
+            _mids = np.array([float(r[0]) + _bucket_width / 2.0 for r in _rows])
+            _rates = np.array([float(r[2]) for r in _rows])
+            _cap = float(_rows[0][3]) if _rows[0][3] is not None else None
+
+            def _calibrator(raw_prob):
+                if raw_prob is None:
+                    return None
+                p = float(raw_prob)
+                if p <= _mids[0]:
+                    v = float(_rates[0])
+                elif p >= _mids[-1]:
+                    v = float(_rates[-1])
+                else:
+                    v = float(np.interp(p, _mids, _rates))
+                if _cap is not None:
+                    v = min(v, _cap)
+                return v
+            _tier_calibrator = _calibrator
+            log.info(f"  Calibrator loaded from grade_calibration: {len(_rows)} buckets, cap={_cap}")
+        else:
+            log.info(f"  grade_calibration has {len(_rows)} rows; identity calibrator")
     except Exception as _e:
-        log.info(f"  Calibrator init skipped ({_e}); using identity probabilities.")
+        log.info(f"  Calibrator load skipped ({_e}); using identity probabilities.")
 
     _opp_groups = {}
     if opp_df is not None and not opp_df.empty:
