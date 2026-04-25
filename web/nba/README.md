@@ -98,6 +98,8 @@ Note: player-level `DUE` and line-level `SLUMP` both display with the "DUE" labe
 - `ODDS_MIN = -1000`. `oddsFilterActive = minOdds > ODDS_MIN`. Do not change this condition.
 - Over/Under toggle filters on `r.outcomeName`.
 - Refresh Data button requires admin passcode (`ADMIN_REFRESH_CODE` set in Azure SWA app settings).
+- Player team tricode chip renders before the player name in both list rows and PropMatrix rows. Derived inline from row data: `oppTeamAbbr === homeTeamAbbr ? awayTeamAbbr : homeTeamAbbr`. No schema change.
+- PropMatrix players within each game and stat group are sorted by right-to-left lexicographic walk over the threshold ladder: a populated cell ranks above a missing one, then ASC by American odds (more negative = more favored = higher), with alphabetical as the final tiebreaker. Mirrors FanDuel's Live SGP grid.
 
 ### Live tab
 
@@ -192,6 +194,8 @@ Do not revert without an ADR.
 - Signal logic lives in `web/lib/signals.ts`. Player-level `DUE` (regression-based) and line-level `SLUMP` displayed as `DUE` (momentum-based) are distinct signals with different inputs
 - `/api/games` treats the DB as the game-list source of truth. CDN only overlays live score/status onto games already in the DB; CDN-only games are ignored
 - All web routes that call Flask on the VM use `https://live.schnapp.bet` (Cloudflare subdomain), never a hardcoded IP
+- PropMatrix player sort is right-to-left lexicographic over the threshold ladder, with alphabetical tiebreaker. Do not revert to alphabetical-only
+- `/api/grades` date predicate is `WHERE dg.grade_date = @gradeDate` (sargable). Do not wrap `dg.grade_date` in `CONVERT()`; that crossed the SWA 15s function timeout in production
 
 ## Recent Changes
 
