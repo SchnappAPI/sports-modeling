@@ -1,0 +1,48 @@
+name: Migrate player_tier_lines v4
+
+# One-off additive migration per ADR-20260424-6. Adds 4 hit-context columns
+# to common.player_tier_lines: highrisk_hit_avg_min, highrisk_hit_avg_opp,
+# lotto_hit_avg_min, lotto_hit_avg_opp. Idempotent via IF NOT EXISTS.
+
+on:
+  workflow_dispatch:
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  migrate:
+    runs-on: [self-hosted, schnapp-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+      - name: Add columns
+        run: |
+          python << 'PYEOF'
+          from etl.db import get_engine
+          from sqlalchemy import text
+          eng = get_engine()
+          new_cols = [
+              ("highrisk_hit_avg_min", "FLOAT"),
+              ("highrisk_hit_avg_opp", "FLOAT"),
+              ("lotto_hit_avg_min",    "FLOAT"),
+              ("lotto_hit_avg_opp",    "FLOAT"),
+          ]
+          with eng.begin() as conn:
+              for col, dtype in new_cols:
+                  conn.execute(text(
+                      f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+                      f"WHERE TABLE_SCHEMA='common' AND TABLE_NAME='player_tier_lines' "
+                      f"AND COLUMN_NAME='{col}') "
+                      f"ALTER TABLE common.player_tier_lines ADD {col} {dtype} NULL"
+                  ))
+                  print(f"ensured: {col} {dtype}")
+              n = conn.execute(text(
+                  "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                  "WHERE TABLE_SCHEMA='common' AND TABLE_NAME='player_tier_lines'"
+              )).scalar()
+              print(f"common.player_tier_lines column count: {n}")
+          PYEOF

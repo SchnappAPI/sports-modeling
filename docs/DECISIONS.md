@@ -785,3 +785,73 @@ Negative:
 **Related**
 - ADR-20260424-4 — controls 1, 2, 4 unchanged; control 3 replaced by this ADR.
 - ADR-20260423-1 — tier_lines schema; this ADR extends additively.
+
+
+## ADR-20260424-6 — Tier qualification redesign: Safe EV floor, HighRisk/Lotto OR-gate with breakout signal, 4 hit-context columns
+
+**Status:** Approved 2026-04-24. Refines ADR-20260424-5. Replaces the strict probability gate for HighRisk and Lotto with an OR-gate that admits breakout cases. Adds an EV floor for Safe to prevent -EV "safe" props at very short prices. Adds 4 columns characterizing past hit games for similarity matching on the rare tiers.
+
+**Context**
+
+ADR-5 emits tier rows only when calibrated probability clears the tier's threshold (Safe ≥ 0.80, Value ≥ 0.58, HighRisk ≥ 0.28, Lotto ≥ 0.07). After running with ADR-5 in production, three problems became visible:
+
+1. The strict probability gate hides exactly the cases Austin is trying to find. A player who has never hit 15 points has hits_all = 0, the KDE-fitted probability falls below the Lotto floor, the row never gets emitted. The 21 ADR-5 evidence columns never reach the user because the row was filtered before the columns could be populated. From Austin: *"a player may never have had 10 rebounds before, but has been averaging 18 rebound chances a game as of recently, or a player has never hit 15 points before, but as of lately they are taking more shots, getting more playing time, and shooting more efficiently. Those are just two examples of what i dont want to unintentionally hide from myself. Instead those are things i am trying to find."*
+
+2. Safe rows can be -EV at the boundary. At -500 (the implied-odds ceiling) with 80% calibrated probability (the Safe threshold), per-dollar EV is -0.04. A row with both values at the floor surfaces as Safe even though it's a strictly losing bet. From Austin: *"It is rare that i will place props that are -1000... I am trying to find a balance. To find valuable props to bet on."*
+
+3. The 4 evidence columns added in ADR-5 (hits_all, games_all, hits_20, games_20 per tier) tell the user *whether* past hits exist but not *under what conditions* they occurred. From Austin: *"identify the variables or factors that are consistent in games leading up to a player hitting one of these uncommon lines. are there any trends consistent and similar to the players situation now?"*
+
+**Decision**
+
+*Safe tier: add EV floor.* In addition to existing controls (probability ≥ 0.80, posted line, -500 implied-odds ceiling), require `safe_ev ≥ TIER_SAFE_EV_FLOOR` (-0.05 per dollar). Drops the -EV-by-construction Safe rows at the boundary. Higher-quality Safe rows are unaffected.
+
+*HighRisk and Lotto: OR-gate qualification with breakout signal.* The price floors (+150 for HighRisk, +400 for Lotto) and -500 implied-odds ceiling are unchanged. The probability gate becomes a logical OR: surface the row if `calibrated_probability ≥ tier_threshold` OR `breakout_signal` is true.
+
+`breakout_signal := (recent_opportunity ≥ historical_opportunity × 1.15) AND (recent_minutes_20 ≥ season_avg_minutes × 0.95)`
+
+Where `historical_opportunity` is the player's mean of the market-relevant opportunity metric (FGA for points markets, FG3A for threes, reb_chances for rebounds, potential_ast for assists) over their full season-to-date history before grade_date. `recent_opportunity` is the same metric averaged over the last 20 games. `season_avg_minutes` is the player's mean minutes over the same season-to-date window.
+
+This admits the breakout case explicitly: a player whose recent shot volume has stepped up by 15%+ while playing roughly their normal minutes will surface in HighRisk and Lotto even when the KDE-derived probability says no, because the trend signal indicates the line is now within reach.
+
+The composite ≥ 50 gate currently restricting Lotto is also relaxed: Lotto qualifies if `(composite ≥ 50) OR breakout_signal`. Composite ≥ 50 was a coarse quality filter; the breakout signal is a more direct read of "this player has upside right now."
+
+*Add 4 hit-context columns to common.player_tier_lines.* For each row where a HighRisk or Lotto line is emitted AND the player has at least one historical game where the stat met or exceeded that line, populate:
+
+- `highrisk_hit_avg_min` FLOAT — average minutes played in past games where stat ≥ highrisk_line
+- `highrisk_hit_avg_opp` FLOAT — average market-relevant opportunity in past games where stat ≥ highrisk_line
+- `lotto_hit_avg_min`    FLOAT — average minutes in past games where stat ≥ lotto_line
+- `lotto_hit_avg_opp`    FLOAT — average opportunity in past games where stat ≥ lotto_line
+
+Computed from a stat-history-and-opportunity-history join keyed on (player_id, game_date) in the caller, then passed to compute_kde_tier_lines as an aligned DataFrame. Indices in the aligned frame let us identify the games where the line was hit and average the matching minutes/opportunity values. NULL when a tier line is emitted but no past hits exist (this is the breakout case — the qualifying logic surfaced the row without a hit precedent).
+
+The user reads these alongside `recent_minutes_20` and `recent_opportunity` already on the row: a row showing past hits at 36 minutes and 18 FGA when today's projected role is 22 minutes and 11 FGA tells the user the past hits came from conditions not present tonight. The reverse — past hits at 22/11 when today is 22/11 — supports the play.
+
+**Consequences**
+
+Positive:
+- Breakout candidates surface. Player with rising opportunity and stable minutes who has never hit the rare line gets a tier row with `hits_all = 0`, `recent_opportunity > historical_opportunity`, and the user sees both numbers and judges plausibility.
+- -EV Safe rows are dropped at the boundary. The -500 cap was always implicitly +EV-adjacent at high probabilities; the explicit EV floor handles the boundary cleanly.
+- Similarity matching on the rare tiers gets concrete numbers. Past-hit conditions are no longer hidden in aggregate hit counts.
+
+Negative:
+- 4 additional columns on common.player_tier_lines (49 total). Additive migration. Existing rows NULL until regenerated.
+- Tier row volume is expected to increase modestly: rows that previously failed the strict HighRisk/Lotto probability gate but pass the breakout signal will now be emitted. Estimated 5-15% increase based on observed opportunity-trend distribution.
+- Composite ≥ 50 relaxation for Lotto introduces a small number of rows that previously would not have surfaced; these are by design the breakout cases.
+- The breakout signal computation requires `recent_opportunity`, `historical_opportunity`, `recent_minutes_20`, and a season-average minutes value to be available. When the player has insufficient game history (early season or thin sample), breakout_signal is False, falling back to probability-only qualification.
+
+**Implementation plan**
+
+1. Schema migration: add 4 additive columns via one-off workflow (`migrate-tier-lines-v4.yml`).
+2. `grading/grade_props.py`:
+   - Add constants: `TIER_SAFE_EV_FLOOR`, `BREAKOUT_OPP_RATIO`, `BREAKOUT_MIN_RATIO`.
+   - Update `compute_kde_tier_lines`: new `aligned_history` kwarg (pd.DataFrame with cols stat, minutes, opportunity); compute season_avg_min and breakout_signal once at top of function; apply EV floor at Safe emission; apply OR-gate at HighRisk and Lotto emission; populate 4 new hit-context fields.
+   - Update `ensure_tables`: ADD COLUMN IF NOT EXISTS for the 4 new columns.
+   - Update `upsert_tier_lines`: extend ALL_COLS, create_cols_sql, and MERGE.
+   - Update caller `grade_props_for_date`: build aligned_history DataFrame from stat_grp + opp_grp on game_date, pass into compute_kde_tier_lines, include 4 new column values in tier_rows.append.
+3. Push, restart full-season walk-forward backfill with `--force`.
+4. Validate: find a breakout case (zero past hits, qualifying via opportunity), a similarity match (past hits + today matches avg-hit-game conditions), and a Safe row dropped by the new EV floor.
+
+**Related**
+- ADR-20260424-5 — tier-line justification; this ADR refines its qualification logic and adds 4 columns to its 21.
+- ADR-20260424-4 — controls 1, 2, 4 unchanged (posted lines only, -500 ceiling, isotonic calibration).
+- ADR-20260423-1 — tier_lines schema; this ADR extends additively.

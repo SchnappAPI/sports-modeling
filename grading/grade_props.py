@@ -81,6 +81,19 @@ TIER_LOTTO_MIN_PRICE    = 400
 
 # ADR-20260424-5: Tier discretion controls.
 IMPLIED_ODDS_CEILING = -500  # reject Over prices stronger than this (implied > 83.3%)
+# ADR-20260424-6: Safe tier EV floor. Drops Safe rows where calibrated per-dollar
+# EV is worse than this. Prevents -EV "safe" props at boundary cases (e.g.,
+# 80% probability at -500 has EV -0.04). The -500 implied-odds ceiling already
+# covers the worst case; this is a finer filter at the boundary.
+TIER_SAFE_EV_FLOOR = -0.05
+
+# ADR-20260424-6: Breakout signal thresholds for HighRisk / Lotto qualification.
+# Surfaces a tier row even when calibrated probability falls below the tier's
+# threshold, IF recent opportunity is meaningfully higher than historical AND
+# minutes are at least at season average. Captures the explicit "player has
+# never hit X but is trending toward upside" case.
+BREAKOUT_OPP_RATIO  = 1.15  # recent_opportunity must be >= 1.15 * historical_opportunity
+BREAKOUT_MIN_RATIO  = 0.95  # recent_minutes_20 must be >= 0.95 * season_avg_minutes
 RECENT_GAMES_WINDOW  = 20    # recent form window for hit stats and opportunity averages
 TIER_EXCLUDED_MARKETS = frozenset([
     "player_blocks",
@@ -488,6 +501,16 @@ CREATE TABLE common.player_tier_lines(
                 f"ALTER TABLE common.player_tier_lines ADD {_col} FLOAT NULL"
             ))
 
+        # ADR-20260424-6: hit-context columns (avg minutes / avg opportunity in
+        # past games where the player hit the rare-tier line).
+        for _col in ("highrisk_hit_avg_min", "highrisk_hit_avg_opp",
+                     "lotto_hit_avg_min",    "lotto_hit_avg_opp"):
+            conn.execute(text(
+                f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_SCHEMA='common' AND TABLE_NAME='player_tier_lines' AND COLUMN_NAME='{_col}') "
+                f"ALTER TABLE common.player_tier_lines ADD {_col} FLOAT NULL"
+            ))
+
     log.info("Schema verified.")
 
 
@@ -548,6 +571,7 @@ def compute_kde_tier_lines(
     minutes_values: np.ndarray = None,
     opportunity_values: np.ndarray = None,
     calibrator = None,
+    aligned_history = None,  # ADR-6: pd.DataFrame with cols stat, minutes, opportunity
 ) -> dict:
     """
     Compute tier line values from the player's stat distribution.
@@ -572,6 +596,8 @@ def compute_kde_tier_lines(
         "recent_minutes_20": None,
         "recent_opportunity": None,
         "historical_opportunity": None,
+        "highrisk_hit_avg_min": None, "highrisk_hit_avg_opp": None,
+        "lotto_hit_avg_min":    None, "lotto_hit_avg_opp":    None,
         "kde_window": None, "blowout_dampened": False,
     }
 
@@ -594,6 +620,30 @@ def compute_kde_tier_lines(
             result["historical_opportunity"] = float(round(np.mean(ov), 2))
             recent_opp = ov[-RECENT_GAMES_WINDOW:] if len(ov) >= RECENT_GAMES_WINDOW else ov
             result["recent_opportunity"] = float(round(np.mean(recent_opp), 2))
+
+    # ADR-20260424-6: season-avg minutes for breakout signal denominator.
+    season_avg_min = None
+    if minutes_values is not None:
+        _mv_clean = np.asarray(minutes_values, dtype=float)
+        _mv_clean = _mv_clean[~np.isnan(_mv_clean)]
+        if len(_mv_clean) > 0:
+            season_avg_min = float(np.mean(_mv_clean))
+
+    # ADR-20260424-6: breakout signal — surfaces HighRisk / Lotto rows when
+    # the opportunity trend supports upside even if calibrated prob falls
+    # below the tier threshold. Both conditions must hold.
+    breakout_signal = False
+    if (result["recent_opportunity"] is not None
+            and result["historical_opportunity"] is not None
+            and result["historical_opportunity"] > 0):
+        opp_ratio = result["recent_opportunity"] / result["historical_opportunity"]
+        minutes_ok = (
+            result["recent_minutes_20"] is None
+            or season_avg_min is None
+            or result["recent_minutes_20"] >= season_avg_min * BREAKOUT_MIN_RATIO
+        )
+        if opp_ratio >= BREAKOUT_OPP_RATIO and minutes_ok:
+            breakout_signal = True
 
     # KDE needs 3+ games
     if stat_values is None or len(stat_values) < 3:
@@ -668,19 +718,52 @@ def compute_kde_tier_lines(
             "games_20":  int(len(recent_arr)),
         }
 
+    def _hit_context(line):
+        # ADR-20260424-6: avg minutes / avg opportunity in past games where
+        # stat >= line, computed from aligned_history. Returns (None, None)
+        # when aligned_history is missing or no past hits exist.
+        if aligned_history is None or len(aligned_history) == 0:
+            return None, None
+        if "stat" not in aligned_history.columns:
+            return None, None
+        try:
+            mask = aligned_history["stat"] >= line
+        except Exception:
+            return None, None
+        if not bool(mask.any()):
+            return None, None
+        avg_min = None
+        avg_opp = None
+        if "minutes" in aligned_history.columns:
+            mins = aligned_history.loc[mask, "minutes"].dropna()
+            if len(mins) > 0:
+                avg_min = float(round(float(mins.mean()), 2))
+        if "opportunity" in aligned_history.columns:
+            opps = aligned_history.loc[mask, "opportunity"].dropna()
+            if len(opps) > 0:
+                avg_opp = float(round(float(opps.mean()), 2))
+        return avg_min, avg_opp
+
     # Safe: highest line where P >= SAFE and price passes cap
     safe_candidates = [(l, p) for l, p in probs if p >= TIER_SAFE_PROB and _passes_price_cap(l)]
     if safe_candidates:
         line, prob = safe_candidates[-1]
-        result["safe_line"] = line
-        result["safe_prob"] = _cal(prob)
-        result["safe_price"] = price_lookup.get(line)
-        result["safe_ev"] = _ev(result["safe_prob"], result["safe_price"])
-        h = _hits(line)
-        result["safe_hits_all"]  = h["hits_all"]
-        result["safe_games_all"] = h["games_all"]
-        result["safe_hits_20"]   = h["hits_20"]
-        result["safe_games_20"]  = h["games_20"]
+        _safe_prob_cal = _cal(prob)
+        _safe_price = price_lookup.get(line)
+        _safe_ev = _ev(_safe_prob_cal, _safe_price)
+        # ADR-20260424-6: drop Safe row when calibrated EV is worse than the floor.
+        # _safe_ev is None when the lookup has no price; allow emission in that
+        # edge case (lack of price data, not negative EV).
+        if _safe_ev is None or _safe_ev >= TIER_SAFE_EV_FLOOR:
+            result["safe_line"]  = line
+            result["safe_prob"]  = _safe_prob_cal
+            result["safe_price"] = _safe_price
+            result["safe_ev"]    = _safe_ev
+            h = _hits(line)
+            result["safe_hits_all"]  = h["hits_all"]
+            result["safe_games_all"] = h["games_all"]
+            result["safe_hits_20"]   = h["hits_20"]
+            result["safe_games_20"]  = h["games_20"]
 
     # Value: above safe floor, P >= VALUE, passes cap
     safe_floor = result["safe_line"] or 0.0
@@ -698,14 +781,17 @@ def compute_kde_tier_lines(
         result["value_hits_20"]   = h["hits_20"]
         result["value_games_20"]  = h["games_20"]
 
-    # HighRisk: above value floor, P >= HIGHRISK, passes cap, price floor +150
+    # HighRisk: above value floor, qualifies via (P >= HIGHRISK) OR breakout_signal,
+    # passes -500 cap, has a posted price at +150 or longer near this line.
+    # ADR-20260424-6 OR-gate.
     value_floor = result["value_line"] or safe_floor
     for line, prob in reversed(probs):
-        if prob < TIER_HIGHRISK_PROB:
-            continue
         if line <= value_floor:
             continue
         if not _passes_price_cap(line):
+            continue
+        qualifies = (prob >= TIER_HIGHRISK_PROB) or breakout_signal
+        if not qualifies:
             continue
         closest_price = None
         for cand_line, price in price_lookup.items():
@@ -723,17 +809,24 @@ def compute_kde_tier_lines(
             result["highrisk_games_all"] = h["games_all"]
             result["highrisk_hits_20"]   = h["hits_20"]
             result["highrisk_games_20"]  = h["games_20"]
+            avg_min, avg_opp = _hit_context(line)
+            result["highrisk_hit_avg_min"] = avg_min
+            result["highrisk_hit_avg_opp"] = avg_opp
             break
 
-    # Lotto: above highrisk floor, P >= LOTTO, passes cap, price floor +400, composite >= 50
+    # Lotto: above highrisk floor, qualifies via (P >= LOTTO) OR breakout_signal,
+    # passes -500 cap, posted price at +400 or longer. Outer composite >= 50
+    # gate is also relaxed by breakout_signal. ADR-20260424-6 OR-gate.
     highrisk_floor = result["highrisk_line"] or value_floor
-    if composite_grade is not None and float(composite_grade) >= 50:
+    composite_ok = (composite_grade is not None and float(composite_grade) >= 50)
+    if composite_ok or breakout_signal:
         for line, prob in reversed(probs):
-            if prob < TIER_LOTTO_PROB:
-                continue
             if line <= highrisk_floor:
                 continue
             if not _passes_price_cap(line):
+                continue
+            qualifies = (prob >= TIER_LOTTO_PROB) or breakout_signal
+            if not qualifies:
                 continue
             closest_price = None
             for cand_line, price in price_lookup.items():
@@ -751,6 +844,9 @@ def compute_kde_tier_lines(
                 result["lotto_games_all"] = h["games_all"]
                 result["lotto_hits_20"]   = h["hits_20"]
                 result["lotto_games_20"]  = h["games_20"]
+                avg_min, avg_opp = _hit_context(line)
+                result["lotto_hit_avg_min"] = avg_min
+                result["lotto_hit_avg_opp"] = avg_opp
                 break
 
     return result
@@ -860,9 +956,10 @@ def fetch_player_blowout_profiles(engine, player_ids: list) -> dict:
 
 def upsert_tier_lines(engine, rows: list) -> int:
     """
-    Upsert rows into common.player_tier_lines. Per ADR-20260424-5 schema:
-    41 columns total including 21 new (16 tier hit-stats + 2 new prices +
-    3 opportunity context).
+    Upsert rows into common.player_tier_lines. Per ADR-20260424-5 + ADR-20260424-6:
+    47 columns total. ADR-5 added 21 (16 tier hit-stats + 2 new prices + 3
+    opportunity context); ADR-6 adds 4 hit-context columns
+    (highrisk/lotto x avg_min/avg_opp).
     """
     if not rows:
         return 0
@@ -884,6 +981,8 @@ def upsert_tier_lines(engine, rows: list) -> int:
         "lotto_line", "lotto_prob", "lotto_price", "lotto_ev",
         "lotto_hits_all", "lotto_games_all", "lotto_hits_20", "lotto_games_20",
         "recent_minutes_20", "recent_opportunity", "historical_opportunity",
+        "highrisk_hit_avg_min", "highrisk_hit_avg_opp",
+        "lotto_hit_avg_min",    "lotto_hit_avg_opp",
     ]
 
     create_cols_sql = """
@@ -897,7 +996,9 @@ def upsert_tier_lines(engine, rows: list) -> int:
         highrisk_hits_all INT, highrisk_games_all INT, highrisk_hits_20 INT, highrisk_games_20 INT,
         lotto_line DECIMAL(6,1), lotto_prob FLOAT, lotto_price INT, lotto_ev FLOAT,
         lotto_hits_all INT, lotto_games_all INT, lotto_hits_20 INT, lotto_games_20 INT,
-        recent_minutes_20 FLOAT, recent_opportunity FLOAT, historical_opportunity FLOAT
+        recent_minutes_20 FLOAT, recent_opportunity FLOAT, historical_opportunity FLOAT,
+        highrisk_hit_avg_min FLOAT, highrisk_hit_avg_opp FLOAT,
+        lotto_hit_avg_min    FLOAT, lotto_hit_avg_opp    FLOAT
     """
 
     placeholders = ",".join("?" for _ in ALL_COLS)
@@ -2060,12 +2161,40 @@ def grade_props_for_date(
                 minutes_values = None
                 opportunity_values = None
                 opp_grp = _opp_groups.get(pid_int) if _opp_groups else None
+                opp_col = MARKET_OPPORTUNITY_COL.get(mkt) if opp_grp is not None else None
                 if opp_grp is not None:
                     if "minutes" in opp_grp.columns:
                         minutes_values = opp_grp["minutes"].values
-                    opp_col = MARKET_OPPORTUNITY_COL.get(mkt)
                     if opp_col and opp_col in opp_grp.columns:
                         opportunity_values = opp_grp[opp_col].values
+
+                # ADR-20260424-6: aligned (player_id, game_date) merge of stat history
+                # and opp history. Used by compute_kde_tier_lines to identify the
+                # specific past games where stat >= tier_line and average the
+                # corresponding minutes / opportunity values.
+                aligned_history = None
+                try:
+                    if (stat_grp is not None and stat_col in stat_grp.columns
+                            and "game_date" in stat_grp.columns):
+                        _stat_part = stat_grp[["game_date", stat_col]].rename(columns={stat_col: "stat"})
+                        if opp_grp is not None and "game_date" in opp_grp.columns:
+                            _opp_cols = ["game_date"]
+                            if "minutes" in opp_grp.columns:
+                                _opp_cols.append("minutes")
+                            if opp_col and opp_col in opp_grp.columns:
+                                _opp_cols.append(opp_col)
+                            _opp_part = opp_grp[_opp_cols].copy()
+                            if opp_col and opp_col in _opp_part.columns:
+                                _opp_part = _opp_part.rename(columns={opp_col: "opportunity"})
+                            aligned_history = _stat_part.merge(_opp_part, on="game_date", how="inner")
+                        else:
+                            aligned_history = _stat_part.copy()
+                        # Ensure expected columns exist even when opp side is missing.
+                        for _need in ("minutes", "opportunity"):
+                            if _need not in aligned_history.columns:
+                                aligned_history[_need] = float("nan")
+                except Exception:
+                    aligned_history = None
 
                 tier = compute_kde_tier_lines(
                     stat_values=stat_values,
@@ -2077,6 +2206,7 @@ def grade_props_for_date(
                     minutes_values=minutes_values,
                     opportunity_values=opportunity_values,
                     calibrator=_tier_calibrator,
+                    aligned_history=aligned_history,
                 )
 
                 # Skip emission when no tier produced a line (ADR-4 Q3 answer).
@@ -2128,6 +2258,10 @@ def grade_props_for_date(
                     "recent_minutes_20":      tier["recent_minutes_20"],
                     "recent_opportunity":     tier["recent_opportunity"],
                     "historical_opportunity": tier["historical_opportunity"],
+                    "highrisk_hit_avg_min":   tier["highrisk_hit_avg_min"],
+                    "highrisk_hit_avg_opp":   tier["highrisk_hit_avg_opp"],
+                    "lotto_hit_avg_min":      tier["lotto_hit_avg_min"],
+                    "lotto_hit_avg_opp":      tier["lotto_hit_avg_opp"],
                 })
 
     return grade_rows, tier_rows
