@@ -74,6 +74,12 @@ KDE_REFLECT_AT    = 0.0  # reflect distribution at 0 to prevent negative-stat pr
 # 69.5% on prob>=0.80 lines vs. 77.0% for n_games>=10. ADR-20260425-3.
 KDE_THIN_SAMPLE_PROB_CAP = 0.85
 
+# ADR-20260425-3: model version stamp. Bumped whenever an ADR changes the
+# grading logic. Stamped on every row written to common.daily_grades and
+# common.player_tier_lines so historical analysis can correlate accuracy
+# with model versions and decisions.
+MODEL_VERSION = "adr-20260425-3"
+
 # Tier probability thresholds (calibrated from historical data, section 5 analysis).
 TIER_SAFE_PROB      = 0.80
 TIER_VALUE_PROB     = 0.58
@@ -288,7 +294,8 @@ _ARCHIVE_COLS = (
     "sample_size_opp, outcome, created_at, "
     "opportunity_short_grade, opportunity_long_grade, "
     "opportunity_matchup_grade, opportunity_streak_grade, "
-    "opportunity_volume_grade, opportunity_expected_grade"
+    "opportunity_volume_grade, opportunity_expected_grade, "
+    "model_version"
 )
 
 _ARCHIVE_COLS_DG = ", ".join(
@@ -389,6 +396,7 @@ CREATE TABLE common.daily_grades(
             ("opportunity_streak_grade",   "FLOAT"),
             ("opportunity_volume_grade",   "FLOAT"),
             ("opportunity_expected_grade", "FLOAT"),
+            ("model_version",              "VARCHAR(50)"),
         ]:
             conn.execute(text(
                 f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
@@ -451,6 +459,7 @@ CREATE TABLE common.daily_grades_archive(
             ("opportunity_streak_grade",   "FLOAT"),
             ("opportunity_volume_grade",   "FLOAT"),
             ("opportunity_expected_grade", "FLOAT"),
+            ("model_version",              "VARCHAR(50)"),
         ]:
             conn.execute(text(
                 f"IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
@@ -516,6 +525,13 @@ CREATE TABLE common.player_tier_lines(
                 f"WHERE TABLE_SCHEMA='common' AND TABLE_NAME='player_tier_lines' AND COLUMN_NAME='{_col}') "
                 f"ALTER TABLE common.player_tier_lines ADD {_col} FLOAT NULL"
             ))
+
+        # ADR-20260425-3: model_version stamp on every row.
+        conn.execute(text(
+            "IF NOT EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA='common' AND TABLE_NAME='player_tier_lines' AND COLUMN_NAME='model_version') "
+            "ALTER TABLE common.player_tier_lines ADD model_version VARCHAR(50) NULL"
+        ))
 
     log.info("Schema verified.")
 
@@ -996,6 +1012,7 @@ def upsert_tier_lines(engine, rows: list) -> int:
         "recent_minutes_20", "recent_opportunity", "historical_opportunity",
         "highrisk_hit_avg_min", "highrisk_hit_avg_opp",
         "lotto_hit_avg_min",    "lotto_hit_avg_opp",
+        "model_version",
     ]
 
     create_cols_sql = """
@@ -1011,7 +1028,8 @@ def upsert_tier_lines(engine, rows: list) -> int:
         lotto_hits_all INT, lotto_games_all INT, lotto_hits_20 INT, lotto_games_20 INT,
         recent_minutes_20 FLOAT, recent_opportunity FLOAT, historical_opportunity FLOAT,
         highrisk_hit_avg_min FLOAT, highrisk_hit_avg_opp FLOAT,
-        lotto_hit_avg_min    FLOAT, lotto_hit_avg_opp    FLOAT
+        lotto_hit_avg_min    FLOAT, lotto_hit_avg_opp    FLOAT,
+        model_version VARCHAR(50)
     """
 
     placeholders = ",".join("?" for _ in ALL_COLS)
@@ -1861,12 +1879,13 @@ CREATE TABLE #stage_grades(
     composite_grade FLOAT,hit_rate_opp FLOAT,sample_size_opp INT,
     opportunity_short_grade FLOAT,opportunity_long_grade FLOAT,
     opportunity_matchup_grade FLOAT,opportunity_streak_grade FLOAT,
-    opportunity_volume_grade FLOAT,opportunity_expected_grade FLOAT
+    opportunity_volume_grade FLOAT,opportunity_expected_grade FLOAT,
+    model_version VARCHAR(50)
 )"""))
         for i in range(0, len(rows), 500):
             chunk = rows[i:i + 500]
             conn.exec_driver_sql(
-                "INSERT INTO #stage_grades VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO #stage_grades VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(r["grade_date"], r["event_id"], r["game_id"], r["player_id"], r["player_name"],
                   r["market_key"], r["bookmaker_key"], r["line_value"], r.get("outcome_name", "Over"),
                   r["over_price"], r["hit_rate_60"], r["hit_rate_20"], r["sample_size_60"],
@@ -1875,7 +1894,8 @@ CREATE TABLE #stage_grades(
                   r["composite_grade"], r["hit_rate_opp"], r["sample_size_opp"],
                   r.get("opportunity_short_grade"), r.get("opportunity_long_grade"),
                   r.get("opportunity_matchup_grade"), r.get("opportunity_streak_grade"),
-                  r.get("opportunity_volume_grade"), r.get("opportunity_expected_grade"))
+                  r.get("opportunity_volume_grade"), r.get("opportunity_expected_grade"),
+                  r.get("model_version", MODEL_VERSION))
                  for r in chunk]
             )
         conn.execute(text("""
@@ -1897,14 +1917,16 @@ WHEN MATCHED THEN UPDATE SET
     t.opportunity_matchup_grade=s.opportunity_matchup_grade,
     t.opportunity_streak_grade=s.opportunity_streak_grade,
     t.opportunity_volume_grade=s.opportunity_volume_grade,
-    t.opportunity_expected_grade=s.opportunity_expected_grade
+    t.opportunity_expected_grade=s.opportunity_expected_grade,
+    t.model_version=s.model_version
 WHEN NOT MATCHED THEN INSERT(
     grade_date,event_id,game_id,player_id,player_name,market_key,bookmaker_key,
     line_value,outcome_name,over_price,hit_rate_60,hit_rate_20,sample_size_60,
     sample_size_20,weighted_hit_rate,grade,trend_grade,momentum_grade,pattern_grade,
     matchup_grade,regression_grade,composite_grade,hit_rate_opp,sample_size_opp,
     opportunity_short_grade,opportunity_long_grade,opportunity_matchup_grade,
-    opportunity_streak_grade,opportunity_volume_grade,opportunity_expected_grade
+    opportunity_streak_grade,opportunity_volume_grade,opportunity_expected_grade,
+    model_version
 ) VALUES(
     s.grade_date,s.event_id,s.game_id,s.player_id,s.player_name,s.market_key,
     s.bookmaker_key,s.line_value,s.outcome_name,s.over_price,s.hit_rate_60,
@@ -1912,7 +1934,8 @@ WHEN NOT MATCHED THEN INSERT(
     s.trend_grade,s.momentum_grade,s.pattern_grade,s.matchup_grade,s.regression_grade,
     s.composite_grade,s.hit_rate_opp,s.sample_size_opp,
     s.opportunity_short_grade,s.opportunity_long_grade,s.opportunity_matchup_grade,
-    s.opportunity_streak_grade,s.opportunity_volume_grade,s.opportunity_expected_grade
+    s.opportunity_streak_grade,s.opportunity_volume_grade,s.opportunity_expected_grade,
+    s.model_version
 );"""))
 
         if conn.execute(text(
@@ -2140,6 +2163,7 @@ def grade_props_for_date(
             "opportunity_streak_grade":   opp_streak,
             "opportunity_volume_grade":   opp_volume,
             "opportunity_expected_grade": opp_expected,
+            "model_version":              MODEL_VERSION,
         })
 
         # Tier lines: compute once per (player, market, game), Over only
@@ -2275,6 +2299,7 @@ def grade_props_for_date(
                     "highrisk_hit_avg_opp":   tier["highrisk_hit_avg_opp"],
                     "lotto_hit_avg_min":      tier["lotto_hit_avg_min"],
                     "lotto_hit_avg_opp":      tier["lotto_hit_avg_opp"],
+                    "model_version":          MODEL_VERSION,
                 })
 
     return grade_rows, tier_rows
