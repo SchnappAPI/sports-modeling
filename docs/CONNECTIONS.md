@@ -94,6 +94,8 @@ App settings (Azure portal → sports-modeling-web → Environment variables):
 - `AUTH_TOKEN_SECRET` = `schnapp-secret-2026-xk9` — session token signing secret.
 - `AZURE_SQL_CONNECTION_STRING` = the .NET connection string from the SQL section — DB access from API routes.
 - `GITHUB_PAT` = fine-grained PAT from the GitHub section — used by API routes to dispatch workflows, e.g. the Refresh Data button.
+- `MAINTENANCE_MODE` = `1` to lock the site behind the maintenance gate; unset (or any other value) to disable. Off by default. Read by `web/middleware.ts`.
+- `MAINTENANCE_BYPASS_CODE` = the unlock phrase. Visiting any URL with `?unlock=<code>` sets the `sb_unlock` cookie for 30 days and redirects to the clean URL. Required when `MAINTENANCE_MODE=1`; if either var is missing the gate fails open. Read by `web/middleware.ts`.
 
 ## GitHub Actions
 
