@@ -1011,6 +1011,17 @@ export default function GradesPageInner() {
                       >
                         <td className="py-1.5 pr-3">
                           <div className="flex items-center gap-1.5 flex-wrap">
+                            {(() => {
+                              const playerTeam =
+                                row.oppTeamAbbr && row.homeTeamAbbr && row.awayTeamAbbr
+                                  ? (row.oppTeamAbbr === row.homeTeamAbbr ? row.awayTeamAbbr : row.homeTeamAbbr)
+                                  : null;
+                              return playerTeam ? (
+                                <span className="text-[10px] font-medium tracking-wide text-gray-500 tabular-nums">
+                                  {playerTeam}
+                                </span>
+                              ) : null;
+                            })()}
                             <Link
                               href={playerHref(row)}
                               className="text-gray-100 hover:text-blue-400 transition-colors"

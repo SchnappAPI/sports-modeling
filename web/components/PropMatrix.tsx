@@ -379,6 +379,7 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
   type PlayerEntry = {
     playerId:      number;
     playerName:    string;
+    teamAbbr:      string | null;
     gameId:        string | null;
     playerSignals: Signal[];   // HOT/COLD/DUE/FADE only — player-level
     cells:         Record<number, CellData>;
@@ -423,9 +424,14 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
           trendGrade:      row.trendGrade,
           regressionGrade: row.regressionGrade,
         });
+        const playerTeam =
+          row.oppTeamAbbr && row.homeTeamAbbr && row.awayTeamAbbr
+            ? (row.oppTeamAbbr === row.homeTeamAbbr ? row.awayTeamAbbr : row.homeTeamAbbr)
+            : null;
         gEntry.playerMap.set(row.playerId, {
           playerId:      row.playerId,
           playerName:    row.playerName,
+          teamAbbr:      playerTeam,
           gameId:        row.gameId,
           playerSignals,
           cells:         {},
@@ -532,6 +538,11 @@ export default function PropMatrix({ rows, gradeDate, outcomeFilter }: PropMatri
                           <tr key={player.playerId} className="border-t border-gray-900 hover:bg-gray-900/30 transition-colors">
                             <td className="py-1.5 pr-4 sticky left-0 bg-gray-950 z-10">
                               <div className="flex items-center gap-1.5 flex-wrap">
+                                {player.teamAbbr && (
+                                  <span className="text-[10px] font-medium tracking-wide text-gray-500 tabular-nums">
+                                    {player.teamAbbr}
+                                  </span>
+                                )}
                                 <button
                                   className="text-gray-100 hover:text-blue-400 transition-colors text-left"
                                   onClick={() => setPanelPlayer({
