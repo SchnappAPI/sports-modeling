@@ -855,3 +855,58 @@ Negative:
 - ADR-20260424-5 — tier-line justification; this ADR refines its qualification logic and adds 4 columns to its 21.
 - ADR-20260424-4 — controls 1, 2, 4 unchanged (posted lines only, -500 ceiling, isotonic calibration).
 - ADR-20260423-1 — tier_lines schema; this ADR extends additively.
+
+
+## ADR-20260425-1 [shared][docs] Live session cache: per-turn chat logging on dedicated `chat/*` branches
+
+Date: 2026-04-25
+
+**Context.** Long chats lose context on tab close, compaction, or mid-flow interruption. Existing protocol captures end-state via CHANGELOG and the why via ADRs, but neither captures the conversation that produced the why. For chats that produce repo changes, the discussion leading to the change has durable value: framing shifts, alternatives considered, edge cases raised. Manual handoff via primer is fragile and burns user effort. Three constraints shaped the design:
+
+1. Latency overhead from per-turn writes is real on claude.ai chat (each commit re-uploads the full chat file via GitHub MCP). Short throwaway chats cannot pay that cost. Long substantive chats can.
+2. Whether a chat is "substantive" is best determined mechanically, not heuristically. The cleanest test: did the chat cause a commit to a non-chats path? If yes, it earned the log. If no, no log was needed.
+3. The skill must work on both claude.ai chat and Claude Code so that surface choice does not silently change behavior.
+
+**Decision.** Introduce a user-installed skill `live-session-cache` (lives at `~/.claude/skills/live-session-cache/SKILL.md`, generic across all projects) plus a project-specific integration doc at `docs/skills/live-session-cache.md` that overrides defaults for this repo.
+
+The skill operates in three modes:
+
+- **`trigger` (default on claude.ai chat):** activates the moment Claude is about to write to any path other than `chats/`. Backfills the conversation up to that point as Turn 0 (full reconstruction, not summary), then logs per-turn going forward.
+- **`always` (default on Claude Code):** activates at session start. Logs every substantive turn from turn 1.
+- **`manual`:** activates only when the user invokes a trigger phrase like "start logging this chat". Manual phrases work as override in the other modes too.
+
+Mode is selectable per-project via a `live-session-cache: <mode>` line in project memory.
+
+Each turn block contains: User message verbatim, Reasoning (2-5 sentence summary), Response verbatim, optional Evolution Note (captures inflection points where a turn shifted approach without producing immediate code), State Delta (decisions, files touched with work-branch commit hashes, errors, open questions). Skip rules drop pure-acknowledgment turns.
+
+Chat files live at `chats/in-progress/{slug}.md` while active; move to `chats/archive/{YYYY}/{MM}/{slug}.md` on wrap-and-merge. Branch convention: `chat/YYYY-MM-DD-{slug}` off `main`, always separate from the work branch.
+
+End-of-chat options:
+
+1. **Wrap and merge.** Final summary at top of file, move to archive path, open PR with title `chat: {slug}` and the summary as PR body, recommend squash-merge.
+2. **Pause and continue.** Append `## Session paused — {timestamp}` block with current state. Leave branch open. Resumption flow detects open `chat/*` branches at start of next chat.
+3. **Keep going.** Dismiss the warning.
+
+Context-size monitoring fires soft warning around 60-70% of capacity (one-time note) and hard warning around 85% (presents the three options and waits).
+
+**Alternatives considered.**
+
+1. *Single growing log file on main, no branch.* Rejected because in-flight log pollutes main before the chat is done. Branch isolation lets us decide at wrap-up time whether the conversation lands.
+2. *Chats live in a separate dedicated repo (`SchnappAPI/claude-chats`).* Rejected because chat history loses its proximity to the code it produced. With chats in the project repo, six months from now the conversation that produced a commit is in the same place as the commit.
+3. *Always-on across both surfaces.* Rejected for claude.ai because per-turn full-file upload makes short chats expensive for no benefit. Trigger-based on claude.ai is the right tradeoff.
+4. *Heuristic activation ("detect substantive content").* Rejected because the determination of "meaningful" introduces judgment risk. Binary "first non-chats write" is mechanical and matches user's actual definition of meaningful (per the originating conversation).
+5. *Capture raw thinking blocks verbatim.* Rejected because thinking is internal scratch space without a stable handle. Reasoning summary is the available proxy.
+
+**Consequences.**
+
+- New folder `/chats/` becomes part of repo structure. Subfolders `in-progress/` and `archive/{YYYY}/{MM}/`.
+- Chat branches accumulate during active chats. Wrap-and-merge or branch deletion is the only way they leave the repo.
+- Squash-merge on wrap keeps `main` history clean despite N turn-level commits per chat.
+- The chat log is supplementary, not a replacement for existing end-of-session protocol. CHANGELOG, ADR, INVARIANTS edits all still required. The chat log preserves the conversation that produced them.
+- Mode `trigger` keeps zero overhead on chats that do not produce repo changes. Mode `always` on Claude Code is cheap because writes are local until session-end push.
+- Project memory stays clean: one optional line for mode override.
+- Project-specific rules (branch conventions, integration with CHANGELOG/ADR/INVARIANTS, redaction policy) live in `docs/skills/live-session-cache.md` and are read by the skill at activation. The repo doc takes precedence when defaults conflict.
+
+**Open questions.** None for v1. Refinements expected after first real usage. Likely candidates for revision: context-size threshold percentages, whether the Evolution Note field needs further structure, whether wrap-and-merge should auto-tag the PR with anything for filtering.
+
+**Supersedes.** Nothing. Extends the documentation system without modifying ADR-0001's core structure.
