@@ -1,5 +1,57 @@
 # Changelog
 
+## 2026-04-24 [nba][grading][schema][adr] ADR-20260424-6 — tier qualification redesign
+
+Refines ADR-5. Three changes addressing direct user feedback that the strict
+probability gate hides breakout candidates and that Safe rows can be -EV at
+the boundary.
+
+**Safe tier:** add EV floor `TIER_SAFE_EV_FLOOR = -0.05`. Drops Safe rows
+where calibrated per-dollar EV is worse than -5 cents. -500 implied-odds
+ceiling unchanged.
+
+**HighRisk and Lotto:** OR-gate qualification. Surface row if calibrated
+probability clears tier threshold OR breakout_signal fires. breakout_signal =
+(`recent_opportunity / historical_opportunity >= 1.15`) AND
+(`recent_minutes_20 >= season_avg_minutes * 0.95`). Composite >= 50 outer
+gate for Lotto also relaxed by breakout_signal. Captures the explicit "player
+has never hit X but is trending up" case Austin asked us to find.
+
+**4 hit-context columns** on `common.player_tier_lines`:
+`highrisk_hit_avg_min`, `highrisk_hit_avg_opp`, `lotto_hit_avg_min`,
+`lotto_hit_avg_opp`. Avg minutes / market-relevant opportunity in past games
+where stat met or exceeded the rare-tier line. Lets the user compare today's
+projected role to the conditions that produced past hits without joining
+back to nba.player_box_score_stats. Computed from an aligned (player_id,
+game_date) merge of stat_grp and opp_grp; populated only when hits > 0 and
+the relevant column is available (combo markets PR/PA/RA/PRA have no
+opportunity mapping per ADR-5 design, so their opp variant remains NULL).
+
+Schema: `common.player_tier_lines` now 49 physical columns (47 in upsert
+ALL_COLS + audit). Migration via `migrate-tier-lines-v4.yml`, idempotent
+ALTER ADD IF NOT EXISTS. `ensure_tables` in grade_props.py also handles the
+4 new cols safely so any future fresh DB applies the same schema.
+
+Walk-forward backfill restarted at run 24919618493 with mode=backfill,
+force=true, batch=30, time_limit=300. Expected 5-15% net change in tier row
+volume per day: EV floor drops some -EV Safe rows; OR-gate admits breakout
+HighRisk/Lotto rows. First 4 dates (Oct 27-30) confirm the new schema
+populates correctly: 100% of HR/Lotto rows with hits>0 populate
+hit_avg_min; ~55-65% populate hit_avg_opp (combo markets are NULL by
+design, single-stat markets populate).
+
+Audit note: this ADR exists because the prior session's commit
+`f51d61e` added walk-forward + EV columns based on AI inference rather
+than verbatim user instruction. ADR-6 brings the qualification logic
+back in line with Austin's stated tier philosophy: identify breakout
+candidates, do not hide rows where the model probability is low but
+the trend points to upside.
+
+Files: docs/DECISIONS.md (ADR-20260424-6), grading/grade_props.py
+(constants + compute_kde_tier_lines + ensure_tables + upsert_tier_lines +
+grade_props_for_date caller), .github/workflows/migrate-tier-lines-v4.yml
+(new).
+
 Append-only. Newest at top. One entry per session-end.
 
 Format:
