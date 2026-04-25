@@ -1,0 +1,124 @@
+name: Diagnose Corpus
+
+on:
+  workflow_dispatch:
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, schnapp-runner]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+      - name: Run diagnostic
+        run: |
+          python <<'PYEOF'
+          import os, pyodbc
+          conn = pyodbc.connect(
+            f'Driver={{ODBC Driver 18 for SQL Server}};Server=tcp:{os.environ["AZURE_SQL_SERVER"]},1433;'
+            f'Database={os.environ["AZURE_SQL_DATABASE"]};Uid={os.environ["AZURE_SQL_USERNAME"]};'
+            f'Pwd={os.environ["AZURE_SQL_PASSWORD"]};Encrypt=yes;TrustServerCertificate=no;'
+          )
+          c = conn.cursor()
+
+          print("=== player_tier_lines presence by recent date ===")
+          c.execute("""
+            SELECT TOP 40 grade_date,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN safe_line IS NOT NULL THEN 1 ELSE 0 END) AS safe_n,
+                   SUM(CASE WHEN value_line IS NOT NULL THEN 1 ELSE 0 END) AS value_n,
+                   SUM(CASE WHEN highrisk_line IS NOT NULL THEN 1 ELSE 0 END) AS hr_n,
+                   SUM(CASE WHEN lotto_line IS NOT NULL THEN 1 ELSE 0 END) AS lotto_n,
+                   SUM(CASE WHEN highrisk_hit_avg_min IS NOT NULL OR lotto_hit_avg_min IS NOT NULL THEN 1 ELSE 0 END) AS adr6_n
+              FROM common.player_tier_lines
+             WHERE grade_date >= DATEADD(day, -45, CAST(GETUTCDATE() AS DATE))
+             GROUP BY grade_date
+             ORDER BY grade_date DESC
+          """)
+          for r in c.fetchall():
+            print(f"  {r[0]}  total={r[1]:>5} safe={r[2]:>4} val={r[3]:>4} hr={r[4]:>4} lot={r[5]:>4} adr6={r[6]:>4}")
+
+          print("\n=== daily_grades resolved counts in past 45 days ===")
+          c.execute("""
+            SELECT grade_date,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN outcome IN ('Won','Lost') THEN 1 ELSE 0 END) AS resolved
+              FROM common.daily_grades
+             WHERE grade_date >= DATEADD(day, -45, CAST(GETUTCDATE() AS DATE))
+             GROUP BY grade_date
+             ORDER BY grade_date DESC
+          """)
+          rows = c.fetchall()
+          print(f"  {'date':<12} {'total':>7} {'resolved':>9}")
+          for r in rows:
+            print(f"  {r[0]}  {r[1]:>7} {r[2]:>9}")
+
+          print("\n=== corpus query breakdown for past 45 days (replicates weekly_calibration) ===")
+          c.execute("""
+            ;WITH tp AS (
+                SELECT grade_date, game_id, player_id, market_key, safe_line AS line, safe_prob AS prob FROM common.player_tier_lines WHERE safe_line IS NOT NULL
+                UNION ALL
+                SELECT grade_date, game_id, player_id, market_key, value_line, value_prob FROM common.player_tier_lines WHERE value_line IS NOT NULL
+                UNION ALL
+                SELECT grade_date, game_id, player_id, market_key, highrisk_line, highrisk_prob FROM common.player_tier_lines WHERE highrisk_line IS NOT NULL
+                UNION ALL
+                SELECT grade_date, game_id, player_id, market_key, lotto_line, lotto_prob FROM common.player_tier_lines WHERE lotto_line IS NOT NULL
+            )
+            SELECT tp.grade_date,
+                   COUNT(*) AS tier_picks,
+                   SUM(CASE WHEN dg.grade_id IS NOT NULL THEN 1 ELSE 0 END) AS joined,
+                   SUM(CASE WHEN dg.outcome IN ('Won','Lost') THEN 1 ELSE 0 END) AS resolved
+              FROM tp
+              LEFT JOIN common.daily_grades dg
+                     ON dg.grade_date = tp.grade_date
+                    AND dg.game_id = tp.game_id
+                    AND dg.player_id = tp.player_id
+                    AND dg.market_key = tp.market_key
+                    AND dg.line_value = tp.line
+                    AND dg.outcome_name = 'Over'
+             WHERE tp.grade_date >= DATEADD(day, -45, CAST(GETUTCDATE() AS DATE))
+             GROUP BY tp.grade_date
+             ORDER BY tp.grade_date DESC
+          """)
+          print(f"  {'date':<12} {'picks':>8} {'joined':>8} {'resolved':>10}")
+          for r in c.fetchall():
+            print(f"  {r[0]}  {r[1]:>8} {r[2]:>8} {r[3]:>10}")
+
+          print("\n=== ADR-6 backfill state ===")
+          c.execute("""
+            SELECT 
+              (SELECT COUNT(DISTINCT grade_date) FROM common.player_tier_lines WHERE highrisk_hit_avg_min IS NOT NULL OR lotto_hit_avg_min IS NOT NULL) AS adr6_dates,
+              (SELECT COUNT(DISTINCT grade_date) FROM common.player_tier_lines) AS total_dates,
+              (SELECT MAX(grade_date) FROM common.player_tier_lines WHERE highrisk_hit_avg_min IS NOT NULL OR lotto_hit_avg_min IS NOT NULL) AS adr6_max_date
+          """)
+          r = c.fetchone()
+          print(f"  ADR-6 dates: {r[0]}/{r[1]}, max ADR-6 date: {r[2]}")
+
+          print("\n=== model_version stamp counts ===")
+          c.execute("""
+            SELECT model_version, COUNT(*) FROM common.daily_grades GROUP BY model_version ORDER BY 2 DESC
+          """)
+          for r in c.fetchall():
+            print(f"  daily_grades  {r[0]!r}: {r[1]:,}")
+
+          c.execute("""
+            SELECT model_version, COUNT(*) FROM common.player_tier_lines GROUP BY model_version ORDER BY 2 DESC
+          """)
+          for r in c.fetchall():
+            print(f"  tier_lines    {r[0]!r}: {r[1]:,}")
+
+          print("\n=== grade_calibration cap state ===")
+          c.execute("""
+            SELECT COUNT(*), SUM(CASE WHEN max_well_sampled_rate IS NOT NULL THEN 1 ELSE 0 END), MAX(last_updated)
+              FROM common.grade_calibration
+          """)
+          r = c.fetchone()
+          print(f"  buckets={r[0]} with_cap={r[1]} last_updated={r[2]}")
+          PYEOF
