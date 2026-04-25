@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import RefreshDataButton from '@/components/RefreshDataButton';
 import PropMatrix from '@/components/PropMatrix';
 import { HelpButton } from '@/components/HelpPanel';
 import {
@@ -477,12 +476,6 @@ export default function GradesPageInner() {
     }
   }, [grades]);
 
-  function handleRefreshComplete() {
-    loadGrades();
-    setDefenseCache({});
-    if (isToday) { fetchLiveOdds(); fetchLiveScores(); }
-  }
-
   function getLivePrice(row: GradeRow): number | null | 'live-unavailable' {
     if (!row.eventId || !liveEventIds.has(row.eventId)) return null;
     const key = `${row.eventId}|${row.playerName}|${row.marketKey}|${row.lineValue}|${row.outcomeName ?? 'Over'}`;
@@ -803,10 +796,6 @@ export default function GradesPageInner() {
               ?
             </button>
           </div>
-        )}
-
-        {!loading && !error && (
-          <RefreshDataButton onComplete={handleRefreshComplete} />
         )}
 
         {/* View toggle */}

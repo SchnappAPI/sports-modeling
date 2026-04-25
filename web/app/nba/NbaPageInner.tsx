@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import GameStrip, { type Game } from '@/components/GameStrip';
 import GameTabs from '@/components/GameTabs';
-import RefreshDataButton from '@/components/RefreshDataButton';
 import { randomLoadingWord } from '@/lib/loadingWord';
 import { useAuth } from '@/lib/auth-context';
 
@@ -221,9 +220,6 @@ export default function NbaPageInner() {
           >
             At a Glance
           </Link>
-          {!isDemo && (
-            <RefreshDataButton onComplete={loadGames} />
-          )}
           {!isDemo && (
             <button
               onClick={logout}
