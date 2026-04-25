@@ -4,6 +4,7 @@ This is the entry point for all project documentation. It links to everything; i
 
 ## Read first every session
 - `skills/session-protocol.md` for start-of-session checklist, mid-session signals, end-of-session checklist, and mechanical guardrails. Read this before taking any action.
+- `skills/live-session-cache.md` for the chat-logging skill: when it auto-activates, branch and file conventions, integration with the rest of this protocol.
 - `SESSION_PROTOCOL.md` for the canonical protocol definition.
 - `CHANGELOG.md` for the last ~10 entries, filtered by tag relevant to the task.
 
