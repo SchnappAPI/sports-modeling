@@ -1,17 +1,13 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-// Site-wide maintenance gate. When MAINTENANCE_MODE=1, every request is
-// served a generic maintenance page UNLESS the visitor presents a valid
-// bypass cookie. Bypass is granted by visiting any URL with
-// ?unlock=<MAINTENANCE_BYPASS_CODE>; the cookie is then set for 30 days
-// and the URL is cleaned via redirect so the code never appears in the
-// address bar after the first hop.
-//
-// Toggle in Azure SWA env vars:
-//   MAINTENANCE_MODE         "1" to enable, anything else (or unset) = off
-//   MAINTENANCE_BYPASS_CODE  the unlock phrase, e.g. "go"
-// Flipping the env var takes effect on the next cold start of the SWA
-// function host (typically within a minute) without redeploy.
+// Site-wide maintenance gate. Flip MAINTENANCE_ON to true, commit, push.
+// SWA redeploys in ~90s and the site is locked for everyone except
+// visitors who hit any URL with ?unlock=<UNLOCK_CODE> (sets a 30-day
+// cookie, then redirects to the clean URL). Flip back to false to
+// disable.
+
+const MAINTENANCE_ON = false;
+const UNLOCK_CODE = 'go';
 
 const COOKIE_NAME = 'sb_unlock';
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
@@ -45,33 +41,26 @@ const MAINTENANCE_HTML = `<!DOCTYPE html>
 </html>`;
 
 export function middleware(request: NextRequest) {
-  const enabled = process.env.MAINTENANCE_MODE === '1';
-  if (!enabled) return NextResponse.next();
-
-  const code = process.env.MAINTENANCE_BYPASS_CODE;
-  // Misconfiguration safety: if the env var pair is half-set, fail OPEN
-  // so a typo cannot lock everyone (including the operator) out.
-  if (!code) return NextResponse.next();
+  if (!MAINTENANCE_ON) return NextResponse.next();
 
   const { pathname, searchParams } = request.nextUrl;
 
-  // Always allow the keep-alive ping. Uptime Robot pings this to keep
-  // the Azure SQL serverless DB warm; gating it would defeat the purpose.
+  // Always allow the keep-alive ping.
   if (pathname === '/api/ping') return NextResponse.next();
 
   // Cookie present and matches: pass through.
-  const cookieVal = request.cookies.get(COOKIE_NAME)?.value;
-  if (cookieVal && cookieVal === code) return NextResponse.next();
+  if (request.cookies.get(COOKIE_NAME)?.value === UNLOCK_CODE) {
+    return NextResponse.next();
+  }
 
   // Unlock attempt via query string.
-  const unlock = searchParams.get('unlock');
-  if (unlock && unlock === code) {
+  if (searchParams.get('unlock') === UNLOCK_CODE) {
     const cleanUrl = request.nextUrl.clone();
     cleanUrl.searchParams.delete('unlock');
     const res = NextResponse.redirect(cleanUrl);
     res.cookies.set({
       name: COOKIE_NAME,
-      value: code,
+      value: UNLOCK_CODE,
       httpOnly: true,
       secure: true,
       sameSite: 'lax',
@@ -81,8 +70,6 @@ export function middleware(request: NextRequest) {
     return res;
   }
 
-  // Locked. Serve the maintenance HTML directly from middleware so no
-  // app route, layout, or branding ever renders.
   return new NextResponse(MAINTENANCE_HTML, {
     status: 503,
     headers: {
@@ -94,9 +81,6 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  // Run on every path EXCEPT Next internals and static asset files.
-  // The matcher is the cheapest way to keep middleware off the hot path
-  // for asset requests; the function body still re-checks the env flag.
   matcher: [
     '/((?!_next/static|_next/image|favicon.ico|icon.svg|icon-192\\.png|icon-512\\.png|manifest\\.json|sw\\.js|robots\\.txt|sitemap\\.xml).*)',
   ],

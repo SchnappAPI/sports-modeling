@@ -17,7 +17,7 @@ Next.js app structure: `app/` for routes, `components/` for shared components, `
 
 Passcode-gated access via `common.user_codes`. Demo mode fixes the view to a historical date per `common.demo_config`. The connected visual pattern drives multi-visual updates from a single selected player (see `/docs/PRODUCT_BLUEPRINT.md`).
 
-Site-wide maintenance gate in `middleware.ts` runs before the passcode layer. When `MAINTENANCE_MODE=1` is set in Azure SWA app settings, every request returns a generic 503 maintenance page except `/api/ping` (kept open for the DB keep-alive ping). Operator bypass: visit any URL with `?unlock=<MAINTENANCE_BYPASS_CODE>` once; an HttpOnly cookie is set for 30 days. Both env vars must be set for the gate to engage; if either is missing it fails open. See `/docs/CONNECTIONS.md` Azure Static Web Apps app settings.
+Site-wide maintenance gate in `middleware.ts` runs before the passcode layer. Toggle is two hardcoded constants at the top of the file: `MAINTENANCE_ON` (boolean) and `UNLOCK_CODE` (string). To lock the site, flip `MAINTENANCE_ON` to `true`, commit, push; SWA redeploys in ~90s. To unlock yourself, visit any URL with `?unlock=<UNLOCK_CODE>` once; the middleware sets the `sb_unlock` HttpOnly cookie for 30 days and 307-redirects to the clean URL. `/api/ping` is always allowed through so the DB keep-alive ping keeps working.
 
 API routes talk to the VM's Flask service via the Cloudflare tunnel (`live.schnapp.bet`) or internal VM IP, depending on route.
 
