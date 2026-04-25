@@ -67,6 +67,12 @@ KDE_WINDOW_MID    = 30   # composite 50-79: use last 30 games (balanced)
 KDE_WINDOW_COLD   = 82   # composite < 50: full season (recent form is uninformative)
 KDE_MIN_GAMES     = 10   # fall back to normal distribution below this
 KDE_REFLECT_AT    = 0.0  # reflect distribution at 0 to prevent negative-stat probability
+# Thin-sample overconfidence cap. When n < KDE_MIN_GAMES, the normal-dist
+# fallback can produce 99.99% probabilities on 3-game windows because std on
+# 3 samples is microscopic. Cap output at this value to avoid claiming
+# certainty the data does not support. Empirically, n_games<10 cohort hits
+# 69.5% on prob>=0.80 lines vs. 77.0% for n_games>=10. ADR-20260425-3.
+KDE_THIN_SAMPLE_PROB_CAP = 0.85
 
 # Tier probability thresholds (calibrated from historical data, section 5 analysis).
 TIER_SAFE_PROB      = 0.80
@@ -534,7 +540,12 @@ def _kde_prob_above(values: np.ndarray, line: float) -> float:
     if n < KDE_MIN_GAMES:
         mu = float(np.mean(values))
         sigma = max(float(np.std(values)), 0.5)
-        return float(1 - norm.cdf(line, loc=mu, scale=sigma))
+        prob = float(1 - norm.cdf(line, loc=mu, scale=sigma))
+        # ADR-20260425-3: cap thin-sample fallback. Tiny windows (n=3-5) have
+        # near-zero std which produces extreme probabilities the data has not
+        # earned. Backtest: 69.5% actual vs 85% predicted in n<10 prob>=0.80
+        # cohort. Cap controls the worst overconfidence cases.
+        return min(prob, KDE_THIN_SAMPLE_PROB_CAP)
 
     try:
         # Reflection boundary at 0
@@ -546,7 +557,9 @@ def _kde_prob_above(values: np.ndarray, line: float) -> float:
     except Exception:
         mu = float(np.mean(values))
         sigma = max(float(np.std(values)), 0.5)
-        return float(1 - norm.cdf(line, loc=mu, scale=sigma))
+        prob = float(1 - norm.cdf(line, loc=mu, scale=sigma))
+        # ADR-20260425-3: cap KDE-failure fallback the same way as thin-sample.
+        return min(prob, KDE_THIN_SAMPLE_PROB_CAP)
 
 
 def _select_kde_window(composite_grade) -> int:

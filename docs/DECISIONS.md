@@ -943,3 +943,28 @@ Admin UI extends the existing `/admin` page with three tabs (Codes, Visibility, 
 - The `ADMIN_REFRESH_CODE` env var stays defined for backward compatibility but is no longer the primary refresh entry point.
 - Three commits landed the framework: `7c9d52f`, `4f5da59`, `7e65752`. See CHANGELOG 2026-04-25 for the file-level breakdown.
 
+## ADR-20260425-3 [nba][grading] Two-cap calibration fix: thin-sample raw cap + calibrator output cap to control overconfidence at high-probability tail
+
+Date: 2026-04-25
+
+**Context.** Backtest on 72 ADR-6-rebuilt dates (88,922 resolved tier-line rows, later validated on 103,365 over a 143-date superset) showed two overlapping failure modes in the high-probability tail. First, players with thin history (`n_games < 10`, the `_kde_prob_above` normal-dist fallback) hit lines at 69.5% on the prob>=0.80 cohort while the model predicted 85.4%, a 15.9-point gap; the cohort with `n_games >= 10` showed only a 6.3-point gap on the same threshold. Second, the isotonic calibrator trained on the same data forced empirical rates of 65-78% in the raw 0.90+ buckets (combined n=135) UP to 84.7% via PAV pooling against the much larger 0.85-0.90 bucket (n=1814, empirical 82.3%); the calibrator then claimed 84.7% probability for inputs whose true rate was 65-78%. Both modes contributed to the Safe tier missing its 80% design target by 15.3 points overall.
+
+**Decision.** Two surgical caps, neither of which drops Safe inventory:
+
+1. **Thin-sample raw cap.** Add `KDE_THIN_SAMPLE_PROB_CAP = 0.85` to `grade_props.py`. In `_kde_prob_above`, both fallback branches (`n < KDE_MIN_GAMES` and the `except Exception` after KDE fitting fails) now return `min(prob, KDE_THIN_SAMPLE_PROB_CAP)`. This caps the worst overconfidence cases (Sam Merrill 3-game window producing 99.99% probabilities) without affecting the n>=10 majority.
+
+2. **Calibrator output cap.** In `calibrate_grades.py` `fit_calibrator`, compute `max_well_sampled_rate = max(stats.hit_rate where n >= 200)` at fit time. This evaluates to ~0.8225 on the current dataset (raw 0.85-0.90 bucket, n=1814, empirical 82.3%). Apply `min(v, max_well_sampled_rate)` inside the `calibrator` closure after the standard PAV interpolation. The cap stops the model from claiming probabilities the data has never validated at scale, but stays above the 0.80 Safe threshold so Safe-qualifying rows still qualify.
+
+The cap value is published as `max_well_sampled_rate` on `common.grade_calibration` so the new web transparency page can surface both the per-bucket empirical rates AND the global cap in effect.
+
+**Tradeoffs.** Modest improvement, not a fix. Backtest simulation: Safe overall gap shrinks from -10.0 pts to -8.7 pts (1.3 pts narrower); Safe high-prob (>=0.80) gap shrinks from -10.2 pts to -7.8 pts. Realized return on Safe ($-0.04 per dollar) is unchanged because the same rows still bet, the model just stops misrepresenting their probability. The deeper structural problem - that Safe at -500 prices is breakeven only above ~83.3% hit rate, but the model can only deliver ~75% on the well-sampled tail - is not addressed here. That requires either tightening `IMPLIED_ODDS_CEILING` further or lowering `TIER_SAFE_PROB`, both deferred pending more backtest history.
+
+**Alternatives considered.** Filter rows where `n_games < 15` entirely (Fix A in the simulation): improved Safe gap from -10.0 to -1.5 pts but dropped 38.6% of all tier inventory. The visibility cost was judged too high relative to the calibration improvement. Recompute calibrator with non-monotonic regression (allow the tail to drop): rejected as it adds complexity without addressing the thin-sample root cause. Threshold sensitivity analysis showed `n_games >= 5` captured most of the calibration gain that `>= 15` did, suggesting the issue is concentrated in the 0-4 game cohort, which the 0.85 raw cap suppresses without requiring row-level filtering.
+
+**Consequences.**
+
+- The running grading process picks up the changes on next iter of the backfill chain. In-flight processes do not (Python imports are loaded once).
+- `common.grade_calibration` gains a new column `max_well_sampled_rate FLOAT NULL`, idempotently added by `publish_calibration_buckets` on first call after deploy.
+- A web transparency page surfacing per-bucket calibration accuracy is a follow-on task (live ADR-2026-04-25-3 deliverable, not yet implemented at time of decision).
+- After the in-flight backfill completes (currently ~87 of 143 ADR-6 dates), a re-run of the backtest should validate the simulated -2.4 pts improvement on prob>=0.80 cohort. Targets: Safe gap ~-7 pts overall, ~-7.8 pts at high-prob tail.
+

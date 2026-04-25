@@ -97,15 +97,32 @@ def fit_calibrator(engine, min_bucket_size: int = 20, bucket_width: float = 0.05
     mids = (stats["bucket"].values + bucket_width / 2.0).astype(float)
     rates = stats["iso_hit_rate"].values.astype(float)
 
+    # ADR-20260425-3: calibrator output cap. PAV pools the small-sample tail
+    # (raw_prob 0.90+, typically n<100) UP to match the largest well-sampled
+    # bucket below it, then claims rates the data has not validated. Cap the
+    # output at the max empirical rate of any bucket with n >= 200. With
+    # backtest data this evaluates to ~0.82 (raw 0.85 bucket, n=1814 hits
+    # 82.3%). Without the cap, calibrator outputs reach 0.85+ on tail rows
+    # whose true empirical rate is 65-78%.
+    well_sampled = stats[stats["n"] >= 200]
+    if len(well_sampled) > 0:
+        max_well_sampled_rate = float(well_sampled["hit_rate"].max())
+    else:
+        # Fallback: use the highest isotonic rate (no cap effect, identity-like).
+        max_well_sampled_rate = float(rates.max())
+
     def calibrator(raw_prob):
         if raw_prob is None or (isinstance(raw_prob, float) and np.isnan(raw_prob)):
             return None
         p = float(raw_prob)
         if p <= mids[0]:
-            return float(rates[0])
-        if p >= mids[-1]:
-            return float(rates[-1])
-        return float(np.interp(p, mids, rates))
+            v = float(rates[0])
+        elif p >= mids[-1]:
+            v = float(rates[-1])
+        else:
+            v = float(np.interp(p, mids, rates))
+        # Apply safety cap
+        return min(v, max_well_sampled_rate)
 
     publish_df = pd.DataFrame({
         "bucket_min": stats["bucket"].astype(float).values,
@@ -114,6 +131,8 @@ def fit_calibrator(engine, min_bucket_size: int = 20, bucket_width: float = 0.05
         "empirical_hit_rate": stats["hit_rate"].astype(float).values,
         "isotonic_hit_rate": stats["iso_hit_rate"].astype(float).values,
     })
+    # Attach the cap as metadata for the publish step.
+    publish_df.attrs["max_well_sampled_rate"] = max_well_sampled_rate
     return calibrator, publish_df
 
 
@@ -148,9 +167,14 @@ def _pav_isotonic(y, w):
 
 
 def publish_calibration_buckets(engine, bucket_stats: pd.DataFrame) -> None:
-    """Write common.grade_calibration for inspection. Idempotent (truncate + insert)."""
+    """Write common.grade_calibration for inspection. Idempotent (truncate + insert).
+
+    Per ADR-20260425-3, also stores max_well_sampled_rate (calibrator output
+    cap) on each row as denormalized metadata for the web transparency page.
+    """
     if bucket_stats.empty:
         return
+    cap = bucket_stats.attrs.get("max_well_sampled_rate")
     with engine.begin() as conn:
         conn.execute(text("""
             IF NOT EXISTS (SELECT 1 FROM sys.objects
@@ -167,14 +191,25 @@ def publish_calibration_buckets(engine, bucket_stats: pd.DataFrame) -> None:
                 )
             END
         """))
+        # ADR-20260425-3: add cap metadata column if missing.
+        conn.execute(text("""
+            IF NOT EXISTS (
+                SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA='common' AND TABLE_NAME='grade_calibration'
+                  AND COLUMN_NAME='max_well_sampled_rate'
+            )
+            ALTER TABLE common.grade_calibration ADD max_well_sampled_rate FLOAT NULL
+        """))
         conn.execute(text("DELETE FROM common.grade_calibration"))
         for _, row in bucket_stats.iterrows():
             conn.execute(text("""
                 INSERT INTO common.grade_calibration
-                    (bucket_min, bucket_max, sample_size, empirical_hit_rate, isotonic_hit_rate)
-                VALUES (:bmin, :bmax, :n, :ehr, :ihr)
+                    (bucket_min, bucket_max, sample_size, empirical_hit_rate,
+                     isotonic_hit_rate, max_well_sampled_rate)
+                VALUES (:bmin, :bmax, :n, :ehr, :ihr, :cap)
             """), {"bmin": float(row["bucket_min"]),
                    "bmax": float(row["bucket_max"]),
                    "n": int(row["n"]),
                    "ehr": float(row["empirical_hit_rate"]),
-                   "ihr": float(row["isotonic_hit_rate"])})
+                   "ihr": float(row["isotonic_hit_rate"]),
+                   "cap": float(cap) if cap is not None else None})
