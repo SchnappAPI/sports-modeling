@@ -700,7 +700,7 @@ D. **MLB scope.** MLB grading does not yet exist (ADR-20260424-3 sequencing). Bu
 1. Write `grading/calibrate_grades.py` — computes empirical hit rate per composite_grade bucket from resolved `common.daily_grades`. Idempotent; writes `common.grade_calibration` or returns a DataFrame cached in-process.
 2. Modify `compute_kde_tier_lines` in `grade_props.py` to apply the four controls in order.
 3. Add RELATIONAL_CHECK `nba_graded_markets_have_posted_center` to `etl/integrity.py`.
-4. Force-regrade last 30 days via existing `grading.yml` backfill mode to produce a before/after comparison.
+4. Full-season walk-forward backfill via `grading.yml` mode=backfill force=true. Each historical date calibrates from prior-day evidence only (no leakage). [Amended 2026-04-24: original text said "last 30 days"; corrected per Austin's stated full-season position. The 30-day-only scope was a misreading of the goal — partial regrades mix two model versions and break correlation analysis.]
 5. Monitor first week post-deploy: tier-line count per day, NULL rate per tier, user-reported weirdness.
 
 **Related ADRs**
@@ -779,7 +779,7 @@ Negative:
 3. Opportunity fetcher in grade_props.py: pull fga, fg3a, reb_chances, potential_ast per (player, game) over LOOKBACK_OPP.
 4. Rewrite compute_kde_tier_lines per this ADR.
 5. Update caller and upsert_tier_lines with new columns.
-6. Force-regrade last 30 days via grading.yml backfill.
+6. Full-season walk-forward backfill via grading.yml mode=backfill force=true. [Amended 2026-04-24: original text said "last 30 days"; corrected to match Austin's full-season walk-forward requirement. Walk-forward calibration via `as_of_date` parameter ensures each date uses only prior-day evidence.]
 7. Monitor first week.
 
 **Related**
