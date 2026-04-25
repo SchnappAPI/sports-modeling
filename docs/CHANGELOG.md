@@ -1,5 +1,29 @@
 # Changelog
 
+2026-04-25 [nba][grading] Schema and code prep for the immutable-corpus architecture (ADR-20260425-3 follow-on). Three commits: `e87c70b` adds MODEL_VERSION stamping; `a8b1068` adds weekly calibration job and workflow.
+
+Schema changes (idempotent ALTER ADDs, executed live before code push):
+- common.daily_grades.model_version VARCHAR(50) NULL
+- common.daily_grades_archive.model_version VARCHAR(50) NULL
+- common.player_tier_lines.model_version VARCHAR(50) NULL
+- New table common.grade_calibration_history(snapshot_id, snapshot_date, sport, bucket_min, bucket_max, sample_size, empirical_hit_rate, isotonic_hit_rate, max_well_sampled_rate, window_days, model_version, created_at) with index on (sport, snapshot_date) for the /transparency trend chart.
+
+grade_props.py changes:
+- New constant MODEL_VERSION = "adr-20260425-3"
+- ensure_tables now idempotently adds model_version columns to all three tables (so future provisioning works even if the live ALTER step is skipped).
+- upsert_grades and upsert_tier_lines stage tables, INSERT placeholders, and MERGE clauses all extended to carry model_version through.
+- _ARCHIVE_COLS extended so the archive trigger preserves the version stamp.
+- Every row written from this commit forward carries its model version stamp; old rows have NULL (treated as "unknown").
+
+New: grading/weekly_calibration.py and .github/workflows/weekly-calibration.yml. Cron Sunday 06:00 UTC, manual dispatch supported with --dry-run. Reads a 30-day rolling window of resolved tier-line outcomes, fits the calibrator with PAV isotonic regression and an n>=30 well-sampled threshold for the safety cap, then writes one snapshot row per bucket to common.grade_calibration_history AND replaces common.grade_calibration so the daily grading run picks up the fresh calibrator. Threshold choice (30 vs 50/100/adaptive) was validated against backtest data: fixed-30 produces a stable cap across all rolling windows from Nov-Apr; adaptive (max(20, 0.5%)) varies more wildly because in big-data months it pushes the threshold to 100-200 and kicks out legitimate buckets; n=10 fails once with a fluke 1.0 cap.
+
+Architecture deferred (waiting on in-flight backfill chain to drain naturally, currently 109/143 dates):
+- Stop chain redispatch in grading.yml
+- Run weekly-calibration.yml manually once to populate grade_calibration_history with the first snapshot
+- Update grade_props.py to read calibrator from common.grade_calibration instead of refitting walk-forward each grade run
+
+When the chain ends, those three steps ship the architectural transition cleanly: no more regrading, every model version's accuracy preserved in the immutable corpus, weekly recalibration becomes the only writer of common.grade_calibration. See ADR-20260425-3.
+
 2026-04-25 [shared][web] /transparency page live behind `page.transparency` flag (seeded disabled). Read-only model accuracy log accessible to admins via the `sb_unlock=go` cookie (signing into `/admin` grants it). Three sections: (1) per-tier predicted vs actual hit rates with last-30/last-90/all-time window toggle, (2) weekly trend chart (inline SVG, no external lib), (3) latest calibration bucket snapshot from `common.grade_calibration` with the global output cap surfaced (`max_well_sampled_rate`, ADR-20260425-3). Three new API routes `/api/calibration-buckets`, `/api/tier-accuracy?window=...`, `/api/tier-accuracy-trend`, all `force-dynamic`. Admin Visibility tab now lists `page.transparency` with the label "Transparency". Pure additive change; no existing surfaces touched. Page works today off the live tables. When the weekly-calibration job lands, the trend view will pull from `common.grade_calibration_history` for snapshot-quality data instead of recomputing from `player_tier_lines + daily_grades` on each load. Commit `f5d97a6`. See ADR-20260425-3.
 
 2026-04-25 [nba][grading] Two-cap fix landed for Safe-tier overconfidence (ADR-20260425-3). Backtest on 88,922 to 103,365 resolved tier-line rows from the in-flight ADR-6 backfill identified two stacking failure modes in the high-prob tail: (1) thin-history rows (`n_games < 10`, the `_kde_prob_above` normal-dist fallback) hit 69.5% on prob>=0.80 vs 85.4% predicted (-15.9 pts gap), driven by microscopic std on 3-5-sample windows producing 99.99% probabilities; (2) PAV pooling in `calibrate_grades.fit_calibrator` forced the small-sample 0.90+ tail (n=135 combined) UP to 84.7% to match the much larger 0.85-0.90 well-sampled bucket (n=1814, empirical 82.3%), even though those tail buckets had empirical 65-78%. Two surgical caps:
