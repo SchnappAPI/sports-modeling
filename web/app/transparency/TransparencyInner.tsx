@@ -3,12 +3,12 @@
 import { useEffect, useMemo, useState } from 'react';
 
 // /transparency client component.
-// Two views:
-//   1. Calibration buckets: per-bucket empirical vs isotonic hit rates and the
+// Three sections:
+//   1. Daily accuracy chart: per-tier actual hit rate per day (one line per tier).
+//   2. Daily breakdown table: one row per date, columns per tier, showing actual hit
+//      rate and n alongside a gap-colored cell. Most recent first.
+//   3. Calibration buckets: per-bucket empirical vs isotonic hit rates and the
 //      output cap (max_well_sampled_rate). Read from /api/calibration-buckets.
-//   2. Tier accuracy: per-tier predicted vs actual hit rates with a window
-//      toggle (30/90/all). Read from /api/tier-accuracy.
-// Plus a trend chart of weekly tier hit rates from /api/tier-accuracy-trend.
 
 type Bucket = {
   bucket_min: number;
@@ -19,37 +19,37 @@ type Bucket = {
   max_well_sampled_rate: number | null;
 };
 
-type TierStats = {
-  tier: 'safe' | 'value' | 'highrisk' | 'lotto';
-  n: number;
-  predicted_prob: number;
-  actual_hit_rate: number;
-  gap: number;
-};
-
-type TrendPoint = {
-  week_start: string;
+type DailyPoint = {
+  grade_date: string;
   tier: 'safe' | 'value' | 'highrisk' | 'lotto';
   n: number;
   predicted_prob: number;
   actual_hit_rate: number;
 };
 
-type WindowChoice = '30' | '90' | 'all';
+type Tier = 'safe' | 'value' | 'highrisk' | 'lotto';
+const TIERS: Tier[] = ['safe', 'value', 'highrisk', 'lotto'];
 
-const TIER_COLORS = {
+const TIER_COLORS: Record<Tier, string> = {
   safe: '#22c55e',
   value: '#3b82f6',
   highrisk: '#f59e0b',
   lotto: '#ef4444',
-} as const;
+};
 
-const TIER_LABELS = {
+const TIER_LABELS: Record<Tier, string> = {
   safe: 'Safe',
   value: 'Value',
   highrisk: 'High Risk',
   lotto: 'Lotto',
-} as const;
+};
+
+const TIER_LABELS_SHORT: Record<Tier, string> = {
+  safe: 'Safe',
+  value: 'Val',
+  highrisk: 'HR',
+  lotto: 'Lot',
+};
 
 function fmtPct(p: number | null | undefined): string {
   if (p == null || !Number.isFinite(p)) return '-';
@@ -72,11 +72,8 @@ function gapColor(gap: number): string {
 export default function TransparencyInner() {
   const [buckets, setBuckets] = useState<Bucket[] | null>(null);
   const [bucketsErr, setBucketsErr] = useState<string | null>(null);
-  const [tierWindow, setTierWindow] = useState<WindowChoice>('all');
-  const [tiers, setTiers] = useState<TierStats[] | null>(null);
-  const [tiersErr, setTiersErr] = useState<string | null>(null);
-  const [trend, setTrend] = useState<TrendPoint[] | null>(null);
-  const [trendErr, setTrendErr] = useState<string | null>(null);
+  const [daily, setDaily] = useState<DailyPoint[] | null>(null);
+  const [dailyErr, setDailyErr] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [cap, setCap] = useState<number | null>(null);
 
@@ -93,32 +90,38 @@ export default function TransparencyInner() {
   }, []);
 
   useEffect(() => {
-    setTiers(null);
-    fetch(`/api/tier-accuracy?window=${tierWindow}`)
+    fetch('/api/tier-accuracy-daily')
       .then(r => r.json())
       .then(d => {
-        if (d.error) { setTiersErr(d.error); return; }
-        setTiers(d.tiers);
+        if (d.error) { setDailyErr(d.error); return; }
+        setDaily(d.points);
       })
-      .catch(e => setTiersErr(String(e)));
-  }, [tierWindow]);
-
-  useEffect(() => {
-    fetch('/api/tier-accuracy-trend')
-      .then(r => r.json())
-      .then(d => {
-        if (d.error) { setTrendErr(d.error); return; }
-        setTrend(d.points);
-      })
-      .catch(e => setTrendErr(String(e)));
+      .catch(e => setDailyErr(String(e)));
   }, []);
+
+  // Pivot points into a date -> tier -> stats map.
+  const byDate = useMemo(() => {
+    const m: Record<string, Partial<Record<Tier, DailyPoint>>> = {};
+    if (daily) {
+      for (const p of daily) {
+        if (!m[p.grade_date]) m[p.grade_date] = {};
+        m[p.grade_date][p.tier] = p;
+      }
+    }
+    return m;
+  }, [daily]);
+
+  // Dates sorted most recent first.
+  const dates = useMemo(() => {
+    return Object.keys(byDate).sort((a, b) => b.localeCompare(a));
+  }, [byDate]);
 
   return (
     <main className="min-h-screen px-4 py-6 max-w-4xl mx-auto">
       <header className="mb-6">
         <h1 className="text-xl font-medium text-gray-200">Model Transparency</h1>
         <p className="text-xs text-gray-500 mt-1 leading-relaxed">
-          Live accuracy data for the prop grading model. Below are the calibration buckets used to map raw model probabilities to the published tier probabilities, and the per-tier hit rates over the chosen time window. Calibration recomputes weekly from resolved outcomes; the goal is for the gap between predicted and actual to shrink as more season data accumulates.
+          Live accuracy data for the prop grading model. Below is the daily evolution of per-tier hit rates and the calibration buckets used to map raw model probabilities to published tier probabilities. Calibration recomputes weekly from resolved outcomes; the goal is for the gap between predicted and actual to shrink as more season data accumulates.
         </p>
         {lastUpdated && (
           <p className="text-[10px] text-gray-600 mt-2">
@@ -128,63 +131,62 @@ export default function TransparencyInner() {
       </header>
 
       <section className="mb-8">
-        <h2 className="text-sm font-medium text-gray-300 mb-3">Tier accuracy</h2>
-        <div className="flex gap-2 mb-3">
-          {(['30', '90', 'all'] as WindowChoice[]).map(w => (
-            <button
-              key={w}
-              onClick={() => setTierWindow(w)}
-              className={`px-3 py-1 text-xs rounded ${
-                tierWindow === w
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-              }`}
-            >
-              {w === 'all' ? 'All-time' : `Last ${w} days`}
-            </button>
-          ))}
-        </div>
-        {tiersErr && <div className="text-xs text-red-400">{tiersErr}</div>}
-        {!tiers && !tiersErr && <div className="text-xs text-gray-500">Loading...</div>}
-        {tiers && (
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="text-gray-500 border-b border-gray-800">
-                <th className="text-left py-2 pr-3 font-normal">Tier</th>
-                <th className="text-right py-2 px-3 font-normal">n</th>
-                <th className="text-right py-2 px-3 font-normal">Predicted</th>
-                <th className="text-right py-2 px-3 font-normal">Actual</th>
-                <th className="text-right py-2 pl-3 font-normal">Gap</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tiers.map(t => (
-                <tr key={t.tier} className="border-b border-gray-900">
-                  <td className="py-2 pr-3">
-                    <span className="inline-block w-2 h-2 rounded-full mr-2 align-middle"
-                          style={{ backgroundColor: TIER_COLORS[t.tier] }} />
-                    <span className="text-gray-300">{TIER_LABELS[t.tier]}</span>
-                  </td>
-                  <td className="text-right py-2 px-3 text-gray-400">{t.n.toLocaleString()}</td>
-                  <td className="text-right py-2 px-3 text-gray-300">{fmtPct(t.predicted_prob)}</td>
-                  <td className="text-right py-2 px-3 text-gray-300">{fmtPct(t.actual_hit_rate)}</td>
-                  <td className={`text-right py-2 pl-3 ${gapColor(t.gap)}`}>{fmtGap(t.gap)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+        <h2 className="text-sm font-medium text-gray-300 mb-3">Daily accuracy</h2>
+        <p className="text-[11px] text-gray-500 mb-3 leading-relaxed">
+          Actual hit rate by day for each tier. Watch for the lines to converge toward their target rates as the model adapts.
+        </p>
+        {dailyErr && <div className="text-xs text-red-400">{dailyErr}</div>}
+        {!daily && !dailyErr && <div className="text-xs text-gray-500">Loading...</div>}
+        {daily && daily.length > 0 && <DailyTrendChart points={daily} />}
+        {daily && daily.length === 0 && <div className="text-xs text-gray-500">Not enough resolved data yet.</div>}
       </section>
 
       <section className="mb-8">
-        <h2 className="text-sm font-medium text-gray-300 mb-3">Weekly trend</h2>
+        <h2 className="text-sm font-medium text-gray-300 mb-3">Daily breakdown</h2>
         <p className="text-[11px] text-gray-500 mb-3 leading-relaxed">
-          Actual hit rate by week for each tier. Watch for the lines to converge toward their target rates as the model adapts.
+          One row per date. Each cell shows the actual hit rate for that tier with sample size (n) and is color-coded by the gap to predicted.
         </p>
-        {trendErr && <div className="text-xs text-red-400">{trendErr}</div>}
-        {!trend && !trendErr && <div className="text-xs text-gray-500">Loading...</div>}
-        {trend && trend.length > 0 && <TrendChart points={trend} />}
-        {trend && trend.length === 0 && <div className="text-xs text-gray-500">Not enough resolved data yet.</div>}
+        {dailyErr && <div className="text-xs text-red-400">{dailyErr}</div>}
+        {daily && dates.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-800 sticky top-0 bg-black">
+                  <th className="text-left py-2 pr-3 font-normal">Date</th>
+                  {TIERS.map(t => (
+                    <th key={t} className="text-right py-2 px-2 font-normal">
+                      <span className="inline-block w-2 h-2 rounded-full mr-1 align-middle"
+                            style={{ backgroundColor: TIER_COLORS[t] }} />
+                      {TIER_LABELS_SHORT[t]}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {dates.map(d => (
+                  <tr key={d} className="border-b border-gray-900">
+                    <td className="py-2 pr-3 text-gray-400 font-mono whitespace-nowrap">{d}</td>
+                    {TIERS.map(t => {
+                      const p = byDate[d][t];
+                      if (!p || p.n === 0) {
+                        return <td key={t} className="text-right py-2 px-2 text-gray-700">-</td>;
+                      }
+                      const gap = p.actual_hit_rate - p.predicted_prob;
+                      return (
+                        <td key={t} className={`text-right py-2 px-2 ${gapColor(gap)}`}
+                            title={`predicted ${fmtPct(p.predicted_prob)} / actual ${fmtPct(p.actual_hit_rate)} / gap ${fmtGap(gap)} / n=${p.n}`}>
+                          <div>{fmtPct(p.actual_hit_rate)}</div>
+                          <div className="text-[9px] text-gray-600 font-mono">n={p.n}</div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {daily && dates.length === 0 && <div className="text-xs text-gray-500">No resolved data yet.</div>}
       </section>
 
       <section>
@@ -234,25 +236,22 @@ export default function TransparencyInner() {
   );
 }
 
-function TrendChart({ points }: { points: TrendPoint[] }) {
-  // Group points by tier and produce one polyline each.
-  // Uses inline SVG, no external lib.
+function DailyTrendChart({ points }: { points: DailyPoint[] }) {
   const byTier = useMemo(() => {
-    const m: Record<string, TrendPoint[]> = {};
+    const m: Record<string, DailyPoint[]> = {};
     for (const p of points) {
       if (!m[p.tier]) m[p.tier] = [];
       m[p.tier].push(p);
     }
     for (const t of Object.keys(m)) {
-      m[t].sort((a, b) => a.week_start.localeCompare(b.week_start));
+      m[t].sort((a, b) => a.grade_date.localeCompare(b.grade_date));
     }
     return m;
   }, [points]);
 
-  // X axis: union of weeks, sorted.
-  const weeks = useMemo(() => {
+  const dates = useMemo(() => {
     const s = new Set<string>();
-    for (const p of points) s.add(p.week_start);
+    for (const p of points) s.add(p.grade_date);
     return Array.from(s).sort();
   }, [points]);
 
@@ -265,29 +264,32 @@ function TrendChart({ points }: { points: TrendPoint[] }) {
   const innerW = W - PAD_L - PAD_R;
   const innerH = H - PAD_T - PAD_B;
 
-  if (weeks.length < 2) {
-    return <div className="text-xs text-gray-500">Need at least two weeks of data.</div>;
+  if (dates.length < 2) {
+    return <div className="text-xs text-gray-500">Need at least two days of data.</div>;
   }
 
-  function xFor(week: string): number {
-    const idx = weeks.indexOf(week);
-    return PAD_L + (idx / (weeks.length - 1)) * innerW;
+  function xFor(date: string): number {
+    const idx = dates.indexOf(date);
+    return PAD_L + (idx / (dates.length - 1)) * innerW;
   }
   function yFor(rate: number): number {
     return PAD_T + (1 - rate) * innerH;
   }
 
-  // Y gridlines at 0, 25, 50, 75, 100
   const yTicks = [0, 0.25, 0.5, 0.75, 1.0];
-  // X tick labels: every 4 weeks for readability
-  const xTickIdxs = weeks.map((_, i) => i).filter(i =>
-    i === 0 || i === weeks.length - 1 || i % 4 === 0
-  );
+  // X tick labels: roughly 6 labels evenly spaced.
+  const labelCount = 6;
+  const xTickIdxs: number[] = [];
+  if (dates.length <= labelCount) {
+    for (let i = 0; i < dates.length; i++) xTickIdxs.push(i);
+  } else {
+    const step = (dates.length - 1) / (labelCount - 1);
+    for (let i = 0; i < labelCount; i++) xTickIdxs.push(Math.round(i * step));
+  }
 
   return (
     <div className="overflow-x-auto">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" style={{ maxWidth: W }}>
-        {/* Y gridlines */}
         {yTicks.map(t => (
           <g key={t}>
             <line x1={PAD_L} y1={yFor(t)} x2={W - PAD_R} y2={yFor(t)}
@@ -297,36 +299,35 @@ function TrendChart({ points }: { points: TrendPoint[] }) {
             </text>
           </g>
         ))}
-        {/* X tick labels */}
         {xTickIdxs.map(i => (
           <text key={i}
-                x={xFor(weeks[i])}
+                x={xFor(dates[i])}
                 y={H - PAD_B + 14}
                 fontSize="9"
                 fill="#6b7280"
                 textAnchor="middle">
-            {weeks[i].slice(5)}
+            {dates[i].slice(5)}
           </text>
         ))}
-        {/* Polylines per tier */}
-        {(['safe', 'value', 'highrisk', 'lotto'] as const).map(tier => {
+        {TIERS.map(tier => {
           const pts = byTier[tier] || [];
           if (pts.length < 2) return null;
-          const pathPts = pts.map(p => `${xFor(p.week_start)},${yFor(p.actual_hit_rate)}`).join(' ');
+          const pathPts = pts.map(p => `${xFor(p.grade_date)},${yFor(p.actual_hit_rate)}`).join(' ');
           return (
             <g key={tier}>
               <polyline
                 points={pathPts}
                 fill="none"
                 stroke={TIER_COLORS[tier]}
-                strokeWidth={1.5}
+                strokeWidth={1.25}
+                opacity={0.85}
               />
               {pts.map((p, i) => (
                 <circle
                   key={i}
-                  cx={xFor(p.week_start)}
+                  cx={xFor(p.grade_date)}
                   cy={yFor(p.actual_hit_rate)}
-                  r={2}
+                  r={1.5}
                   fill={TIER_COLORS[tier]}
                 />
               ))}
@@ -334,9 +335,8 @@ function TrendChart({ points }: { points: TrendPoint[] }) {
           );
         })}
       </svg>
-      {/* Legend */}
       <div className="flex gap-4 mt-2 text-[10px] text-gray-500">
-        {(['safe', 'value', 'highrisk', 'lotto'] as const).map(tier => (
+        {TIERS.map(tier => (
           <span key={tier} className="flex items-center gap-1">
             <span className="inline-block w-2 h-2 rounded-full"
                   style={{ backgroundColor: TIER_COLORS[tier] }} />
