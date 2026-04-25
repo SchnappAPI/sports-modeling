@@ -38,6 +38,7 @@ function flagLabel(key: string): string {
     'page.nba.grades':  'NBA · Grades',
     'page.nba.player':  'NBA · Player',
     'page.mlb.main':    'MLB · Main',
+    'page.transparency': 'Transparency',
   };
   return map[key] ?? key;
 }
