@@ -62,8 +62,17 @@ const MAINTENANCE_HTML = `<!DOCTYPE html>
 export async function middleware(request: NextRequest) {
   const { pathname, searchParams } = request.nextUrl;
 
-  // Always allow the keep-alive ping and the flags endpoint itself.
-  if (pathname === '/api/ping' || pathname === '/api/flags') {
+  // Bypass list for paths that must always be reachable, even during
+  // maintenance: keep-alive ping, the flags endpoint itself (middleware
+  // calls it), and /admin + /api/admin/* so the operator can always
+  // sign in to flip the toggle back off.
+  if (
+    pathname === '/api/ping' ||
+    pathname === '/api/flags' ||
+    pathname === '/admin' ||
+    pathname.startsWith('/admin/') ||
+    pathname.startsWith('/api/admin/')
+  ) {
     return NextResponse.next();
   }
 

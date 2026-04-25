@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPool } from '@/lib/db';
 
+function withUnlock(res: NextResponse): NextResponse {
+  res.cookies.set({
+    name: 'sb_unlock',
+    value: 'go',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 60 * 60 * 24 * 30,
+    path: '/',
+  });
+  return res;
+}
+
 const ADMIN_PASSCODE = process.env.ADMIN_PASSCODE ?? '';
 
 function checkAdmin(req: NextRequest): boolean {
@@ -16,7 +29,7 @@ export async function GET(req: NextRequest) {
     const result = await pool.request().query(
       `SELECT flag_key, enabled, updated_at FROM common.feature_flags ORDER BY flag_key`
     );
-    return NextResponse.json({ flags: result.recordset });
+    return withUnlock(NextResponse.json({ flags: result.recordset }));
   } catch (err) {
     console.error('admin flags GET error:', err);
     return NextResponse.json({ error: 'Server error' }, { status: 500 });
@@ -43,7 +56,7 @@ export async function PATCH(req: NextRequest) {
     if (result.rowsAffected[0] === 0) {
       return NextResponse.json({ error: 'unknown flag_key' }, { status: 404 });
     }
-    return NextResponse.json({ ok: true });
+    return withUnlock(NextResponse.json({ ok: true }));
   } catch (err) {
     console.error('admin flags PATCH error:', err);
     return NextResponse.json({ error: 'Server error' }, { status: 500 });

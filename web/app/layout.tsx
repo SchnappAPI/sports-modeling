@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import PasscodeGate from '@/components/PasscodeGate';
+import AdminTrigger from '@/components/AdminTrigger';
 
 export const metadata: Metadata = {
   title: 'Schnapp',
@@ -52,6 +53,7 @@ export default function RootLayout({
         <PasscodeGate>
           {children}
         </PasscodeGate>
+        <AdminTrigger />
       </body>
     </html>
   );

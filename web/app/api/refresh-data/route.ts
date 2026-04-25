@@ -1,5 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+function withUnlock(res: NextResponse): NextResponse {
+  res.cookies.set({
+    name: 'sb_unlock',
+    value: 'go',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 60 * 60 * 24 * 30,
+    path: '/',
+  });
+  return res;
+}
+
 const OWNER    = 'SchnappAPI';
 const REPO     = 'sports-modeling';
 const WORKFLOW = 'refresh-data.yml';
@@ -70,5 +83,5 @@ export async function POST(req: NextRequest) {
 
   const data  = runsRes.ok ? await runsRes.json() : {};
   const runId = data.workflow_runs?.[0]?.id ?? null;
-  return NextResponse.json({ runId });
+  return withUnlock(NextResponse.json({ runId }));
 }

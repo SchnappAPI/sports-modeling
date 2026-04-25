@@ -1,6 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPool } from '@/lib/db';
 
+// Authed admin requests also receive the sb_unlock cookie so the admin
+// can browse the gated site after signing in. 30-day cookie, refreshed
+// on every authed call.
+function withUnlock(res: NextResponse): NextResponse {
+  res.cookies.set({
+    name: 'sb_unlock',
+    value: 'go',
+    httpOnly: true,
+    secure: true,
+    sameSite: 'lax',
+    maxAge: 60 * 60 * 24 * 30,
+    path: '/',
+  });
+  return res;
+}
+
 const ADMIN_PASSCODE = process.env.ADMIN_PASSCODE ?? '';
 
 function checkAdmin(req: NextRequest): boolean {
@@ -18,7 +34,7 @@ export async function GET(req: NextRequest) {
       FROM common.user_codes
       ORDER BY created_at DESC
     `);
-    return NextResponse.json({ codes: result.recordset });
+    return withUnlock(NextResponse.json({ codes: result.recordset }));
   } catch (err) {
     console.error('Admin GET error:', err);
     return NextResponse.json({ error: 'Server error' }, { status: 500 });
@@ -40,7 +56,7 @@ export async function POST(req: NextRequest) {
         INSERT INTO common.user_codes (code, name, active, activated, created_at)
         VALUES (@code, @name, 1, 0, GETUTCDATE())
       `);
-    return NextResponse.json({ ok: true });
+    return withUnlock(NextResponse.json({ ok: true }));
   } catch (err) {
     console.error('Admin POST error:', err);
     return NextResponse.json({ error: 'Server error' }, { status: 500 });
@@ -58,7 +74,7 @@ export async function PATCH(req: NextRequest) {
       .input('code', code.trim().toUpperCase())
       .input('active', active ? 1 : 0)
       .query(`UPDATE common.user_codes SET active = @active WHERE code = @code`);
-    return NextResponse.json({ ok: true });
+    return withUnlock(NextResponse.json({ ok: true }));
   } catch (err) {
     console.error('Admin PATCH error:', err);
     return NextResponse.json({ error: 'Server error' }, { status: 500 });
