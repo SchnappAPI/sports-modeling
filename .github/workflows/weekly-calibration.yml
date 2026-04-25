@@ -1,0 +1,59 @@
+name: Weekly Calibration
+
+# Weekly recalibration of the prop grading model. Runs Sunday 06:00 UTC
+# (after Saturday games finish settling). Produces a snapshot in
+# common.grade_calibration_history and replaces common.grade_calibration
+# so the daily grading run picks up the fresh calibrator.
+#
+# Per ADR-20260425-3: this is the ONLY writer of common.grade_calibration
+# going forward. Daily grading reads from it but does not refit.
+
+on:
+  schedule:
+    # Sunday 06:00 UTC = Saturday late-night ET. Most NBA games finish
+    # by then; outcome data is fully settled.
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+    inputs:
+      window_days:
+        description: 'Rolling window for calibration (default 30)'
+        required: false
+        default: '30'
+      sport:
+        description: 'Sport key (default nba)'
+        required: false
+        default: 'nba'
+      dry_run:
+        description: 'Compute but do not write (true/false)'
+        required: false
+        default: 'false'
+
+env:
+  AZURE_SQL_SERVER:   ${{ secrets.AZURE_SQL_SERVER }}
+  AZURE_SQL_DATABASE: ${{ secrets.AZURE_SQL_DATABASE }}
+  AZURE_SQL_USERNAME: ${{ secrets.AZURE_SQL_USERNAME }}
+  AZURE_SQL_PASSWORD: ${{ secrets.AZURE_SQL_PASSWORD }}
+
+jobs:
+  recalibrate:
+    runs-on: [self-hosted, schnapp-runner]
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Activate virtualenv
+        run: echo "$HOME/venv/bin" >> $GITHUB_PATH
+
+      - name: Run weekly calibration
+        env:
+          WINDOW_DAYS: ${{ github.event.inputs.window_days || '30' }}
+          SPORT:       ${{ github.event.inputs.sport       || 'nba' }}
+          DRY_RUN:     ${{ github.event.inputs.dry_run     || 'false' }}
+        run: |
+          set -euo pipefail
+          ARGS="--window-days $WINDOW_DAYS --sport $SPORT"
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python grading/weekly_calibration.py $ARGS
