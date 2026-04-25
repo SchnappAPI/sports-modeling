@@ -2,7 +2,7 @@
 
 Monorepo for schnapp.bet — a sports prop research platform covering NBA, MLB, and NFL.
 
-Personal project. The repo is private and contains inlined credentials in `/docs/CONNECTIONS.md`; do not share access casually.
+Personal project. 
 
 ## Stack
 
