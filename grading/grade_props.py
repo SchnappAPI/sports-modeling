@@ -2396,10 +2396,22 @@ def run_backfill(engine, batch_size, specific_date=None, force=False):
     if specific_date:
         work_dates = [specific_date]
     else:
-        skip_clause = "" if force else (
-            " AND NOT EXISTS(SELECT 1 FROM common.daily_grades g "
-            "WHERE g.grade_date=CAST(egm.game_date AS DATE))"
-        )
+        # When force=False, skip dates already in daily_grades (original
+        # behavior). When force=True, skip dates that already have ADR-6
+        # hit-context columns populated -- this signals "already re-graded
+        # under current code" and lets the bash while-loop genuinely advance
+        # through dates instead of looping over the same window repeatedly.
+        if force:
+            skip_clause = (
+                " AND NOT EXISTS(SELECT 1 FROM common.player_tier_lines t "
+                "WHERE t.grade_date=CAST(egm.game_date AS DATE) "
+                "AND (t.highrisk_hit_avg_min IS NOT NULL OR t.lotto_hit_avg_min IS NOT NULL))"
+            )
+        else:
+            skip_clause = (
+                " AND NOT EXISTS(SELECT 1 FROM common.daily_grades g "
+                "WHERE g.grade_date=CAST(egm.game_date AS DATE))"
+            )
         df = pd.read_sql(text(
             "SELECT DISTINCT CAST(egm.game_date AS DATE) AS game_date"
             " FROM odds.player_props pp"
