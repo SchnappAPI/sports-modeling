@@ -131,6 +131,7 @@ Reserved prefix note: GitHub will not accept new secrets starting with `GITHUB_`
 Personal Access Tokens (account level, at `github.com/settings/tokens`):
 - `GITHUB_PAT` — fine-grained; scoped to SchnappAPI/sports-modeling; permissions Metadata read + Actions read and write; expires 2027-03-29. Stored in three places: Azure SWA env var `GITHUB_PAT`, GitHub Actions secret `GH_PAT`, VM `schnapp-mcp.service` `Environment="GH_PAT=..."` directive. All three must be updated together on rotation.
 - `schnapp-vm-push` — fine-grained; used by the VM for direct git push (stored at `/home/schnapp-admin/.git-credentials`); expires 2027-04-10.
+- `Claude Code MCP - sports-modeling` — fine-grained; scoped to all SchnappAPI repos; permissions Actions/Contents/Issues/Pull requests/Workflows read+write, Metadata read; expires 2027-04-25. Stored in `~/.claude.json` on the Windows laptop (1stLake) under MCP server `github` as `GITHUB_PERSONAL_ACCESS_TOKEN`. Local-only; not synced anywhere.
 - `Claude MCP` — classic; used by the Claude.ai GitHub connector for browser sessions.
 
 Active workflows live in `.github/workflows/`. Workflow-level details (schedules, inputs, per-workflow behavior) are documented in each workflow file and in `/infrastructure/README.md`; this document only catalogs the secrets those workflows consume.
