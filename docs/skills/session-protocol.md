@@ -81,6 +81,14 @@ These are the specific failures this skill prevents.
 
 **Wholesale rewrite destroys diff context.** Rewriting a full README on every change makes the git diff useless. `str_replace` on specific sections keeps diffs legible and preserves history.
 
+## Live session cache
+
+The `live-session-cache` skill (see `/docs/skills/live-session-cache.md`) auto-activates on this project. Defaults: `trigger` mode on claude.ai chat (activates on first non-chats repo write), `always` mode on Claude Code (activates at session start). The skill logs each substantive turn to a dedicated `chat/YYYY-MM-DD-{slug}` branch, separate from the work branch.
+
+The chat log does not replace this protocol's end-of-session requirements. CHANGELOG entry, ADR if needed, INVARIANTS edits all still apply. The chat log supplements them by preserving the conversation. Each turn's State Delta references work-branch commit hashes so the log is searchable by commit.
+
+If a session activates the skill, the wrap-up flow at session end opens a PR from the chat branch to main with squash-merge recommended in the PR body.
+
 ## When to deviate
 
 Only these cases. Anything else is drift.
