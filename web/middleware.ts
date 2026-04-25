@@ -6,7 +6,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 // cookie, then redirects to the clean URL). Flip back to false to
 // disable.
 
-const MAINTENANCE_ON = false;
+const MAINTENANCE_ON = true;
 const UNLOCK_CODE = 'go';
 
 const COOKIE_NAME = 'sb_unlock';

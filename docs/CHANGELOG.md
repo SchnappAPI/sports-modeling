@@ -1,5 +1,7 @@
 # Changelog
 
+2026-04-25 [shared][web] Maintenance gate ON. Flipped `MAINTENANCE_ON = true` in `web/middleware.ts`. Site-wide 503 maintenance page for everyone except visitors with the `sb_unlock` cookie. Operator unlock: `https://schnapp.bet/?unlock=go`. `/api/ping` still open. To disable, flip back to `false` and push.
+
 2026-04-25 [shared][web] Simplified maintenance gate from env-var-driven to two hardcoded constants in `web/middleware.ts`: `MAINTENANCE_ON` (bool) and `UNLOCK_CODE` (string). Removes Azure SWA env var dependency, fail-open misconfiguration logic, and the need to remember which portal panel to flip. Toggle is now: edit the constant, commit, push, wait ~90s for SWA redeploy. Cookie behavior unchanged (`sb_unlock`, 30 days, HttpOnly). Removed `MAINTENANCE_MODE` and `MAINTENANCE_BYPASS_CODE` references from /docs/CONNECTIONS.md and /web/README.md. See /web/middleware.ts.
 
 2026-04-25 [shared][web] Root landing changed from `/nba` to `/lol`. `web/app/page.tsx` now redirects to the sport-picker hub at `/lol` instead of jumping straight to the NBA page. One-line change. See /web/README.md.
