@@ -232,7 +232,15 @@ export default function AdminPage() {
 
   return (
     <div className="min-h-screen bg-gray-950 px-4 py-6 max-w-lg mx-auto">
-      <h1 className="text-lg font-semibold text-white mb-4">Admin</h1>
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-lg font-semibold text-white">Admin</h1>
+        <a
+          href="/"
+          className="text-xs text-gray-500 border border-gray-700 rounded-lg px-3 py-1.5"
+        >
+          Home
+        </a>
+      </div>
 
       {maintenanceOn && (
         <div className="mb-4 rounded-lg border border-yellow-700 bg-yellow-900/30 px-3 py-2 text-xs text-yellow-200 leading-relaxed">
