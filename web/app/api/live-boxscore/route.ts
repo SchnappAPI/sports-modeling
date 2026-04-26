@@ -1,16 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Proxies live box score requests through the schnapp-runner VM Flask service.
-// The VM calls stats.nba.com via the Webshare residential proxy, bypassing
-// the IP block that affects Azure SWA and GitHub Actions datacenter IPs.
+// Proxies live box score requests through a Flask runner that calls the NBA
+// CDN endpoints directly (no proxy needed for those CDN URLs).
 //
-// Falls back to the DB if the VM is unreachable.
+// RUNNER_URL/RUNNER_API_KEY are env-driven so the same code can target the
+// VM Flask (production default: live.schnapp.bet) or a Mac-hosted Flask
+// (e.g. mac-flask.schnapp.bet) without code changes.
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const RUNNER_URL = 'https://live.schnapp.bet';
-const RUNNER_KEY = 'runner-Lake4971';
+const RUNNER_URL = process.env.RUNNER_URL ?? 'https://live.schnapp.bet';
+const RUNNER_KEY = process.env.RUNNER_API_KEY ?? 'runner-Lake4971';
 const TIMEOUT_MS = 10_000;
 
 export async function GET(req: NextRequest) {

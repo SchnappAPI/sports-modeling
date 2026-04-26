@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getGames } from '@/lib/queries';
 
-const RUNNER_URL = 'https://live.schnapp.bet';
-const RUNNER_KEY = 'runner-Lake4971';
+const RUNNER_URL = process.env.RUNNER_URL ?? 'https://live.schnapp.bet';
+const RUNNER_KEY = process.env.RUNNER_API_KEY ?? 'runner-Lake4971';
 
 function todayCT(): string {
   // Returns today's date in Central time as YYYY-MM-DD.
