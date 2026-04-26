@@ -58,7 +58,7 @@ def get_engine(max_retries=3, retry_wait=60):
         f"{os.environ['AZURE_SQL_SERVER']}/"
         f"{os.environ['AZURE_SQL_DATABASE']}"
         "?driver=ODBC+Driver+18+for+SQL+Server"
-        "&Encrypt=yes&TrustServerCertificate=no"
+        f"&Encrypt=yes&TrustServerCertificate={os.environ.get('AZURE_SQL_TRUST_CERT', 'no')}"
         "&Connection+Timeout=90"
     )
     engine = create_engine(conn_str, fast_executemany=False)
