@@ -1,0 +1,111 @@
+name: Odds ETL (Mac, Local SQL)
+
+# Mac-runner mirror of odds-etl.yml. Reuses etl/odds_etl.py unmodified.
+# Manual dispatch only -- the schedule trigger is intentionally omitted
+# so the VM's daily upcoming run remains the single scheduled writer
+# against The Odds API. ADR-20260426-2 migration pattern: source the
+# local SQL credentials and re-export under AZURE_SQL_* so the script
+# (which reads via etl.db.get_engine) writes to the local container
+# instead of Azure SQL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "pipeline | upcoming | discover | backfill | mappings | probe"
+        required: false
+        default: "upcoming"
+      sport:
+        description: "nba, mlb, nfl, or all"
+        required: false
+        default: "nba"
+      season:
+        description: "Season year. Leave blank for auto-detect."
+        required: false
+        default: ""
+      snapshots:
+        description: "Discover: max calendar dates to walk."
+        required: false
+        default: "15"
+      games:
+        description: "Backfill: max events to process."
+        required: false
+        default: "30"
+      days_ahead:
+        description: "Upcoming mode: days ahead to fetch."
+        required: false
+        default: "1"
+      budget:
+        description: "Max credits per backfill run. 0 = unlimited."
+        required: false
+        default: "0"
+
+env:
+  ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+jobs:
+  odds-etl-mac:
+    runs-on: [self-hosted, mac-runner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Source local SQL credentials and export as AZURE_SQL_*
+        run: |
+          set -a
+          source /Users/schnapp/sql-server.env
+          set +a
+          echo "::add-mask::$MSSQL_SA_PASSWORD"
+          echo "AZURE_SQL_SERVER=localhost,1433"        >> $GITHUB_ENV
+          echo "AZURE_SQL_DATABASE=sports-modeling"     >> $GITHUB_ENV
+          echo "AZURE_SQL_USERNAME=sa"                  >> $GITHUB_ENV
+          echo "AZURE_SQL_PASSWORD=$MSSQL_SA_PASSWORD"  >> $GITHUB_ENV
+          echo "AZURE_SQL_TRUST_CERT=yes"               >> $GITHUB_ENV
+
+      - name: Activate venv
+        run: echo "/Users/schnapp/venv/bin" >> $GITHUB_PATH
+
+      - name: Upcoming
+        if: github.event.inputs.mode == 'upcoming'
+        run: |
+          DAYS="${{ github.event.inputs.days_ahead || '1' }}"
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          python etl/odds_etl.py --mode upcoming --sport $SPORT --days-ahead $DAYS
+
+      - name: Discover (pipeline or explicit)
+        if: |
+          github.event.inputs.mode == 'pipeline' ||
+          github.event.inputs.mode == 'discover'
+        run: |
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          SNAPS="${{ github.event.inputs.snapshots || '15' }}"
+          SEASON="${{ github.event.inputs.season }}"
+          FLAGS="--mode discover --sport $SPORT --snapshots $SNAPS"
+          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
+          python etl/odds_etl.py $FLAGS
+
+      - name: Backfill (pipeline or explicit)
+        if: |
+          github.event.inputs.mode == 'pipeline' ||
+          github.event.inputs.mode == 'backfill'
+        run: |
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          GAMES="${{ github.event.inputs.games || '30' }}"
+          BUDGET="${{ github.event.inputs.budget || '0' }}"
+          SEASON="${{ github.event.inputs.season }}"
+          FLAGS="--mode backfill --sport $SPORT --games $GAMES --budget $BUDGET"
+          [ -n "$SEASON" ] && FLAGS="$FLAGS --season $SEASON"
+          python etl/odds_etl.py $FLAGS
+
+      - name: Mappings (pipeline or explicit)
+        if: |
+          github.event.inputs.mode == 'pipeline' ||
+          github.event.inputs.mode == 'mappings'
+        run: |
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          python etl/odds_etl.py --mode mappings --sport $SPORT
+
+      - name: Probe (explicit only)
+        if: github.event.inputs.mode == 'probe'
+        run: |
+          SPORT="${{ github.event.inputs.sport || 'nba' }}"
+          python etl/odds_etl.py --mode probe --sport $SPORT
