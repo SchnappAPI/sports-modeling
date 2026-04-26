@@ -1,0 +1,33 @@
+name: Mac Runner Pilot (Local DB Inventory)
+
+# Pilot: proves the mac-runner can clone the repo, activate the local
+# Python venv, and connect to the SQL Server 2022 container running on
+# the Mac. Read-only. Manual dispatch only. Does not touch Azure SQL or
+# any production resource.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inventory:
+    runs-on: [self-hosted, mac-runner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Source local SQL credentials and set env
+        run: |
+          set -a
+          source /Users/schnapp/sql-server.env
+          set +a
+          echo "::add-mask::$MSSQL_SA_PASSWORD"
+          echo "SQL_PASSWORD=$MSSQL_SA_PASSWORD" >> $GITHUB_ENV
+          echo "SQL_SERVER=localhost,1433"      >> $GITHUB_ENV
+          echo "SQL_DATABASE=sports-modeling"   >> $GITHUB_ENV
+          echo "SQL_USERNAME=sa"                >> $GITHUB_ENV
+          echo "SQL_TRUST_CERT=yes"             >> $GITHUB_ENV
+
+      - name: Activate venv
+        run: echo "/Users/schnapp/venv/bin" >> $GITHUB_PATH
+
+      - name: Run inventory against local SQL
+        run: python etl/local_db_inventory.py
