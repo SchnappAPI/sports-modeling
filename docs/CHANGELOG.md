@@ -1,5 +1,11 @@
 # Changelog
 
+2026-04-26 [shared][web] Home page is now the sport picker. `web/app/page.tsx` is a server component that reads the `sb_unlock` cookie and renders new client component `web/app/HomeHub.tsx` (the picker UI previously at `/lol`) with a `showAdminLink` prop. When the admin cookie is present, a small `admin` link appears in the top-right of the home page; anonymous visitors see no admin affordance there. The triple-tap `AdminTrigger` in `web/app/layout.tsx` is unchanged and remains the universal escape hatch on every page. `/lol` now redirects to `/` for backward compatibility.
+
+Admin page UX fixes (`web/app/admin/page.tsx`): (1) yellow banner under the h1 when `maintenance_mode` flag is enabled, with a one-line note that the admin viewer is bypassed by the `sb_unlock` cookie and that an incognito window is required to verify the gate is working — addresses the "I flipped maintenance on but the site looks normal" confusion which is the cookie bypass behaving as designed, not a bug. (2) Brief "Saved" toast at the bottom of the admin viewport for ~1.5 s after a successful flag toggle, "Save failed" toast for ~2.5 s on error — addresses the "no way to save" perception by making the existing immediate-PATCH-on-toggle behavior visible. No changes to the underlying `/api/admin/flags` endpoint or the `common.feature_flags` schema.
+
+Commit: `27fd10f`. Auto-deploys via Azure SWA workflow on push to main.
+
 2026-04-26 [shared][infra] Mac runner pilot live. Second self-hosted GitHub Actions runner registered on Schnapps-MBP alongside the existing Azure VM runner. Name `mac-runner-1`, label `mac-runner`, version 2.334.0, installed at `/Users/schnapp/actions-runner/`, launchd user agent at `~/Library/LaunchAgents/actions.runner.SchnappAPI-sports-modeling.mac-runner-1.plist` with `RunAtLoad` set (no `KeepAlive` yet, follow-up if pilot proceeds). Production workflows continue to target `schnapp-runner` and are unaffected.
 
 Dependencies installed on the Mac to mirror the VM ETL toolchain: ODBC Driver 18.6.2.1 + unixODBC 2.3.14 + mssql-tools18 via Microsoft's `microsoft/mssql-release` Homebrew tap; Python 3.12.13 venv at `/Users/schnapp/venv` with the full `etl/requirements.txt` (sqlalchemy 2.0.49, pyodbc 5.3.0, pandas 3.0.2, numpy 2.4.4, requests 2.33.1, nba_api 1.11.4, mlb-statsapi 1.7.2).
