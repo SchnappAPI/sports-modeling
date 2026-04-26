@@ -72,6 +72,7 @@ export default function AdminPage() {
   // Tools state
   const [refreshState, setRefreshState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [refreshMsg, setRefreshMsg]     = useState('');
+  const [flagsToast, setFlagsToast] = useState<string | null>(null);
 
   const loadCodes = useCallback(async (adminPin: string) => {
     setCodesLoading(true);
@@ -158,9 +159,14 @@ export default function AdminPage() {
       headers: { 'Content-Type': 'application/json', 'x-admin-token': savedPin },
       body: JSON.stringify({ flag_key: key, enabled: !current }),
     });
-    if (!res.ok) {
+    if (res.ok) {
+      setFlagsToast('Saved');
+      setTimeout(() => setFlagsToast(null), 1500);
+    } else {
       // Roll back on error.
       setFlags((prev) => prev.map((f) => f.flag_key === key ? { ...f, enabled: current } : f));
+      setFlagsToast('Save failed');
+      setTimeout(() => setFlagsToast(null), 2500);
     }
   }
 
@@ -212,6 +218,12 @@ export default function AdminPage() {
     );
   }
 
+  // True when site-wide maintenance is currently on. Surfaced in a banner
+  // under the h1 so it is visible regardless of which tab is open. The
+  // admin viewer is bypassed via the sb_unlock cookie set on login, so
+  // the banner is the only signal that the gate is live.
+  const maintenanceOn = flags.some((f) => f.flag_key === 'maintenance_mode' && f.enabled);
+
   // Group flags for the visibility tab.
   const maintFlags = flags.filter((f) => flagGroup(f.flag_key) === 'maintenance');
   const sportFlags = flags.filter((f) => flagGroup(f.flag_key) === 'sport');
@@ -221,6 +233,15 @@ export default function AdminPage() {
   return (
     <div className="min-h-screen bg-gray-950 px-4 py-6 max-w-lg mx-auto">
       <h1 className="text-lg font-semibold text-white mb-4">Admin</h1>
+
+      {maintenanceOn && (
+        <div className="mb-4 rounded-lg border border-yellow-700 bg-yellow-900/30 px-3 py-2 text-xs text-yellow-200 leading-relaxed">
+          <span className="font-semibold">Maintenance mode is ON.</span>{' '}
+          Anonymous visitors see the 503 page. You see normal pages because
+          your admin cookie bypasses the gate. Open an incognito window to
+          verify the gate works.
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 bg-gray-900 rounded-xl p-1">
@@ -373,6 +394,15 @@ export default function AdminPage() {
             )}
           </div>
         </>
+      )}
+      {flagsToast && (
+        <div
+          className="fixed left-1/2 -translate-x-1/2 bottom-6 z-50 rounded-lg border border-gray-700 bg-gray-900 px-4 py-2 text-xs text-gray-100 shadow-lg"
+          role="status"
+          aria-live="polite"
+        >
+          {flagsToast}
+        </div>
       )}
     </div>
   );
