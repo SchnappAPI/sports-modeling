@@ -22,6 +22,7 @@ SERVER   = os.environ["AZURE_SQL_SERVER"]
 DATABASE = os.environ["AZURE_SQL_DATABASE"]
 USERNAME = os.environ["AZURE_SQL_USERNAME"]
 PASSWORD = os.environ["AZURE_SQL_PASSWORD"]
+TRUST    = os.environ.get("AZURE_SQL_TRUST_CERT", "no")
 
 CONN_STR = (
     f"DRIVER={{{DRIVER}}};"
@@ -30,7 +31,7 @@ CONN_STR = (
     f"UID={USERNAME};"
     f"PWD={PASSWORD};"
     "Encrypt=yes;"
-    "TrustServerCertificate=no;"
+    f"TrustServerCertificate={TRUST};"
     "Connection Timeout=90;"
 )
 
