@@ -52,10 +52,12 @@ def get_engine():
     database = os.environ["AZURE_SQL_DATABASE"]
     username = os.environ["AZURE_SQL_USERNAME"]
     password = os.environ["AZURE_SQL_PASSWORD"]
+    trust    = os.environ.get("AZURE_SQL_TRUST_CERT", "no")
     driver   = "ODBC+Driver+18+for+SQL+Server"
     conn_str = (
         f"mssql+pyodbc://{username}:{password}@{server}/{database}"
         f"?driver={driver}"
+        f"&Encrypt=yes&TrustServerCertificate={trust}"
     )
     return create_engine(conn_str, fast_executemany=True)
 

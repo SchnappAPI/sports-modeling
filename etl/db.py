@@ -5,13 +5,14 @@ from sqlalchemy import create_engine, text
 
 
 def _build_conn_str():
+    trust = os.environ.get("AZURE_SQL_TRUST_CERT", "no")
     return (
         f"mssql+pyodbc://{os.environ['AZURE_SQL_USERNAME']}:"
         f"{os.environ['AZURE_SQL_PASSWORD']}@"
         f"{os.environ['AZURE_SQL_SERVER']}/"
         f"{os.environ['AZURE_SQL_DATABASE']}"
         "?driver=ODBC+Driver+18+for+SQL+Server"
-        "&Encrypt=yes&TrustServerCertificate=no"
+        f"&Encrypt=yes&TrustServerCertificate={trust}"
     )
 
 
