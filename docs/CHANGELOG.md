@@ -1,5 +1,13 @@
 # Changelog
 
+2026-04-26 [shared][infra] Mac runner pilot live. Second self-hosted GitHub Actions runner registered on Schnapps-MBP alongside the existing Azure VM runner. Name `mac-runner-1`, label `mac-runner`, version 2.334.0, installed at `/Users/schnapp/actions-runner/`, launchd user agent at `~/Library/LaunchAgents/actions.runner.SchnappAPI-sports-modeling.mac-runner-1.plist` with `RunAtLoad` set (no `KeepAlive` yet, follow-up if pilot proceeds). Production workflows continue to target `schnapp-runner` and are unaffected.
+
+Dependencies installed on the Mac to mirror the VM ETL toolchain: ODBC Driver 18.6.2.1 + unixODBC 2.3.14 + mssql-tools18 via Microsoft's `microsoft/mssql-release` Homebrew tap; Python 3.12.13 venv at `/Users/schnapp/venv` with the full `etl/requirements.txt` (sqlalchemy 2.0.49, pyodbc 5.3.0, pandas 3.0.2, numpy 2.4.4, requests 2.33.1, nba_api 1.11.4, mlb-statsapi 1.7.2).
+
+New pilot workflow `mac-runner-pilot.yml` runs `etl/local_db_inventory.py` against the local SQL Server 2022 container (Docker on Colima, set up in the prior session, populated by a 14.8M-row BACPAC import of `sports-modeling` with row-count parity verified vs Azure SQL). The pilot script is read-only: queries `@@VERSION`, table counts per schema, and row counts for `common.daily_grades`, `odds.player_props`, `mlb.play_by_play`. Manual dispatch only. First run (24951996301) succeeded in 22 seconds, proving the full chain: GitHub triggers, mac-runner picks up the job, `actions/checkout@v4` clones, bash sources `/Users/schnapp/sql-server.env` with secret masking via `::add-mask::`, the Python venv activates, pyodbc connects via ODBC Driver 18 to `localhost,1433`, queries return, exit 0.
+
+This is a pilot only. No production workflow has been migrated. The VM runner remains authoritative for every scheduled and dispatch-only workflow currently in `.github/workflows/`. Next concrete step if the Mac path proceeds is migrating one production workflow (likely `db_inventory.yml` first, then a write-path workflow) and validating parity before any cutover. Commits: `70e544c` (pilot workflow + script).
+
 2026-04-25 [nba][grading] Schema and code prep for the immutable-corpus architecture (ADR-20260425-3 follow-on). Three commits: `e87c70b` adds MODEL_VERSION stamping; `a8b1068` adds weekly calibration job and workflow.
 
 Schema changes (idempotent ALTER ADDs, executed live before code push):

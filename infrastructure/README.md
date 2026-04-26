@@ -44,6 +44,21 @@ B1s is sufficient because ETL is I/O-bound against Azure SQL and The Odds API. M
 
 Workflows execute in the runner's work directory. The MCP server deliberately clones the repo separately to `~/sports-modeling` and uses that as `WorkingDirectory` so it can start before the runner has executed any job.
 
+### Self-hosted runner (Mac, pilot)
+
+`mac-runner-1` on Schnapps-MBP. Status: pilot, alongside the VM runner, not replacing it.
+
+- Host: Schnapps-MBP, Intel i7-6820HQ, 16 GiB RAM, macOS 14.8.5 (OCLP), user `schnapp`
+- Runner version 2.334.0 at `/Users/schnapp/actions-runner/`
+- Labels: `self-hosted`, `macOS`, `X64`, `mac-runner` (custom)
+- Launchd user agent: `~/Library/LaunchAgents/actions.runner.SchnappAPI-sports-modeling.mac-runner-1.plist`, `RunAtLoad` set, no `KeepAlive` (follow-up if pilot proceeds)
+- Logs: `~/Library/Logs/actions.runner.SchnappAPI-sports-modeling.mac-runner-1/`
+- Python venv: `/Users/schnapp/venv` (Python 3.12.13) with full `etl/requirements.txt` installed
+- ODBC: Driver 18 for SQL Server (18.6.2.1) + unixODBC 2.3.14 via Microsoft Homebrew tap
+
+The Mac runner exists so workflows can target the local SQL Server container instead of Azure SQL during the migration evaluation. Only one workflow points at it today: `mac-runner-pilot.yml`, a read-only inventory check using `etl/local_db_inventory.py`. All scheduled and production workflows continue to use `runs-on: [self-hosted, schnapp-runner]`.
+
+
 ### Flask live-data runner
 
 `etl/runner.py` on the VM. Systemd service `schnapp-flask.service`. Listens on `0.0.0.0:5000` (all interfaces), so it is reachable locally via `127.0.0.1:5000`, internally via the VM's private IP, and externally via a Cloudflare-proxied DNS name.
