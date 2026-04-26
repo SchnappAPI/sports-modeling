@@ -1,0 +1,41 @@
+name: Compute Player Line Patterns (Mac, Local SQL)
+
+# Mac-runner mirror of compute-patterns.yml. Reuses etl/compute_patterns.py
+# unmodified (engine builder is now AZURE_SQL_TRUST_CERT-driven). Manual
+# dispatch only; the schedule trigger is intentionally omitted so the VM's
+# nightly scheduled run (07:30 UTC) remains the sole writer to Azure SQL.
+# This Mac mirror writes to the local SQL Server container only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      min_games:
+        description: "Minimum games for a player-line to be included"
+        required: false
+        default: "10"
+
+jobs:
+  compute:
+    runs-on: [self-hosted, mac-runner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Source local SQL credentials and export as AZURE_SQL_*
+        run: |
+          set -a
+          source /Users/schnapp/sql-server.env
+          set +a
+          echo "::add-mask::$MSSQL_SA_PASSWORD"
+          echo "AZURE_SQL_SERVER=localhost,1433"        >> $GITHUB_ENV
+          echo "AZURE_SQL_DATABASE=sports-modeling"     >> $GITHUB_ENV
+          echo "AZURE_SQL_USERNAME=sa"                  >> $GITHUB_ENV
+          echo "AZURE_SQL_PASSWORD=$MSSQL_SA_PASSWORD"  >> $GITHUB_ENV
+          echo "AZURE_SQL_TRUST_CERT=yes"               >> $GITHUB_ENV
+
+      - name: Activate venv
+        run: echo "/Users/schnapp/venv/bin" >> $GITHUB_PATH
+
+      - name: Compute player line patterns
+        run: |
+          MIN="${{ github.event.inputs.min_games || '10' }}"
+          python etl/compute_patterns.py --min-games $MIN
