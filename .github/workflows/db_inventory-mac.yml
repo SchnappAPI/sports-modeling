@@ -1,0 +1,34 @@
+name: DB Inventory (Mac, Local SQL)
+
+# Mirror of db_inventory.yml that runs on the mac-runner against the
+# local SQL Server 2022 container instead of Azure SQL. Reuses the
+# production etl/db_inventory.py unmodified by exporting AZURE_SQL_*
+# from /Users/schnapp/sql-server.env at the workflow step level.
+# Manual dispatch only.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inventory:
+    runs-on: [self-hosted, mac-runner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Source local SQL credentials and export as AZURE_SQL_*
+        run: |
+          set -a
+          source /Users/schnapp/sql-server.env
+          set +a
+          echo "::add-mask::$MSSQL_SA_PASSWORD"
+          echo "AZURE_SQL_SERVER=localhost,1433"        >> $GITHUB_ENV
+          echo "AZURE_SQL_DATABASE=sports-modeling"     >> $GITHUB_ENV
+          echo "AZURE_SQL_USERNAME=sa"                  >> $GITHUB_ENV
+          echo "AZURE_SQL_PASSWORD=$MSSQL_SA_PASSWORD"  >> $GITHUB_ENV
+          echo "AZURE_SQL_TRUST_CERT=yes"               >> $GITHUB_ENV
+
+      - name: Activate venv
+        run: echo "/Users/schnapp/venv/bin" >> $GITHUB_PATH
+
+      - name: Run inventory against local SQL
+        run: python etl/db_inventory.py

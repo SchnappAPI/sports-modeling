@@ -1,9 +1,10 @@
 import os, pyodbc
+_trust = os.environ.get("AZURE_SQL_TRUST_CERT", "no")
 conn = pyodbc.connect(
     f"DRIVER={{ODBC Driver 18 for SQL Server}};"
     f"SERVER={os.environ['AZURE_SQL_SERVER']};DATABASE={os.environ['AZURE_SQL_DATABASE']};"
     f"UID={os.environ['AZURE_SQL_USERNAME']};PWD={os.environ['AZURE_SQL_PASSWORD']};"
-    "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
+    f"Encrypt=yes;TrustServerCertificate={_trust};Connection Timeout=60;"
 )
 cur = conn.cursor()
 def p(label, q):
