@@ -968,3 +968,19 @@ The cap value is published as `max_well_sampled_rate` on `common.grade_calibrati
 - A web transparency page surfacing per-bucket calibration accuracy is a follow-on task (live ADR-2026-04-25-3 deliverable, not yet implemented at time of decision).
 - After the in-flight backfill completes (currently ~87 of 143 ADR-6 dates), a re-run of the backtest should validate the simulated -2.4 pts improvement on prob>=0.80 cohort. Targets: Safe gap ~-7 pts overall, ~-7.8 pts at high-prob tail.
 
+
+## ADR-20260426-1 [shared][infra][web] Maintenance-mode middleware returns 200, not 503
+Date: 2026-04-26
+
+Context: On 2026-04-25 18:36:30 UTC the `maintenance_mode` flag in `common.feature_flags` was toggled on, mid-deploy of an unrelated schema-stamping commit. Every Azure SWA deploy from that point forward failed with "Web app warm up timed out" — 13 consecutive deploy failures spanning ~14 hours, including a /transparency page, a calibrator-path change, the Mac-runner pilot doc commit, the home-picker rewrite, the home admin link visibility fix, and several CHANGELOG-only commits.
+
+Root cause: middleware returned `NextResponse(MAINTENANCE_HTML, { status: 503, headers: { 'Retry-After': '3600' } })` to anonymous traffic when `maintenance_mode` was on. This is the technically-correct HTTP semantic for "service unavailable, retry later." Azure SWA, however, warms up new revisions by probing the root URL with anonymous requests. A 5xx response is interpreted as an unhealthy revision; SWA retries probes for roughly ten minutes and then fails the deploy. The flag was sticky (no automatic recovery), so every push went into the same trap. The operator (Austin) did not see the failure because the `sb_unlock` admin cookie bypasses the maintenance gate, so all manual visits looked normal. The prior session's "yellow banner on /admin when maintenance_mode is on" change was specifically built to surface this confusion, but that change was caught in the same broken-deploy cycle and never shipped.
+
+Decision: Maintenance middleware returns HTTP 200 with the maintenance HTML body, dropping the 503 status and the `Retry-After: 3600` header. The maintenance HTML already carries `<meta name="robots" content="noindex,nofollow">`, so 200 does not cause SEO issues for the consumer-facing site (which is itself passcode-gated and not designed to be indexed).
+
+Consequences:
+- SWA deploys succeed regardless of maintenance state. Operators can toggle maintenance on/off freely without bricking the next push.
+- The site loses the proper Retry-After signal during maintenance. In practice this signal was not respected by anything that mattered here: the PWA service worker is network-first for navigation and does not cache 503s; there are no automated monitors honoring Retry-After (Uptime Robot is paused per the 2026-04-23 change); and crawlers are excluded by the noindex meta tag.
+- The "yellow banner on /admin when maintenance_mode is on" added in commit `27fd10f` remains the in-app indicator that maintenance is active, now accurately reflecting reality after deploys ship.
+- An alternative considered and rejected: detecting SWA warmup probes by user-agent and bypassing maintenance only for them. Brittle (Azure does not document warmup user-agents), not worth the complexity given the noindex-driven safety of returning 200.
+- Another alternative considered and rejected: a confirmation prompt on the admin maintenance toggle. This adds friction without addressing the root cause; the middleware fix removes the failure mode entirely.

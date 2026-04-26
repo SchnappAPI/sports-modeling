@@ -102,12 +102,18 @@ export async function middleware(request: NextRequest) {
   const flags = await getFlags(request);
   if (!flags['maintenance_mode']) return NextResponse.next();
 
+  // Status 200, not 503. 503 was the technically-correct semantic for
+  // "service unavailable, retry later", but Azure SWA's deployment warmup
+  // probes anonymous traffic against the new revision and treats any 5xx
+  // as unhealthy, retrying until a ~10 minute timeout and then failing
+  // the deploy. With maintenance_mode on at deploy time, every SWA deploy
+  // gets bricked. See ADR-20260426-1. The maintenance HTML has
+  // noindex,nofollow so 200 does not cause SEO issues.
   return new NextResponse(MAINTENANCE_HTML, {
-    status: 503,
+    status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
-      'Retry-After': '3600',
     },
   });
 }
