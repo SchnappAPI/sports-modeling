@@ -1,0 +1,83 @@
+name: NBA Game Day (Mac, Local SQL)
+
+# Mac-runner mirror of nba-game-day.yml. Reuses etl/game_day_gate.py,
+# etl/nba_live.py, etl/odds_etl.py, grading/grade_props.py, and
+# etl/lineup_poll.py unmodified. Manual dispatch only -- the schedule
+# triggers from the VM workflow are intentionally omitted so the VM's
+# scheduled cadence remains the single scheduled writer to production
+# data paths and so The Odds API is not double-billed.
+#
+# Two deliberate translations vs the VM workflow:
+#   * Step 5 (outcomes resolution): the VM gates on
+#     `github.event.schedule == '30 9 * * *'`, which never matches on
+#     a dispatch-only mirror. Replaced with `skip_gate == 'true'` so
+#     the operator opts in to outcomes resolution via the same flag
+#     that bypasses the game-day gate. Default dispatches do not run
+#     outcomes, mirroring the VM's mid-day behavior.
+#   * Step 6 (dispatch nba-backfill) is omitted entirely. The VM's
+#     nba-backfill.yml writes to Azure SQL; dispatching it from a Mac
+#     run that wrote to the local container would mix DBs. Real
+#     backfills stay on the VM.
+#
+# ADR-20260426-2 migration pattern: source local SQL credentials and
+# re-export under AZURE_SQL_* with AZURE_SQL_TRUST_CERT=yes so every
+# script's get_engine path writes to the local container.
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_gate:
+        description: "Set to 'true' to bypass gate and also run outcomes"
+        required: false
+        default: "false"
+
+env:
+  ODDS_API_KEY:  ${{ secrets.ODDS_API_KEY }}
+  NBA_PROXY_URL: ${{ secrets.NBA_PROXY_URL }}
+
+jobs:
+  game-day-mac:
+    runs-on: [self-hosted, mac-runner]
+    timeout-minutes: 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Source local SQL credentials and export as AZURE_SQL_*
+        run: |
+          set -a
+          source /Users/schnapp/sql-server.env
+          set +a
+          echo "::add-mask::$MSSQL_SA_PASSWORD"
+          echo "AZURE_SQL_SERVER=localhost,1433"        >> $GITHUB_ENV
+          echo "AZURE_SQL_DATABASE=sports-modeling"     >> $GITHUB_ENV
+          echo "AZURE_SQL_USERNAME=sa"                  >> $GITHUB_ENV
+          echo "AZURE_SQL_PASSWORD=$MSSQL_SA_PASSWORD"  >> $GITHUB_ENV
+          echo "AZURE_SQL_TRUST_CERT=yes"               >> $GITHUB_ENV
+
+      - name: Activate venv
+        run: echo "/Users/schnapp/venv/bin" >> $GITHUB_PATH
+
+      - name: Game day gate
+        id: gate
+        run: python etl/game_day_gate.py
+
+      - name: Schedule status + live box score
+        if: |
+          steps.gate.outputs.has_pregame == 'true' ||
+          steps.gate.outputs.has_live == 'true' ||
+          github.event.inputs.skip_gate == 'true'
+        run: python etl/nba_live.py
+
+      - name: Odds upcoming + intraday grading + lineup poll
+        if: |
+          steps.gate.outputs.any_active == 'true' ||
+          github.event.inputs.skip_gate == 'true'
+        run: |
+          python etl/odds_etl.py --mode upcoming --sport nba --days-ahead 1
+          python grading/grade_props.py --mode intraday
+          python etl/lineup_poll.py --hours-ahead 6
+
+      - name: Resolve overnight outcomes
+        if: github.event.inputs.skip_gate == 'true'
+        run: python grading/grade_props.py --mode outcomes
