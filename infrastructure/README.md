@@ -51,12 +51,12 @@ Workflows execute in the runner's work directory. The MCP server deliberately cl
 - Host: Schnapps-MBP, Intel i7-6820HQ, 16 GiB RAM, macOS 14.8.5 (OCLP), user `schnapp`
 - Runner version 2.334.0 at `/Users/schnapp/actions-runner/`
 - Labels: `self-hosted`, `macOS`, `X64`, `mac-runner` (custom)
-- Launchd user agent: `~/Library/LaunchAgents/actions.runner.SchnappAPI-sports-modeling.mac-runner-1.plist`, `RunAtLoad` set, no `KeepAlive` (follow-up if pilot proceeds)
+- Launchd user agent: `~/Library/LaunchAgents/actions.runner.SchnappAPI-sports-modeling.mac-runner-1.plist`, `RunAtLoad` and `KeepAlive` both set; launchd respawns the listener after a crash
 - Logs: `~/Library/Logs/actions.runner.SchnappAPI-sports-modeling.mac-runner-1/`
 - Python venv: `/Users/schnapp/venv` (Python 3.12.13) with full `etl/requirements.txt` installed
 - ODBC: Driver 18 for SQL Server (18.6.2.1) + unixODBC 2.3.14 via Microsoft Homebrew tap
 
-The Mac runner exists so workflows can target the local SQL Server container instead of Azure SQL during the migration evaluation. Only one workflow points at it today: `mac-runner-pilot.yml`, a read-only inventory check using `etl/local_db_inventory.py`. All scheduled and production workflows continue to use `runs-on: [self-hosted, schnapp-runner]`.
+The Mac runner exists so workflows can target the local SQL Server container instead of Azure SQL during the migration evaluation. Two workflows point at it today: `mac-runner-pilot.yml` (read-only inventory using `etl/local_db_inventory.py`) and `db_inventory-mac.yml` (the production `etl/db_inventory.py` script unmodified, against the local container, for parity verification). Migration pattern is documented in ADR-20260426-2: production scripts read `AZURE_SQL_*` env vars; Mac workflows source `/Users/schnapp/sql-server.env` and re-export under those names so the same script runs on either runner. All scheduled and write-path workflows continue to use `runs-on: [self-hosted, schnapp-runner]`.
 
 
 ### Flask live-data runner

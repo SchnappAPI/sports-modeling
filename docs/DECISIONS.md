@@ -984,3 +984,25 @@ Consequences:
 - The "yellow banner on /admin when maintenance_mode is on" added in commit `27fd10f` remains the in-app indicator that maintenance is active, now accurately reflecting reality after deploys ship.
 - An alternative considered and rejected: detecting SWA warmup probes by user-agent and bypassing maintenance only for them. Brittle (Azure does not document warmup user-agents), not worth the complexity given the noindex-driven safety of returning 200.
 - Another alternative considered and rejected: a confirmation prompt on the admin maintenance toggle. This adds friction without addressing the root cause; the middleware fix removes the failure mode entirely.
+
+## ADR-20260426-2 [shared][infra] Mac-runner workflow migration pattern
+Date: 2026-04-26
+
+Context: Mac-runner pilot (`mac-runner-pilot.yml`) had proven the runner-up-to-local-SQL chain end-to-end, but the pilot used a separate `local_db_inventory.py` script and `SQL_*` env vars to deliberately avoid colliding with the production `AZURE_SQL_*` vars. Migrating an actual production workflow surfaces a question the pilot deferred: how does the same Python script (built for Azure SQL) connect to the local container without source-code branching per runner? Three obstacles: (1) production scripts read `AZURE_SQL_*` env vars; the Mac runner has no such secrets defined and shouldn't, (2) Azure SQL uses a CA-signed cert so production scripts pin `TrustServerCertificate=no`, but the local container has only a self-signed cert and would fail under that pin, (3) Colima allocates 6 GiB total to the Linux VM, container limit ~5.78 GiB, but SQL Server's default `max server memory` is "all available" (2147483647) so a workload spike could OOM-kill the DB.
+
+Decision:
+
+1. **Workflow-level alias, not application-level abstraction.** Mac workflows source `/Users/schnapp/sql-server.env` and re-export `MSSQL_SA_PASSWORD` as `AZURE_SQL_PASSWORD`, plus literals `AZURE_SQL_SERVER=localhost,1433 / DATABASE=sports-modeling / USERNAME=sa`, all written into `$GITHUB_ENV`. The production script reads exactly the same env-var names on either runner and never knows which database it's hitting. Rejected alternative: defining a parallel `SQL_*` abstraction layer in `etl/db.py`. That would touch every production script and make the migration a multi-file refactor; the alias approach is one workflow YAML per migrated workflow.
+
+2. **`TrustServerCertificate` becomes env-driven, default `"no"`.** Both `etl/db_inventory.py` and `etl/db.py:_build_conn_str` (when migrated next) read `AZURE_SQL_TRUST_CERT` with default `"no"`. Default-`no` preserves Azure SQL behavior bit-exact; the Mac workflow opts in with `AZURE_SQL_TRUST_CERT=yes`. Rejected alternative: provisioning a real trusted cert in the container. Higher complexity, ongoing cert rotation, and no security gain since the connection is over the local Docker bridge to `localhost`.
+
+3. **`max server memory (MB) = 4500` on the container.** Set via `sp_configure` and persisted in the master DB inside the named volume `mssql-data` (survives container restart). Math: Colima 6 GiB total, container limit ~5.78 GiB, current SQL working set ~4 GiB; 4500 MB ≈ 4.39 GiB caps SQL's growth with ~1.4 GiB headroom for host processes. Picked 4500 over 5000 to leave room for sidecars and the Linux guest itself.
+
+4. **`KeepAlive=true` on the launchd plist.** Hard crashes of the Runner.Listener no longer require manual `launchctl load`. Combined with `RunAtLoad`, the runner is fully self-healing across reboots and crashes.
+
+Consequences:
+
+- Migrating a read-only production workflow is now ~30 lines of YAML plus zero or one source-code line (the env-var read, only the first time per script). `db_inventory-mac.yml` proved this with side-by-side parity on all eight inventory checks (exact match on five, expected drift on `upp` and `dg` matching `/docs/PRIMER`'s drift list).
+- Future write-path migrations get the same alias treatment plus whatever schema-specific care that workflow needs. The `etl/db.py:_build_conn_str` env-var read is the natural next change since most write-path scripts go through `get_engine`.
+- Production scripts gain a one-character increase in surface area (`AZURE_SQL_TRUST_CERT` env-var read) per script that needs it. Default-`no` means VM behavior is unchanged.
+- `etl/db_inventory.py` had a latent SQL bug (unqualified `sport_key` in a multi-table JOIN) that surfaced when the script first ran in months; fixed in the same session, see CHANGELOG `[shared][etl]` entry of 2026-04-26.
