@@ -1,12 +1,10 @@
-import { cookies } from 'next/headers';
 import HomeHub from './HomeHub';
 
-// Server component. Checks the admin bypass cookie server-side so the
-// "admin" link can be rendered conditionally without exposing it to
-// anonymous visitors. The triple-tap AdminTrigger remains as the
-// universal escape hatch on every page.
-export default async function HomePage() {
-  const c = await cookies();
-  const showAdminLink = c.get('sb_unlock')?.value === 'go';
-  return <HomeHub showAdminLink={showAdminLink} />;
+// Home page is the sport picker. The admin link is always shown; the
+// /admin page itself is passcode-gated, so a visible link does not
+// expose anything. Earlier versions cookie-gated the link visibility
+// (sb_unlock=go), which created a bootstrap problem: a fresh device
+// had no discoverable path to admin without the triple-tap trigger.
+export default function HomePage() {
+  return <HomeHub />;
 }

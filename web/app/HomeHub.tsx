@@ -29,7 +29,7 @@ const sports = [
   },
 ];
 
-export default function HomeHub({ showAdminLink }: { showAdminLink: boolean }) {
+export default function HomeHub() {
   const router = useRouter();
 
   return (
@@ -46,26 +46,24 @@ export default function HomeHub({ showAdminLink }: { showAdminLink: boolean }) {
         position: "relative",
       }}
     >
-      {showAdminLink && (
-        <a
-          href="/admin"
-          style={{
-            position: "absolute",
-            top: "calc(env(safe-area-inset-top, 0px) + 16px)",
-            right: 16,
-            color: "#666",
-            fontSize: 11,
-            letterSpacing: "0.15em",
-            textTransform: "uppercase",
-            textDecoration: "none",
-            padding: "6px 10px",
-            border: "1px solid #222",
-            borderRadius: 6,
-          }}
-        >
-          admin
-        </a>
-      )}
+      <a
+        href="/admin"
+        style={{
+          position: "absolute",
+          top: "calc(env(safe-area-inset-top, 0px) + 16px)",
+          right: 16,
+          color: "#666",
+          fontSize: 11,
+          letterSpacing: "0.15em",
+          textTransform: "uppercase",
+          textDecoration: "none",
+          padding: "6px 10px",
+          border: "1px solid #222",
+          borderRadius: 6,
+        }}
+      >
+        admin
+      </a>
 
       <p
         style={{
