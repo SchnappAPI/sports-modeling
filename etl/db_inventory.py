@@ -30,7 +30,7 @@ SELECT 'dg_archive', COUNT(*) FROM common.daily_grades_archive
 """)
 
 p("player_props coverage by sport", """
-SELECT sport_key,
+SELECT pp.sport_key,
     MIN(CAST(egm.game_date AS DATE)) AS min_date,
     MAX(CAST(egm.game_date AS DATE)) AS max_date,
     COUNT(DISTINCT egm.game_id) AS games
